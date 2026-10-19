@@ -47,14 +47,15 @@ How to write for the worker model (assume it is strong at implementation, weak a
   on your task branch; reading any file in the repo.
 
 **You must not run:**
-- Network access or package installs (`pip install`, `npm install`, `curl`, ...) unless allowed here: <none>.
+- Downloads or package installs (`pip install`, `npm install`, `curl`, ...) unless allowed here: <none>.
+  (Network for running and testing the code, e.g. local sockets, is fine when `worker.network_access` is on.)
 - `git push`, `merge`, `rebase`, `reset --hard`, `checkout`/`switch` to another branch, `clean`, deleting
   files you were not told to delete; starting servers or other agents.
 
 **When to ask** (approval prompt or "blocked" report), and only then:
 - a code or logic blocker: a step doesn't match the code, the plan is ambiguous, a test fails for a
   reason the plan doesn't cover -> stop and report "blocked" with the exact reason;
-- a command needs to go outside your worktree or sandbox (write elsewhere, network, install, a
+- a command needs to go outside your worktree or sandbox (write elsewhere, download, install, a
   blocked permission) -> ask for approval, or report "blocked" with the command and the error.
 Everything else allowed above (edits, builds, tests, read-only commands in your worktree): just do it,
 don't ask. Never work around a block.

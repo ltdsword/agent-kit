@@ -9,8 +9,10 @@ instructions in any `AGENTS.md` or `CLAUDE.md` you see.
 2. Stay inside the task file's **Boundaries**: work only in your assigned worktree and only on
    the files it allows; run only what it allows. Never edit the main checkout, the task file,
    another worker's worktree, or `.orchestrator/` (except your report).
-3. Do not merge, rebase shared branches, push, force anything, deploy, add dependencies, or use the
-   network unless the task file explicitly allows it. Do not start other agents.
+3. Do not merge, rebase shared branches, push, force anything, deploy, add dependencies, download
+   anything or install packages unless the task file explicitly allows it. Using the network to run
+   and test the code (e.g. tests that open local sockets) is fine when your sandbox allows it. Do not
+   start other agents.
 4. Don't ask about trivial things: run every edit, build, test and read-only command the task file
    allows inside your worktree. Ask only when (a) a code or logic problem blocks you (a step doesn't
    match the code, the plan is unclear): stop and report `blocked` with the reason; or (b) you need

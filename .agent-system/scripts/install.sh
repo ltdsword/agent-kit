@@ -87,7 +87,9 @@ cur = json.load(open(path)) if os.path.exists(path) else {}
 perms = cur.setdefault("permissions", {})
 deny = perms.setdefault("deny", [])
 # rules for the removed `decide` script / `decision answer` command (answers now come through chat)
-obsolete = [r for r in deny if "scripts/decide" in r or "scheduler.py decision answer" in r]
+obsolete = [r for r in deny if "scripts/decide" in r or "scheduler.py decision answer" in r
+            or r in ("Write(.orchestrator/**/state.json)", "Write(.orchestrator/**/decisions/**)")]
+# (Claude Code ignores Write(path) deny rules: Edit(path) rules cover every file-editing tool.)
 for r in obsolete:
     deny.remove(r)
 added = [r for r in json.load(open(tpl))["permissions"]["deny"] if r not in deny]
@@ -264,7 +266,7 @@ PY
   echo "done. Next, in $dest:"
   echo "  1. fill in the TODOs at the top of CLAUDE.md; check gate commands and writable_dirs in .agent-system/config.json"
   echo "  2. .agent-system/scripts/doctor.sh"
-  echo "  3. start Herdr there and launch the orchestrator as shown above (\`agent-kit start\` arrives in phase 3)"
+  echo "  3. agent-kit start   (opens Herdr and launches the orchestrator)"
 }
 
 cmd_update() {

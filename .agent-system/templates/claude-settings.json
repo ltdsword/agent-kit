@@ -2,9 +2,7 @@
   "permissions": {
     "deny": [
       "Edit(.orchestrator/**/state.json)",
-      "Write(.orchestrator/**/state.json)",
-      "Edit(.orchestrator/**/decisions/**)",
-      "Write(.orchestrator/**/decisions/**)"
+      "Edit(.orchestrator/**/decisions/**)"
     ]
   }
 }

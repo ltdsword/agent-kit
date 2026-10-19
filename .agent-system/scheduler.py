@@ -742,7 +742,12 @@ class Scheduler:
         for d in w.get("writable_dirs", []):  # build-tool caches, e.g. ~/.gradle
             args += ["--add-dir", str(Path(d).expanduser())]
         if w.get("trust_worktree"):
-            args += ["-c", f'projects."{worktree}".trust_level="trusted"']
+            # For this run only (not saved). Codex applies trust to the git repository root for a worktree,
+            # so trust the repo root too, or the worker stops at a "Trust this folder?" prompt.
+            for path in dict.fromkeys([worktree, str(self.project_root)]):
+                args += ["-c", f'projects."{path}".trust_level="trusted"']
+        if w.get("network_access"):  # e.g. tests that open sockets; Codex cannot limit this to localhost
+            args += ["-c", "sandbox_workspace_write.network_access=true"]
         return args
 
     @staticmethod
@@ -962,7 +967,9 @@ class Scheduler:
             "- If a step does not match the code, or anything is unclear, stop and write the report with",
             '  status "blocked" and the exact reason. Do not guess.',
             "- Stay inside the file's Boundaries: edit only what it allows, run only what it allows.",
-            "- No network, no new dependencies, no push/merge/rebase, no other agents.",
+            ("- Network is allowed for running and testing (e.g. local sockets), but no downloads or package "
+             "installs," if self.cfg["worker"].get("network_access") else "- No network,")
+            + " no new dependencies, no push/merge/rebase, no other agents.",
             "- Don't ask about trivial things: run every edit, build, test and read-only command the file",
             "  allows inside your worktree. Ask only for a code/logic blocker (report status \"blocked\") or",
             "  to go outside your worktree/sandbox (approval prompt). Never work around a block.",
@@ -2079,7 +2086,8 @@ def doctor(workspace_root: Path) -> list[dict]:
         except M.ModelError as e:
             add(f"{role}-model", False, f"{r['kind']}/{r['model']}: {e} (fix: agent-kit config)")
     wkind = cfg["worker"].get("kind", "codex")
-    add("worker-safety", wkind == "codex", f"worker program {wkind}: {M.sandbox_note(wkind)}",
+    net = "; network on (worker.network_access)" if wkind == "codex" and cfg["worker"].get("network_access") else ""
+    add("worker-safety", wkind == "codex", f"worker program {wkind}: {M.sandbox_note(wkind)}{net}",
         "ok" if wkind == "codex" else "warn")
     project = project_root_for(workspace_root, cfg)
     if project != workspace_root.resolve():  # workspace mode: the repo is project.path, never the workspace

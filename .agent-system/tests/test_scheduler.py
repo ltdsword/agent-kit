@@ -218,6 +218,15 @@ class TestConfig(Base):
             self.assertNotIn("danger-full-access", args)
             self.assertNotIn("--dangerously-bypass-approvals-and-sandbox", args)
 
+    def test_codex_trusts_worktree_and_repo_root_for_the_run_and_network_switch(self):
+        self.cfg["worker"].update(trust_worktree=True, network_access=True)
+        args = self.new_scheduler().codex_args("/wt", "r1")
+        self.assertIn('projects."/wt".trust_level="trusted"', args)
+        self.assertIn(f'projects."{self.repo.resolve()}".trust_level="trusted"', args)
+        self.assertIn("sandbox_workspace_write.network_access=true", args)
+        self.cfg["worker"].update(network_access=False)
+        self.assertNotIn("sandbox_workspace_write.network_access=true", self.new_scheduler().codex_args("/wt", "r1"))
+
 
 class TestDispatch(Base):
     def test_independent_concurrent_dependent_waits_for_merge(self):
@@ -1252,6 +1261,7 @@ class TestInstall(Base):
         self.assertEqual(perms["additionalDirectories"], [str(self.repo.resolve())])
         self.assertIn("Edit(.orchestrator/**/state.json)", perms["deny"])
         self.assertFalse([r for r in perms["deny"] if "decide" in r or "decision answer" in r])
+        self.assertFalse([r for r in perms["deny"] if r.startswith("Write(")])  # ignored by Claude Code
         claude = (ws / "CLAUDE.md").read_text()
         self.assertTrue(claude.startswith("# repo\n"))
         self.assertEqual(claude.count("<!-- agent-system:orchestrator:begin -->"), 1)
@@ -1305,7 +1315,7 @@ class TestInstall(Base):
         (self.ws / ".agent-system" / "scheduler.py").write_text("# stale\n")
         settings = self.ws / ".claude" / "settings.json"
         old = json.loads(settings.read_text())
-        old["permissions"]["deny"] += ["Bash(.agent-system/scripts/decide)",
+        old["permissions"]["deny"] += ["Write(.orchestrator/**/state.json)", "Bash(.agent-system/scripts/decide)",
                                        "Bash(python3 .agent-system/scheduler.py decision answer:*)", "Bash(rm:*)"]
         settings.write_text(json.dumps(old))
         (self.ws / ".agent-system" / "scripts" / "decide").write_text("#!/bin/sh\n")

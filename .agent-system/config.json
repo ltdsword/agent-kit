@@ -11,6 +11,7 @@
     "sandbox": "workspace-write",
     "approval_policy": "on-request",
     "trust_worktree": true,
+    "network_access": true,
     "writable_dirs": []
   },
   "pool": {

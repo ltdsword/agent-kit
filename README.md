@@ -162,8 +162,11 @@ the same). Use that only for repos you own.
 ### Safety rules built in
 
 - **How a worker is contained depends on its program** (`doctor` reports it as `worker-safety`):
-  - **Codex:** runs in its `workspace-write` sandbox with `on-request` approvals and no network;
-    `danger-full-access` is rejected by config validation.
+  - **Codex:** runs in its `workspace-write` sandbox with `on-request` approvals, so it writes only
+    inside its folders; `danger-full-access` is rejected by config validation. Network is on by default
+    (`worker.network_access: true`), so tests that open sockets work. Codex cannot limit it to localhost,
+    so set it to `false` to block network entirely. Downloads and package installs stay forbidden by the
+    task file's Boundaries.
   - **Claude Code:** runs in `--permission-mode auto` (Claude Code's checker approves safe actions and
     stops risky ones), with no OS sandbox.
   - **Unverified programs:** no sandbox is assumed; only the worktree, the task's Boundaries and the
@@ -452,7 +455,7 @@ to type), and waits for your answer. Only these reach you:
 - any change to requirements, scope, acceptance criteria, public APIs/schemas, dependencies,
   security-sensitive behavior, data or migrations, or anything irreversible;
 - **worker approval prompts that step outside the worker's worktree or sandbox** (writing elsewhere,
-  network, installs, push, deleting, or anything the task forbids): if you approve, Claude types the
+  downloads, installs, push, deleting, or anything the task forbids): if you approve, Claude types the
   matching key into the worker's prompt;
 - a final-gate failure or integration conflict whose fix is not clear-cut;
 - **merging and pushing the result** (`finish ask`): always yours, whatever `decisions.require_user_for` says.
@@ -482,7 +485,8 @@ needs in `worker.writable_dirs` (section 5).
 | `orchestrator.launch_args`, `worker.launch_args` | Optional: the exact command-line arguments for an unverified program (`{model}`, `{effort}`, `{cwd}` are filled in) |
 | `worker.permission_mode` | Optional, Claude Code workers only: replaces `auto` (e.g. `acceptEdits`) |
 | `worker.profile`, `sandbox`, `approval_policy` | Codex workers only: profile `worker`, `workspace-write`, `on-request` |
-| `worker.trust_worktree` | Mark the worker's own worktree as trusted so Codex skips its trust dialog |
+| `worker.trust_worktree` | Codex workers: trust the worktree and the repo root for that run only (not saved), so Codex skips its "Trust this folder?" dialog |
+| `worker.network_access` | Codex workers: allow network inside the sandbox (default `true`, needed for tests that open sockets; Codex can't limit it to localhost). `false` blocks it |
 | `worker.writable_dirs` | Extra folders workers may write (build caches). `~`, `/`, `~/.ssh`, `~/.codex`, `~/.config`, ... are rejected |
 | `pool.size` / `pool.slots` | 1-3 worker slots |
 | `pool.worktree_root` | Where worktrees go: `worktrees` (workspace mode) or `../{repo_name}.agent-worktrees` (in-repo) |
@@ -543,6 +547,8 @@ agent-kit update --folder=~/Code/myrepo              # roll it out to each works
 | `agent-kit config`: "unknown model" | Pick from the table it prints (on a terminal, type the number), or use `<program>/<model>` for an unverified program |
 | Worker: `bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted` | Add the bubblewrap AppArmor profile (GUIDE.md Part 2, step 2) |
 | Worker's build fails on a lock file in `~/.gradle` (or another cache) | Add that cache folder to `worker.writable_dirs` |
+| Worker's tests fail with `PermissionError: Operation not permitted` on sockets | Codex's sandbox blocks network: set `worker.network_access: true` in `config.json` |
+| Codex worker stuck at "Trust this folder?" | Keep `worker.trust_worktree: true` (the kit trusts the worktree and repo root for that run); if it still asks, answer it as a worker approval |
 | Report says `committed: false`, `index.lock: Read-only file system` | Expected: the sandbox keeps `.git` read-only. Review, then `commit-task` |
 | A worker sits `blocked` | It wants an approval. Inside its worktree and allowed by the task: Claude approves it. Outside the worktree/sandbox: Claude asks you |
 | `collect` says `pending` / `ambiguous` | No report yet / report disagrees with git: inspect `worktrees/worker-N` |
