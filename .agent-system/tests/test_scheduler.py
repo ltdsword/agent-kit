@@ -930,6 +930,63 @@ class TestInstall(Base):
         self.assertEqual(cfg["worker"]["writable_dirs"], ["~/.gradle"])
         self.assertIn("`./gradlew build`", (self.ws / "CLAUDE.md").read_text())
 
+    def make_repo(self, name, files):
+        repo = Path(self.tmp.name) / name
+        repo.mkdir()
+        for rel, text in files.items():
+            (repo / rel).write_text(text)
+        sh(repo, "git", "init", "-q", "-b", "main")
+        sh(repo, "git", "add", "-A")
+        sh(repo, "git", "commit", "-q", "-m", "base")
+        return repo
+
+    def test_detects_python_and_cpp(self):
+        cases = {  # repo files -> (Stack line, Build line fragment, writable_dirs)
+            "py": ({"requirements-dev.txt": "ruff\n"}, "Python", "`python3 -m pytest`", []),
+            "cmake": ({"CMakeLists.txt": "project(x)\n", "main.cpp": "int main(){}\n"}, "C/C++ (CMake)",
+                      "`cmake -S . -B build", []),
+            "cmake-conan": ({"CMakeLists.txt": "project(x)\n", "conanfile.txt": "", "a.cc": ""},
+                            "C/C++ (CMake), C/C++ (Conan)", "ctest --test-dir build`", ["~/.conan2"]),
+            "make-c": ({"Makefile": "all:\n\ttrue\n", "main.c": "int main(){}\n"}, "C/C++ (make)",
+                       "`make && make test`", []),
+            "make-only": ({"Makefile": "all:\n\ttrue\n", "README.md": "x\n"}, "TODO", "TODO", []),
+        }
+        for name, (files, stack, build, dirs) in cases.items():
+            with self.subTest(name):
+                self.make_repo(name, files)
+                self.kit("create", f"--folder={name}")
+                ws = Path(self.tmp.name) / f"{name}.workspace"
+                claude = (ws / "CLAUDE.md").read_text()
+                self.assertIn(f"- Stack: {stack}\n", claude)
+                self.assertIn(build, claude)
+                cfg = json.loads((ws / ".agent-system" / "config.json").read_text())
+                self.assertEqual(cfg["worker"]["writable_dirs"], dirs)
+
+    def verify(self, repo):
+        p = subprocess.run(["bash", str(self.INSTALL.parent / "verify.sh"), "--dir", str(repo)],
+                           capture_output=True, text=True)
+        return p.returncode, p.stdout
+
+    def test_verify_python_and_make(self):
+        rc, out = self.verify(self.make_repo("py", {"requirements.txt": "", "test_x.py": "def test_x():\n    pass\n"}))
+        self.assertEqual(rc, 0, out)
+        try:
+            import pytest  # noqa: F401
+            self.assertIn("PASS  pytest", out)
+        except ImportError:
+            self.assertIn("SKIP  pytest - Python project but pytest is not installed", out)
+        rc, out = self.verify(self.make_repo("cc", {"main.c": "int main(void){return 0;}\n",
+                                                    "Makefile": "all:\n\t@echo built\ntest:\n\t@echo tested\n"}))
+        self.assertEqual(rc, 0, out)
+        self.assertIn("PASS  make\n", out)
+        self.assertIn("PASS  make test", out)
+        rc, out = self.verify(self.make_repo("cc-bad", {"main.c": "", "Makefile": "all:\n\t@exit 3\n"}))
+        self.assertNotEqual(rc, 0, out)
+        self.assertNotIn("make test", out)  # stops after a failed build
+        rc, out = self.verify(self.make_repo("mk", {"Makefile": "all:\n\t@exit 3\n"}))
+        self.assertEqual(rc, 0, out)  # no C/C++ sources: the Makefile is not run
+        self.assertNotIn("----- make", out)
+
     def test_dry_run_writes_nothing(self):
         out = self.kit("create", "--folder=repo", "--dry-run").stdout
         self.assertIn("[dry-run]", out)

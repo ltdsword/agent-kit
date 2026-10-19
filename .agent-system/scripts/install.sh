@@ -145,14 +145,28 @@ cmd_create() {
 import json, os, sys
 tpl, dest, name, repo = sys.argv[1:]
 cfg = json.load(open(tpl))
-has = lambda *files: any(os.path.exists(os.path.join(repo, f)) for f in files)
-stacks = [("~/.gradle", ("build.gradle", "build.gradle.kts", "settings.gradle", "settings.gradle.kts", "gradlew"),
-           "./gradlew build"),
-          ("~/.m2", ("pom.xml",), "mvn verify"),
-          ("~/.npm", ("package.json",), "npm test"),
-          ("~/go/pkg/mod", ("go.mod",), "go test ./..."),
-          ("~/.cargo", ("Cargo.toml",), "cargo test")]
-found = [(d, cmd) for d, files, cmd in stacks if has(*files)]
+import glob, subprocess
+has = lambda *pats: any(glob.glob(os.path.join(repo, p)) for p in pats)
+c_sources = subprocess.run(["git", "-C", repo, "ls-files", "*.c", "*.cc", "*.cpp", "*.cxx", "*.h", "*.hh", "*.hpp"],
+                           capture_output=True, text=True).stdout.strip() != ""
+# (stack, worker-writable cache dir or None, marker files, build/test command or None)
+stacks = [("Java/Gradle", "~/.gradle", ("build.gradle", "build.gradle.kts", "settings.gradle", "settings.gradle.kts",
+                                        "gradlew"), "./gradlew build"),
+          ("Java/Maven", "~/.m2", ("pom.xml",), "mvn verify"),
+          ("Node", "~/.npm", ("package.json",), "npm test"),
+          ("Go", "~/go/pkg/mod", ("go.mod",), "go test ./..."),
+          ("Rust", "~/.cargo", ("Cargo.toml",), "cargo test"),
+          ("Python", None, ("pyproject.toml", "setup.py", "setup.cfg", "requirements*.txt", "pytest.ini", "tox.ini"),
+           "python3 -m pytest"),
+          ("C/C++ (CMake)", None, ("CMakeLists.txt",),
+           "cmake -S . -B build && cmake --build build && ctest --test-dir build"),
+          ("C/C++ (Conan)", "~/.conan2", ("conanfile.txt", "conanfile.py"), None),
+          ("C/C++ (vcpkg)", "~/.cache/vcpkg", ("vcpkg.json",), None)]
+found = [(name, d, cmd) for name, d, files, cmd in stacks if has(*files)]
+if c_sources and has("Makefile", "makefile", "GNUmakefile") and not has("CMakeLists.txt"):
+    found.append(("C/C++ (make)", None, "make && make test"))
+elif c_sources and not any(n.startswith("C/C++") for n, _, _ in found):
+    found.append(("C/C++", None, None))
 out = {}
 for k, v in cfg.items():  # keep the template's key order; project goes right after the header
     if k == "project":
@@ -162,21 +176,23 @@ for k, v in cfg.items():  # keep the template's key order; project goes right af
         out["project"] = {"path": name}
 out.setdefault("project", {"path": name})
 out["pool"]["worktree_root"] = "worktrees"
-out["worker"]["writable_dirs"] = [d for d, _ in found]
+dirs = [d for _, d, _ in found if d]
+out["worker"]["writable_dirs"] = dirs
 with open(os.path.join(dest, ".agent-system", "config.json"), "w") as f:
     json.dump(out, f, indent=2)
     f.write("\n")
-build = " / ".join(f"`{c}`" for _, c in found) or "TODO"
+build = " / ".join(f"`{c}`" for _, _, c in found if c) or "TODO"
+stack = ", ".join(n for n, _, _ in found) or "TODO"
 claude = os.path.join(dest, "CLAUDE.md")
 if not os.path.exists(claude):
     with open(claude, "w") as f:
         f.write(f"# {name}\n\n"
                 f"- This folder is the AI workspace (`.agent-system/docs/WORKSPACE-SETUP.md`); the repo is the\n"
                 f"  symlink `{name}/` -> `../{name}`. Never write AI tooling files into the repo.\n"
-                f"- Stack: TODO\n"
+                f"- Stack: {stack}\n"
                 f"- Build and test (run inside `{name}/`): {build}\n"
                 f"- Generated code not to edit: TODO\n\n")
-print(f"config.json: project.path={name}, writable_dirs={[d for d, _ in found]}")
+print(f"config.json: project.path={name}, stack={stack}, writable_dirs={dirs}")
 PY
     [ -e "$dest/.gitignore" ] || printf '.orchestrator/\nworktrees/\n**/__pycache__/\n' > "$dest/.gitignore"
   fi

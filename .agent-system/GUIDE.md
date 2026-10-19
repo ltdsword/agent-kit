@@ -235,7 +235,10 @@ python3 .agent-system/scheduler.py cleanup --run r1 --remove-worktrees
 
 ## Part 6 - Reusing the kit in another project
 
-The kit has no project-specific paths. `verify.sh` detects Gradle, Maven, npm, Go, Cargo, and pytest.
+The kit has no project-specific paths. `verify.sh` detects Gradle, Maven, npm, Go, Cargo,
+Python (`pyproject.toml`, `setup.py`, `requirements*.txt`, ...: runs pytest, or reports SKIP when pytest is
+not installed) and C/C++ (CMake, built in a temp dir + `ctest`; or `make` + `make test`/`check` when the
+repo has C/C++ sources).
 
 The kit's home is `~/Code/agent-kit`; the `agent-kit` command copies it.
 

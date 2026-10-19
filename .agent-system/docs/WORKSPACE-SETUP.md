@@ -81,7 +81,9 @@ repo's top folder) and creates the new folder `<repo>.workspace` next to it, wit
 - the symlink `myrepo -> ../myrepo`, and `gen-tasks/`, `worktrees/`, `notes/`, a local `.gitignore`;
 - `.agent-system/` copied from the kit home, with `config.json` set to `project.path: myrepo`,
   `worktree_root: worktrees`, and `worker.writable_dirs` from the repo's build files (Gradle `~/.gradle`,
-  Maven `~/.m2`, npm `~/.npm`, Go `~/go/pkg/mod`, Cargo `~/.cargo`);
+  Maven `~/.m2`, npm `~/.npm`, Go `~/go/pkg/mod`, Cargo `~/.cargo`, Conan `~/.conan2`, vcpkg
+  `~/.cache/vcpkg`; Python, CMake and make need none). The detected stack and build/test command
+  (e.g. `python3 -m pytest`, CMake + `ctest`, `make && make test`) go into the `CLAUDE.md` notes;
 - `.claude/agents/scout.md` and `.claude/settings.json` (deny rules + `additionalDirectories` = real repo path);
 - `CLAUDE.md` (project notes with TODOs + orchestrator section) and `AGENTS.md` (worker section).
 

@@ -30,6 +30,7 @@ run() {  # run <label> <cmd...>
   echo "----- $label: $*"
   "$@"; local rc=$?
   if [ $rc -eq 0 ]; then pass "$label"; else fail "$label" $rc; fi
+  return $rc
 }
 
 echo "verify.sh mode=$MODE dir=$DIR"
@@ -74,9 +75,41 @@ if [ -f Cargo.toml ] && command -v cargo >/dev/null; then
   run "cargo test" cargo test
 fi
 
-# --- Python application (pyproject / pytest)
-if { [ -f pyproject.toml ] || [ -f pytest.ini ] || [ -f setup.cfg ]; } && command -v pytest >/dev/null; then
-  run "pytest" pytest -q
+# --- Python (pyproject / setup / requirements / pytest or tox config)
+if [ -f pyproject.toml ] || [ -f pytest.ini ] || [ -f setup.cfg ] || [ -f setup.py ] || [ -f tox.ini ] \
+   || compgen -G 'requirements*.txt' >/dev/null; then
+  if python3 -c 'import pytest' 2>/dev/null; then
+    echo "----- pytest: python3 -m pytest -q -p no:cacheprovider"
+    python3 -m pytest -q -p no:cacheprovider; rc=$?   # no .pytest_cache left in the worktree
+    if [ $rc -eq 5 ]; then
+      skip "pytest" "no tests collected"
+    else
+      RAN=$((RAN + 1))
+      if [ $rc -eq 0 ]; then pass "pytest"; else fail "pytest" $rc; fi
+    fi
+  else
+    skip "pytest" "Python project but pytest is not installed (python3 -m pip install pytest)"
+  fi
+fi
+
+# --- C / C++ (CMake builds out of tree in a temp dir; a Makefile counts only next to C/C++ sources)
+if [ -f CMakeLists.txt ]; then
+  if command -v cmake >/dev/null; then
+    BUILD="$(mktemp -d)"
+    run "cmake configure" cmake -S . -B "$BUILD" -DCMAKE_BUILD_TYPE=Debug \
+      && run "cmake build" cmake --build "$BUILD" -j "$(nproc 2>/dev/null || echo 2)" \
+      && if command -v ctest >/dev/null; then run "ctest" ctest --test-dir "$BUILD" --output-on-failure; fi
+    rm -rf "$BUILD"
+  else
+    skip "cmake" "CMakeLists.txt found but cmake is not installed"
+  fi
+elif { [ -f Makefile ] || [ -f makefile ] || [ -f GNUmakefile ]; } && command -v make >/dev/null \
+     && git ls-files '*.c' '*.cc' '*.cpp' '*.cxx' '*.h' '*.hh' '*.hpp' 2>/dev/null | grep -q .; then
+  if run "make" make -j "$(nproc 2>/dev/null || echo 2)"; then
+    for t in test check; do
+      if make -n "$t" >/dev/null 2>&1; then run "make $t" make "$t"; break; fi
+    done
+  fi
 fi
 
 # --- Orchestration scaffold self-test (full mode, when present)
