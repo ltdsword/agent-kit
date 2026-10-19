@@ -1,0 +1,936 @@
+"""Deterministic scheduler tests: real git in temp repos, fake Herdr, zero model API calls.
+
+Run: python3 -m unittest discover -s .agent-system/tests -v
+"""
+import copy
+import json
+import os
+import subprocess
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+from unittest import mock
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+import scheduler as S  # noqa: E402
+
+REAL_CONFIG = json.loads((Path(__file__).resolve().parents[1] / "config.json").read_text())
+PY_OK = [sys.executable, "-c", "raise SystemExit(0)"]
+PY_FAIL = [sys.executable, "-c", "raise SystemExit(3)"]
+READY_CHECKLIST = {"preserve": "UserHandler API", "contracts": "packet sections 5", "interactions": "T2 after T1",
+                   "testing": "unit tests + gradle build", "assumptions": "none unsafe"}
+
+
+def sh(cwd, *args):
+    return subprocess.run(list(args), cwd=cwd, check=True, capture_output=True, text=True).stdout.strip()
+
+
+class FakeHerdr(S.Herdr):
+    def __init__(self):
+        super().__init__(binary="herdr-fake")
+        self.calls, self.live, self._n = [], {}, 0
+
+    def available(self):
+        return True
+
+    def workspace_create(self, cwd, label):
+        self._n += 1
+        self.calls.append(("workspace_create", cwd, label))
+        return f"w{self._n}", f"w{self._n}:p1"
+
+    def workspace_close(self, ws):
+        self.calls.append(("workspace_close", ws))
+
+    def agent_start(self, name, pane, agent_args, timeout_ms):
+        self.calls.append(("agent_start", name, pane, list(agent_args)))
+        self.live[name] = "idle"
+        return {}
+
+    def agent_prompt(self, name, text, timeout_ms):
+        self.calls.append(("agent_prompt", name, text))
+        self.live[name] = "working"
+        return {}
+
+    def agent_get(self, name):
+        if name not in self.live:
+            raise S.SchedulerError("agent not found")
+        return {"result": {"name": name, "state": self.live[name]}}
+
+
+class Base(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        env = {"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.invalid",
+               "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@example.invalid",
+               "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"}
+        patcher = mock.patch.dict(os.environ, env)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.repo = Path(self.tmp.name) / "repo"
+        self.repo.mkdir()
+        sh(self.repo, "git", "init", "-q", "-b", "main")
+        (self.repo / ".gitignore").write_text(".orchestrator/\n")
+        (self.repo / "app.txt").write_text("base\n")
+        sh(self.repo, "git", "add", "-A")
+        sh(self.repo, "git", "commit", "-q", "-m", "base")
+        self.base_sha = sh(self.repo, "git", "rev-parse", "HEAD")
+        self.cfg = copy.deepcopy(REAL_CONFIG)
+        self.cfg.pop("project", None)  # in-repo mode by default; TestWorkspaceMode sets its own
+        self.cfg["pool"]["worktree_root"] = str(Path(self.tmp.name) / "wt")
+        self.cfg["gate"]["post_merge_check"] = PY_OK
+        self.cfg["gate"]["verify_cmd"] = PY_OK
+        self.herdr = FakeHerdr()
+        self.s = self.new_scheduler()
+        for tid in ("T1", "T2", "T3"):
+            p = self.repo / "packets" / f"{tid}.md"
+            p.parent.mkdir(exist_ok=True)
+            p.write_text(f"# packet {tid}\n")
+
+    def new_scheduler(self):
+        return S.Scheduler(self.repo, cfg=self.cfg, herdr=self.herdr)
+
+    @staticmethod
+    def task(tid, deps=(), trivial=False, owned=None):
+        return {"id": tid, "title": f"task {tid}", "depends_on": list(deps),
+                "owned_paths": owned or [f"{tid.lower()}/"], "acceptance": [f"{tid} file exists"],
+                "packet": f"packets/{tid}.md", "trivial": trivial}
+
+    def dag(self, run="r1", trivial=True):
+        return self.s.create_run(run, [self.task("T1", trivial=trivial), self.task("T2", ["T1"], trivial),
+                                       self.task("T3", trivial=trivial)])
+
+    def make_ready(self, run="r1"):
+        ev = Path(self.tmp.name) / "dossier.md"
+        ev.write_text("# dossier\n- app.txt:1 base\n")
+        self.s.research_round(run, ["what owns app.txt?"], ev)
+        self.s.research_readiness(run, "READY", READY_CHECKLIST, [])
+
+    def worker_commit(self, run, tid, content="done\n", report_overrides=None, commit=True):
+        t = self.s.store.load(run)["tasks"][tid]
+        wt = Path(t["worktree"])
+        d = wt / tid.lower()
+        d.mkdir(exist_ok=True)
+        (d / "out.txt").write_text(content)
+        commits = []
+        if commit:
+            sh(wt, "git", "add", "-A")
+            sh(wt, "git", "commit", "-q", "-m", f"{tid}: work")
+            out = sh(wt, "git", "rev-list", "--reverse", f"{t['base_sha']}..HEAD")
+            commits = out.split()  # contract: every task-branch commit since base_sha
+        report = {"task_id": tid, "status": "done", "base_sha": t["base_sha"],
+                  "head_sha": sh(wt, "git", "rev-parse", "HEAD"), "commits": commits, "committed": commit,
+                  "files_changed": [f"{tid.lower()}/out.txt"],
+                  "test_results": [{"command": "test -f out.txt", "exit_code": 0, "log": None}],
+                  "risks": [], "not_done": []}
+        report.update(report_overrides or {})
+        (self.s.store.run_dir(run) / "reports" / f"{tid}.json").write_text(json.dumps(report))
+        return report
+
+    def user_decides(self, run, kind, task=None, choice="A"):
+        """Open a decision as Opus would and answer it as the user would; returns its id."""
+        did = self.s.decision_ask(run, kind, f"{kind}?", "what happened", ["A=go ahead", "B=stop"], task,
+                                  "A")["decision"]
+        self.s.decision_answer(run, did, choice, "ok", by="tester")
+        return did
+
+    def drive_to_merged(self, run, tid):
+        self.worker_commit(run, tid)
+        self.assertEqual(self.s.collect(run, tid)["result"], "REVIEW")
+        self.s.mark_reviewed(run, tid, "PASS")
+        return self.s.integrate(run)
+
+
+class TestDag(Base):
+    def test_cycle_missing_duplicate_self(self):
+        with self.assertRaisesRegex(S.SchedulerError, "cycle"):
+            S.validate_tasks([self.task("T1", ["T2"]), self.task("T2", ["T1"])], 3)
+        with self.assertRaisesRegex(S.SchedulerError, "unknown task"):
+            S.validate_tasks([self.task("T1", ["T9"])], 3)
+        with self.assertRaisesRegex(S.SchedulerError, "duplicate"):
+            S.validate_tasks([self.task("T1"), self.task("T1")], 3)
+        with self.assertRaisesRegex(S.SchedulerError, "itself"):
+            S.validate_tasks([self.task("T1", ["T1"])], 3)
+
+    def test_task_cap(self):
+        with self.assertRaisesRegex(S.SchedulerError, "1..3"):
+            S.validate_tasks([self.task(f"T{i}") for i in range(1, 5)], 3)
+        with self.assertRaisesRegex(S.SchedulerError, "1..3"):
+            S.validate_tasks([], 3)
+
+    def test_invalid_transitions_rejected(self):
+        st = self.dag()
+        with self.assertRaisesRegex(S.SchedulerError, "invalid task transition"):
+            S.transition_task(st, "T2", "MERGED")  # PENDING -> MERGED
+        with self.assertRaisesRegex(S.SchedulerError, "invalid task transition"):
+            S.transition_task(st, "T1", "PASSED")  # READY -> PASSED
+        with self.assertRaisesRegex(S.SchedulerError, "invalid worker transition"):
+            S.transition_worker(st, "worker-1", "IDLE")  # IDLE -> IDLE
+
+
+class TestConfig(Base):
+    def test_every_slot_is_luna_xhigh(self):
+        self.assertEqual(S.validate_config(REAL_CONFIG), [])
+        for slot, v in S.resolve_worker_settings(REAL_CONFIG).items():
+            self.assertEqual((v["model"], v["reasoning_effort"]), ("gpt-6-luna", "xhigh"), slot)
+
+    def test_downgrade_and_fallback_rejected(self):
+        bad = copy.deepcopy(REAL_CONFIG)
+        bad["worker"]["reasoning_effort"] = "high"
+        self.assertTrue(any("xhigh" in e for e in S.validate_config(bad)))
+        bad = copy.deepcopy(REAL_CONFIG)
+        bad["worker"]["fallback_model"] = "gpt-6.1-sol"
+        self.assertTrue(any("fallback" in e for e in S.validate_config(bad)))
+        bad = copy.deepcopy(REAL_CONFIG)
+        bad["pool"]["size"] = 4
+        bad["pool"]["slots"].append("worker-4")
+        self.assertTrue(S.validate_config(bad))
+
+    def test_sample_dispatch_args_carry_model_and_effort(self):
+        self.dag()
+        out = self.s.dispatch_ready("r1", launch="herdr")
+        starts = [c for c in self.herdr.calls if c[0] == "agent_start"]
+        self.assertEqual(len(starts), len(out["dispatched"]))
+        for _, _, _, args in starts:
+            self.assertEqual(args[args.index("-m") + 1], "gpt-6-luna")
+            self.assertIn('model_reasoning_effort="xhigh"', args)
+            self.assertNotIn("danger-full-access", args)
+            self.assertNotIn("--dangerously-bypass-approvals-and-sandbox", args)
+
+
+class TestDispatch(Base):
+    def test_independent_concurrent_dependent_waits_for_merge(self):
+        self.dag()
+        out = self.s.dispatch_ready("r1", launch="herdr")
+        self.assertEqual(sorted(d["task"] for d in out["dispatched"]), ["T1", "T3"])
+        st = self.s.store.load("r1")
+        self.assertEqual(st["tasks"]["T2"]["status"], "PENDING")
+        self.assertNotEqual(st["tasks"]["T1"]["worker"], st["tasks"]["T3"]["worker"])
+        # PASSED is not enough for the dependent task
+        self.worker_commit("r1", "T1")
+        self.s.collect("r1", "T1")
+        self.s.mark_reviewed("r1", "T1", "PASS")
+        self.assertEqual(self.s.store.load("r1")["tasks"]["T2"]["status"], "PENDING")
+        self.assertEqual(self.s.dispatch_ready("r1", dry_run=True)["plan"], [])
+        res = self.s.integrate("r1")
+        self.assertEqual(res["now_ready"], ["T2"])
+        out = self.s.dispatch_ready("r1", launch="herdr")
+        self.assertEqual([d["task"] for d in out["dispatched"]], ["T2"])
+        st = self.s.store.load("r1")
+        self.assertEqual(st["tasks"]["T2"]["base_sha"], st["tasks"]["T1"]["merged_sha"])
+
+    def test_concurrency_cap_and_no_double_assignment(self):
+        self.cfg["limits"]["max_parallel"] = 2
+        self.s = self.new_scheduler()
+        self.s.create_run("r1", [self.task("T1", trivial=True), self.task("T2", trivial=True),
+                                 self.task("T3", trivial=True)])
+        out = self.s.dispatch_ready("r1", launch="none")
+        self.assertEqual(len(out["dispatched"]), 2)
+        self.assertEqual(self.s.dispatch_ready("r1", launch="none")["dispatched"], [])  # cap holds
+        st = self.s.store.load("r1")
+        holders = [w["task"] for w in st["workers"].values() if w["task"]]
+        self.assertEqual(len(holders), len(set(holders)))
+        st["workers"]["worker-3"].update(status="BUSY", task=holders[0])  # forged double lease
+        with self.assertRaises(S.SchedulerError):
+            S.validate_state(st)
+
+    def test_three_slot_cap(self):
+        self.s.create_run("r1", [self.task(t, trivial=True) for t in ("T1", "T2", "T3")])
+        out = self.s.dispatch_ready("r1", launch="none")
+        self.assertEqual(sorted(d["worker"] for d in out["dispatched"]), ["worker-1", "worker-2", "worker-3"])
+        st = self.s.store.load("r1")
+        self.assertTrue(all(w["status"] == "BUSY" for w in st["workers"].values()))
+
+    def test_missing_packet_blocks_dispatch(self):
+        (self.repo / "packets" / "T1.md").unlink()
+        self.s.create_run("r1", [self.task("T1", trivial=True)])
+        out = self.s.dispatch_ready("r1", launch="none")
+        self.assertEqual(out["dispatched"], [])
+        self.assertIn("packet missing", out["skipped"]["T1"])
+
+    def test_outside_herdr_requires_launch_none(self):
+        self.dag()
+        s = S.Scheduler(self.repo, cfg=self.cfg, herdr=S.Herdr(binary="definitely-not-herdr"))
+        with mock.patch.dict(os.environ, {"HERDR_ENV": ""}):
+            with self.assertRaisesRegex(S.SchedulerError, "HERDR_ENV"):
+                s.dispatch_ready("r1", launch="herdr")
+        self.assertEqual(self.s.store.load("r1")["tasks"]["T1"]["status"], "READY")
+
+
+class TestRepairAndMerge(Base):
+    def test_failure_retry_same_worker_then_merge(self):
+        self.s.create_run("r1", [self.task("T1", trivial=True)])
+        self.s.dispatch_ready("r1", launch="herdr")
+        st = self.s.store.load("r1")
+        wid, branch, wt = st["tasks"]["T1"]["worker"], st["tasks"]["T1"]["branch"], st["tasks"]["T1"]["worktree"]
+        self.worker_commit("r1", "T1", "buggy\n")
+        self.s.collect("r1", "T1")
+        self.assertEqual(self.s.mark_reviewed("r1", "T1", "MAJOR_FIX", "test fails")["status"], "FIX_REQUIRED")
+        (self.repo / "packets" / "T1.repair1.md").write_text("# repair\n")
+        out = self.s.repair("r1", "T1", "packets/T1.repair1.md", decision=self.user_decides("r1", "repair", "T1"))
+        self.assertTrue(out["same_session"])
+        prompts = [c for c in self.herdr.calls if c[0] == "agent_prompt"]
+        self.assertEqual(prompts[-1][1], S.Scheduler.agent_name("r1", wid))  # same session/agent
+        self.assertEqual(sum(1 for c in self.herdr.calls if c[0] == "agent_start"), 1)  # no fresh context
+        st = self.s.store.load("r1")
+        self.assertEqual((st["tasks"]["T1"]["worker"], st["tasks"]["T1"]["branch"], st["tasks"]["T1"]["worktree"]),
+                         (wid, branch, wt))
+        self.worker_commit("r1", "T1", "fixed\n")
+        self.assertEqual(self.s.collect("r1", "T1")["result"], "REVIEW")
+        self.s.mark_reviewed("r1", "T1", "PASS")
+        res = self.s.integrate("r1")
+        self.assertEqual(res["results"][0]["result"], "MERGED")
+        st = self.s.store.load("r1")
+        self.assertEqual(st["workers"][wid]["status"], "IDLE")
+        self.assertTrue((Path(st["integration_worktree"]) / "t1" / "out.txt").exists())
+        self.assertEqual(sh(self.repo, "git", "rev-parse", "main"), self.base_sha)  # user branch untouched
+        self.assertEqual(self.s.verify("r1")["run_status"], "DONE")
+
+    def test_retry_budget_exhausted_blocks(self):
+        self.s.create_run("r1", [self.task("T1", trivial=True)])
+        self.s.dispatch_ready("r1", launch="herdr")
+        (self.repo / "packets" / "rep.md").write_text("# repair\n")
+        for i in range(2):
+            self.worker_commit("r1", "T1", f"try{i}\n")
+            self.s.collect("r1", "T1")
+            self.s.mark_reviewed("r1", "T1", "MAJOR_FIX")
+            self.s.repair("r1", "T1", "packets/rep.md", decision=self.user_decides("r1", "repair", "T1"))
+        self.worker_commit("r1", "T1", "try3\n")
+        self.s.collect("r1", "T1")
+        self.assertEqual(self.s.mark_reviewed("r1", "T1", "MAJOR_FIX")["status"], "BLOCKED")
+        st = self.s.store.load("r1")
+        self.assertEqual(st["tasks"]["T1"]["major_repairs"], 2)
+        self.assertIsNone(st["workers"]["worker-1"]["task"])
+
+    def test_post_merge_failure_not_merged(self):
+        self.cfg["gate"]["post_merge_check"] = PY_FAIL
+        self.s = self.new_scheduler()
+        self.s.create_run("r1", [self.task("T1", trivial=True)])
+        self.s.dispatch_ready("r1", launch="none")
+        res = self.drive_to_merged("r1", "T1")
+        self.assertEqual(res["results"][0]["result"], "post_merge_failed")
+        st = self.s.store.load("r1")
+        self.assertEqual(st["tasks"]["T1"]["status"], "FIX_REQUIRED")
+        self.assertEqual(st["integration_sha"], self.base_sha)
+        self.assertEqual(sh(Path(st["integration_worktree"]), "git", "rev-parse", st["integration_branch"]),
+                         self.base_sha)
+
+    def test_integration_conflict_preserved(self):
+        self.s.create_run("r1", [self.task("T1", trivial=True, owned=["app.txt"]),
+                                 self.task("T3", trivial=True, owned=["app.txt"])])
+        self.s.dispatch_ready("r1", launch="none")
+        for tid, text in (("T1", "one\n"), ("T3", "three\n")):
+            wt = Path(self.s.store.load("r1")["tasks"][tid]["worktree"])
+            (wt / "app.txt").write_text(text)
+            sh(wt, "git", "commit", "-qam", tid)
+            self.worker_commit("r1", tid, commit=False, report_overrides={
+                "commits": [sh(wt, "git", "rev-parse", "HEAD")], "head_sha": sh(wt, "git", "rev-parse", "HEAD")})
+            # worker_commit wrote an extra untracked file; remove it so only app.txt changed
+            (wt / tid.lower() / "out.txt").unlink()
+            (wt / tid.lower()).rmdir()
+            self.assertEqual(self.s.collect("r1", tid)["result"], "REVIEW")
+            self.s.mark_reviewed("r1", tid, "PASS")
+        res = self.s.integrate("r1")
+        kinds = {r["task"]: r["result"] for r in res["results"]}
+        self.assertEqual(kinds, {"T1": "MERGED", "T3": "conflict"})
+        st = self.s.store.load("r1")
+        self.assertEqual(st["tasks"]["T3"]["integration_conflict"]["files"], ["app.txt"])
+        self.assertTrue(S.git_is_clean(st["integration_worktree"]))
+
+
+class TestSafety(Base):
+    def test_dirty_files_keeps_first_path_intact(self):
+        # " M app.txt" sorts first; its leading status space must not be stripped away.
+        (self.repo / "app.txt").write_text("changed\n")
+        (self.repo / "new.txt").write_text("new\n")
+        dirty = S.git_dirty_files(self.repo)
+        self.assertEqual(dirty[:2], ["app.txt", "new.txt"])
+        self.assertNotIn("pp.txt", dirty)
+
+    def test_dirty_slot_quarantined_not_reset(self):
+        self.s.create_run("r1", [self.task("T1", trivial=True)])
+        slot = self.s.slot_path("worker-1")
+        sh(self.repo, "git", "worktree", "add", "-q", "--detach", str(slot), self.base_sha)
+        (slot / "precious.txt").write_text("user work\n")
+        out = self.s.dispatch_ready("r1", launch="none")
+        self.assertEqual(out["quarantined"][0]["worker"], "worker-1")
+        self.assertEqual(out["dispatched"][0]["worker"], "worker-2")
+        self.assertEqual((slot / "precious.txt").read_text(), "user work\n")
+        st = self.s.store.load("r1")
+        self.assertEqual(st["workers"]["worker-1"]["status"], "BLOCKED")
+        with self.assertRaisesRegex(S.SchedulerError, "never auto-reset"):
+            self.s.worker_release("r1", "worker-1")
+
+    def test_ambiguous_completion_not_success(self):
+        self.s.create_run("r1", [self.task("T1", trivial=True)])
+        self.s.dispatch_ready("r1", launch="none")
+        self.assertEqual(self.s.collect("r1", "T1")["result"], "pending")  # no report, idle != success
+        self.worker_commit("r1", "T1", report_overrides={"head_sha": "0" * 40, "commits": ["deadbeef"]})
+        self.assertEqual(self.s.collect("r1", "T1")["result"], "ambiguous")
+        self.assertEqual(self.s.store.load("r1")["tasks"]["T1"]["status"], "RUNNING")
+        # done + no commits + no changes is also ambiguous
+        st = self.s.store.load("r1")
+        rp = self.s.store.run_dir("r1") / "reports" / "T1.json"
+        wt = Path(st["tasks"]["T1"]["worktree"])
+        sh(wt, "git", "reset", "-q", "--hard", st["tasks"]["T1"]["base_sha"])  # test fixture only
+        rp.write_text(json.dumps({"task_id": "T1", "status": "done", "base_sha": st["tasks"]["T1"]["base_sha"],
+                                  "head_sha": st["tasks"]["T1"]["base_sha"], "commits": [], "files_changed": [],
+                                  "test_results": [], "risks": [], "not_done": []}))
+        self.assertEqual(self.s.collect("r1", "T1")["result"], "ambiguous")
+
+    def test_uncommitted_worker_diff_needs_audited_commit(self):
+        self.s.create_run("r1", [self.task("T1", trivial=True)])
+        self.s.dispatch_ready("r1", launch="none")
+        self.worker_commit("r1", "T1", commit=False)
+        out = self.s.collect("r1", "T1")
+        self.assertTrue(out["needs_orchestrator_commit"])
+        with self.assertRaisesRegex(S.SchedulerError, "commit-task"):
+            self.s.mark_reviewed("r1", "T1", "PASS")
+        c = self.s.commit_task("r1", "T1", "T1: orchestrator commit")
+        log = sh(Path(self.s.store.load("r1")["tasks"]["T1"]["worktree"]), "git", "log", "-1", "--format=%B")
+        self.assertIn("Orchestrator-Commit", log)
+        self.assertEqual(len(c["commits"]), 1)
+        self.assertEqual(self.s.mark_reviewed("r1", "T1", "PASS")["status"], "PASSED")
+
+    def test_scope_and_secret_checks(self):
+        outside, secrets = S.scope_check(["t1/a.py", "src/b.java", "conf/.env"], ["t1/"])
+        self.assertEqual(outside, ["src/b.java", "conf/.env"])
+        self.assertEqual(secrets, ["conf/.env"])
+
+
+class TestPersistence(Base):
+    def test_restart_recovery_no_duplicate_dispatch(self):
+        self.dag()
+        self.s.dispatch_ready("r1", launch="herdr")
+        starts = sum(1 for c in self.herdr.calls if c[0] == "agent_start")
+        s2 = self.new_scheduler()  # simulated process restart
+        res = s2.resume("r1")
+        self.assertTrue(any("T1: running" in a for a in res["actions"]))
+        self.assertEqual(s2.dispatch_ready("r1", launch="herdr")["dispatched"], [])
+        self.assertEqual(sum(1 for c in self.herdr.calls if c[0] == "agent_start"), starts)
+        self.herdr.live.clear()  # agents vanished during the outage
+        res = self.new_scheduler().resume("r1")
+        self.assertTrue(any("relaunch" in a for a in res["actions"]))
+
+    def test_lock_excludes_second_instance(self):
+        self.dag()
+        s2 = self.new_scheduler()
+        with self.s.store.lock():
+            with self.assertRaisesRegex(S.SchedulerError, "lock"):
+                with s2.store.lock(timeout=0.2):
+                    pass
+
+    def test_atomic_save_preserves_previous_state(self):
+        self.dag()
+        before = self.s.store.state_path("r1").read_text()
+        st = json.loads(before)
+        st["status"] = "BLOCKED"
+        with mock.patch.object(S.os, "replace", side_effect=OSError("crash")):
+            with self.assertRaises(OSError):
+                self.s.store.save(st)
+        self.assertEqual(self.s.store.state_path("r1").read_text(), before)
+        self.assertEqual(list(self.s.store.run_dir("r1").glob(".state.*.tmp")), [])
+
+    def test_only_one_active_run(self):
+        self.dag()
+        with self.assertRaisesRegex(S.SchedulerError, "still RUNNING"):
+            self.s.create_run("r2", [self.task("T1", trivial=True)])
+
+
+class TestResearchGate(Base):
+    def _ev(self, n):
+        p = Path(self.tmp.name) / f"ev{n}.md"
+        p.write_text(f"# dossier {n}\n- app.txt:1\n")
+        return p
+
+    def test_rounds_budget_gate_and_restart(self):
+        self.dag(trivial=False)
+        out = self.s.dispatch_ready("r1", launch="none")
+        self.assertEqual(out["dispatched"], [])
+        self.assertIn("architecture-readiness gate", out["skipped"]["T1"])
+        for n in (1, 2, 3):
+            self.s.research_round("r1", [f"question {n}"], self._ev(n))
+            if n < 3:
+                with self.assertRaisesRegex(S.SchedulerError, "readiness for round"):
+                    self.s.research_round("r1", ["skip the gate"], self._ev(9))
+            self.s.research_readiness("r1", "NOT_READY", {}, [f"gap {n}"])
+            self.assertTrue((self.s.store.run_dir("r1") / "research" / f"scout-round-{n}.md").exists())
+        s2 = self.new_scheduler()  # restart keeps the count
+        self.assertEqual(s2.store.load("r1")["research"]["scout_rounds_used"], 3)
+        with self.assertRaisesRegex(S.SchedulerError, "budget exhausted"):
+            s2.research_round("r1", ["fourth"], self._ev(4))
+        # unresolved gap after round 3 keeps nontrivial dispatch blocked
+        self.assertEqual(s2.dispatch_ready("r1", launch="none")["dispatched"], [])
+        st = s2.store.load("r1")
+        self.assertIn("never waived", st["research"]["readiness"][-1]["note"])
+        index = (self.repo / st["research"]["index_path"]).read_text()
+        self.assertIn("3/3", index)
+        # Opus direct inspection may then record READY with a full checklist
+        with self.assertRaisesRegex(S.SchedulerError, "checklist"):
+            s2.research_readiness("r1", "READY", {"preserve": "x"}, [])
+        e = s2.research_readiness("r1", "READY", READY_CHECKLIST, [])
+        self.assertEqual(e["source"], "opus-direct")
+        self.assertEqual(len(s2.dispatch_ready("r1", launch="none")["dispatched"]), 2)
+
+    def test_budget_survives_new_run_same_request(self):
+        self.s.create_run("r1", [self.task("T1")], request_id="req-a")
+        for n in (1, 2, 3):
+            self.s.research_round("r1", [f"q{n}"], self._ev(n))
+            self.s.research_readiness("r1", "NOT_READY", {}, ["gap"])
+        self.s.close_run("r1", "BLOCKED", "re-plan", self.user_decides("r1", "abandon"))
+        self.s.create_run("r2", [self.task("T1")], request_id="req-a")
+        with self.assertRaisesRegex(S.SchedulerError, "budget exhausted"):
+            self.s.research_round("r2", ["q4"], self._ev(4))
+        self.s.close_run("r2", "BLOCKED", "done testing", self.user_decides("r2", "abandon"))
+        self.s.create_run("r3", [self.task("T1")], request_id="req-b")  # new request => new budget
+        self.assertEqual(self.s.research_round("r3", ["q1"], self._ev(5))["scout_rounds_used"], 1)
+
+    def test_new_round_resets_readiness(self):
+        self.dag(trivial=False)
+        self.make_ready()
+        self.assertTrue(self.s.store.load("r1")["research"]["architecture_ready"])
+        self.s.research_round("r1", ["follow-up"], self._ev(2))
+        self.assertFalse(self.s.store.load("r1")["research"]["architecture_ready"])
+
+    def test_trivial_task_skips_research_gate(self):
+        self.s.create_run("r1", [self.task("T1", trivial=True)])
+        self.assertEqual(len(self.s.dispatch_ready("r1", launch="none")["dispatched"]), 1)
+
+
+class TestTaskFiles(Base):
+    def test_naming_convention_collisions_and_template(self):
+        day = S._dt.date(2026, 10, 16)
+        p1 = self.s.new_task_file("Register validation!", day)
+        p2 = self.s.new_task_file("Register validation!", day)
+        self.assertEqual(p1.relative_to(self.repo).as_posix(), "gen-tasks/register-validation-16-10-26.md")
+        self.assertEqual(p2.name, "register-validation-16-10-26-2.md")
+        text = p1.read_text()
+        self.assertTrue(text.startswith("# Register validation! (16/10/26)"))
+        self.assertNotIn("guidance", text)
+        for section in ("## Steps", "## Do not", "## Run these", "## Files you may change"):
+            self.assertIn(section, text)
+        r1 = self.s.new_task_file("", repair_of="gen-tasks/register-validation-16-10-26.md")
+        r2 = self.s.new_task_file("", repair_of="gen-tasks/register-validation-16-10-26.md")
+        self.assertEqual((r1.name, r2.name), ("register-validation-16-10-26-repair1.md",
+                                              "register-validation-16-10-26-repair2.md"))
+        with self.assertRaises(S.SchedulerError):
+            S.slugify("///")
+
+    def test_prompt_points_to_task_file_with_cautions(self):
+        self.s.create_run("r1", [self.task("T1", trivial=True)])
+        text = self.s.dispatch_ready("r1", launch="none")["dispatched"][0]["manual_command"][-1]
+        self.assertIn(str(self.repo / "packets" / "T1.md"), text)
+        self.assertIn("Do not guess", text)
+        self.assertIn("committed=false", text)
+        self.assertIn(str(self.s.store.run_dir("r1") / "reports" / "T1.json"), text)
+
+    def test_collect_captures_uncommitted_diff_and_appends_result(self):
+        self.s.create_run("r1", [self.task("T1", trivial=True)])
+        self.s.dispatch_ready("r1", launch="none")
+        wt = Path(self.s.store.load("r1")["tasks"]["T1"]["worktree"])
+        (wt / "app.txt").write_text("base\nchanged\n")  # tracked edit
+        self.worker_commit("r1", "T1", content="new file\n", commit=False,
+                           report_overrides={"files_changed": ["t1/out.txt", "app.txt"]})
+        status_before = sh(wt, "git", "status", "--porcelain")
+        out = self.s.collect("r1", "T1")
+        self.assertEqual(out["result"], "REVIEW")
+        self.assertEqual(sh(wt, "git", "status", "--porcelain"), status_before)  # real index untouched
+        diff = (self.repo / out["diff"]).read_text()
+        self.assertIn("+changed", diff)
+        self.assertIn("+new file", diff)  # untracked file included
+        task_file = (self.repo / "packets" / "T1.md").read_text()
+        self.assertIn("## Worker result - attempt 1", task_file)
+        self.assertIn("+new file", task_file)
+        self.assertIn("orchestrator commits after review", task_file)
+
+    def test_review_and_final_gate_appended(self):
+        self.s.create_run("r1", [self.task("T1", trivial=True)])
+        self.s.dispatch_ready("r1", launch="none")
+        self.worker_commit("r1", "T1")
+        self.s.collect("r1", "T1")
+        self.s.mark_reviewed("r1", "T1", "PASS", "looks right", report="**Summary:** correct.")
+        self.s.integrate("r1")
+        self.s.verify("r1")
+        text = (self.repo / "packets" / "T1.md").read_text()
+        order = [text.index(h) for h in ("## Worker result", "## Review - attempt 1: PASS",
+                                         "**Summary:** correct.", "## Integration: merged", "## Final gate: PASS")]
+        self.assertEqual(order, sorted(order))
+
+    def test_writable_dirs_passed_and_sensitive_rejected(self):
+        self.cfg["worker"]["writable_dirs"] = ["~/.gradle"]
+        args = self.new_scheduler().codex_args("/wt", "r1")
+        self.assertIn(str(Path("~/.gradle").expanduser()), args)
+        for bad in ("~", "/", "~/.ssh", "~/.codex/x"):
+            cfg = copy.deepcopy(self.cfg)
+            cfg["worker"]["writable_dirs"] = [bad]
+            self.assertTrue(any("writable_dirs" in e for e in S.validate_config(cfg)), bad)
+
+    def test_cli_mark_reviewed_requires_report(self):
+        with self.assertRaises(SystemExit), mock.patch("sys.stderr"):
+            S.main(["--repo-root", str(self.repo), "mark-reviewed", "--run", "r1", "--task", "T1",
+                    "--verdict", "PASS"])
+
+    def test_wait_report_blocked_and_timeout(self):
+        self.s.create_run("r1", [self.task("T1", trivial=True), self.task("T3", trivial=True)])
+        self.s.dispatch_ready("r1")  # FakeHerdr: agents start
+        ticks = iter(range(1000))
+        clock = lambda: next(ticks)  # noqa: E731
+        out = self.s.wait("r1", timeout_s=3, interval_s=0, sleep=lambda s: None, clock=clock)
+        self.assertEqual(out["result"], "timeout")
+        self.herdr.live["worker-2-r1"] = "blocked"
+        out = self.s.wait("r1", timeout_s=3, interval_s=0, sleep=lambda s: None, clock=clock)
+        self.assertEqual([b["task"] for b in out["blocked"]], ["T3"])
+        self.worker_commit("r1", "T1")
+        out = self.s.wait("r1", tids=["T1"], timeout_s=3, interval_s=0, sleep=lambda s: None, clock=clock)
+        self.assertEqual(out["reported"], ["T1"])
+        self.assertIn("collect --run r1 --task T1", out["next"])
+
+
+class TestDecisions(Base):
+    def blocked_task(self):
+        self.s.create_run("r1", [self.task("T1", trivial=True)])
+        self.s.dispatch_ready("r1", launch="none")
+        self.worker_commit("r1", "T1", commit=False,
+                           report_overrides={"status": "blocked", "not_done": ["spec unclear"]})
+        self.assertEqual(self.s.collect("r1", "T1")["result"], "BLOCKED")
+
+    def test_blocker_needs_answered_user_decision(self):
+        self.blocked_task()
+        with self.assertRaisesRegex(S.SchedulerError, "needs the user's decision"):
+            self.s.task_unblock("r1", "T1")
+        did = self.s.decision_ask("r1", "blocker", "Spec unclear", "Worker cannot tell X from Y.",
+                                  ["A=Use X", "B=Use Y"], "T1", "A")["decision"]
+        with self.assertRaisesRegex(S.SchedulerError, "not answered"):
+            self.s.task_unblock("r1", "T1", decision=did)
+        wrong = self.user_decides("r1", "repair", "T1")
+        with self.assertRaisesRegex(S.SchedulerError, "needs kind blocker"):
+            self.s.task_unblock("r1", "T1", decision=wrong)
+        self.s.decision_answer("r1", did, "b", "Y is the 2024 contract", by="tester")
+        self.assertEqual(self.s.task_unblock("r1", "T1", decision=did)["status"], "READY")
+        st = self.s.store.load("r1")
+        self.assertIn("task-unblock", st["decisions"][did]["consumed_by"])
+        self.assertEqual(st["decisions"][did]["answer"]["choice"], "B")
+        text = (self.repo / "packets" / "T1.md").read_text()
+        self.assertIn(f"## Decision {did} needed (blocker)", text)
+        self.assertIn(f"## Decision {did} answered by the user", text)
+        self.assertIn("Y is the 2024 contract", (self.s.store.run_dir("r1") / "decisions" / f"{did}.md").read_text())
+
+    def test_decision_single_use_and_task_bound(self):
+        self.s.create_run("r1", [self.task("T1", trivial=True), self.task("T3", trivial=True)])
+        did = self.user_decides("r1", "abandon")
+        self.s.close_run("r1", "BLOCKED", "stop", did)
+        with self.assertRaisesRegex(S.SchedulerError, "already used"):
+            self.s.close_run("r1", "FAILED", "again", did)
+        t3 = self.user_decides("r1", "blocker", "T3")
+        st = self.s.store.load("r1")
+        with self.assertRaisesRegex(S.SchedulerError, "about task T3"):
+            self.s._require_decision(st, "blocker", "T1", t3, "test")
+
+    def test_scope_exception_and_fail_need_decisions(self):
+        self.s.create_run("r1", [self.task("T1", trivial=True, owned=["t1/"])])
+        self.s.dispatch_ready("r1", launch="none")
+        wt = Path(self.s.store.load("r1")["tasks"]["T1"]["worktree"])
+        (wt / "app.txt").write_text("touched\n")  # outside owned paths
+        self.worker_commit("r1", "T1", commit=False)
+        self.s.collect("r1", "T1")
+        with self.assertRaisesRegex(S.SchedulerError, "--allow-outside"):
+            self.s.commit_task("r1", "T1", "msg")
+        with self.assertRaisesRegex(S.SchedulerError, "scope_exception"):
+            self.s.commit_task("r1", "T1", "msg", allow_outside=True)
+        self.s.commit_task("r1", "T1", "msg", True, self.user_decides("r1", "scope_exception", "T1"))
+        with self.assertRaisesRegex(S.SchedulerError, "scope_exception"):
+            self.s.mark_reviewed("r1", "T1", "PASS", accept_scope=True)
+        with self.assertRaisesRegex(S.SchedulerError, "kind abandon"):
+            self.s.mark_reviewed("r1", "T1", "FAIL")
+        out = self.s.mark_reviewed("r1", "T1", "PASS", accept_scope=True,
+                                   decision=self.user_decides("r1", "scope_exception", "T1"))
+        self.assertEqual(out["status"], "PASSED")
+
+    def test_blocked_review_points_to_asking_user(self):
+        self.s.create_run("r1", [self.task("T1", trivial=True)])
+        self.s.dispatch_ready("r1", launch="none")
+        self.worker_commit("r1", "T1")
+        self.s.collect("r1", "T1")
+        out = self.s.mark_reviewed("r1", "T1", "MAJOR_FIX")
+        self.assertIn("routine, your call: repair --run r1 --task T1", out["next"])  # first repair
+        self.cfg["decisions"]["routine_repairs"] = 0
+        self.s = self.new_scheduler()
+        did = self.s.decision_ask("r1", "repair", "Fix?", "tests fail", ["A=repair", "B=stop"], "T1")["decision"]
+        actions = self.s.resume("r1")["actions"]
+        self.assertTrue(actions[0].startswith(f"WAITING FOR USER: {did}"))
+        self.assertTrue(any("critical, ask the user: decision ask --run r1 --kind repair" in a for a in actions))
+
+    def test_wait_and_cancel(self):
+        self.s.create_run("r1", [self.task("T1", trivial=True)])
+        did = self.s.decision_ask("r1", "question", "Which?", "q", ["A=x", "B=y"])["decision"]
+        ticks = iter(range(100))
+        out = self.s.decision_wait("r1", did, timeout_s=2, sleep=lambda s: None, clock=lambda: next(ticks))
+        self.assertEqual(out["result"], "timeout")
+        self.s.decision_answer("r1", did, "A", by="tester")
+        self.assertEqual(self.s.decision_wait("r1", did)["answer"]["choice"], "A")
+        with self.assertRaisesRegex(S.SchedulerError, "not PENDING"):
+            self.s.decision_answer("r1", did, "B")
+        d2 = self.s.decision_ask("r1", "question", "Other?", "q", ["A=x", "B=y"])["decision"]
+        self.s.decision_cancel("r1", d2, "superseded")
+        with self.assertRaisesRegex(S.SchedulerError, "CANCELLED"):
+            self.s.decision_answer("r1", d2, "A")
+        with self.assertRaisesRegex(S.SchedulerError, "at least 2 options"):
+            self.s.decision_ask("r1", "question", "t", "q", ["A=only"])
+
+    def test_first_repair_routine_later_repairs_critical(self):
+        self.s.create_run("r1", [self.task("T1", trivial=True)])
+        self.s.dispatch_ready("r1", launch="none")
+        (self.repo / "packets" / "rep.md").write_text("# repair\n")
+        self.worker_commit("r1", "T1", "try0\n")
+        self.s.collect("r1", "T1")
+        self.s.mark_reviewed("r1", "T1", "MAJOR_FIX")
+        with self.assertRaisesRegex(S.SchedulerError, "give the reason"):
+            self.s.repair("r1", "T1", "packets/rep.md", launch="none")
+        self.s.repair("r1", "T1", "packets/rep.md", launch="none", reason="UserHandlerTest fails: expected 100")
+        st = self.s.store.load("r1")
+        opus = [d for d in st["decisions"].values() if d["status"] == "DECIDED_BY_OPUS"]
+        self.assertEqual((len(opus), opus[0]["kind"]), (1, "repair"))
+        self.assertIn("Opus decision D1 (routine repair)", (self.repo / "packets" / "T1.md").read_text())
+        self.worker_commit("r1", "T1", "try1\n")
+        self.s.collect("r1", "T1")
+        self.s.mark_reviewed("r1", "T1", "MAJOR_FIX")
+        with self.assertRaisesRegex(S.SchedulerError, "critical and needs the user's decision"):
+            self.s.repair("r1", "T1", "packets/rep.md", launch="none", reason="Opus would like to")
+        self.s.repair("r1", "T1", "packets/rep.md", launch="none", decision=self.user_decides("r1", "repair", "T1"))
+
+    def test_critical_kinds_never_routine(self):
+        self.blocked_task()
+        with self.assertRaisesRegex(S.SchedulerError, "critical"):
+            self.s.task_unblock("r1", "T1", note="Opus thinks it is fine")
+        with self.assertRaisesRegex(S.SchedulerError, "critical"):
+            self.s.close_run("r1", "BLOCKED", "Opus gives up")
+
+    def test_cli_answer_refused_inside_claude_or_without_tty(self):
+        self.s.create_run("r1", [self.task("T1", trivial=True)])
+        did = self.s.decision_ask("r1", "question", "Which?", "q", ["A=x", "B=y"])["decision"]
+        argv = ["--repo-root", str(self.repo), "decision", "answer", "--run", "r1", "--id", did, "--choice", "A"]
+        with mock.patch.object(S, "load_config", return_value=self.cfg), mock.patch("sys.stderr") as err:
+            with mock.patch.dict(os.environ, {"CLAUDECODE": "1"}):
+                self.assertEqual(S.main(argv), 1)
+            with mock.patch.dict(os.environ, {"CLAUDECODE": ""}), mock.patch("sys.stdin") as stdin:
+                stdin.isatty.return_value = False
+                self.assertEqual(S.main(argv), 1)
+        self.assertIn("user only", "".join(str(c) for c in err.write.call_args_list))
+        self.assertEqual(self.s.store.load("r1")["decisions"][did]["status"], "PENDING")
+
+    def test_gate_can_be_relaxed_in_config(self):
+        self.cfg["decisions"]["require_user_for"] = ["abandon"]
+        self.s = self.new_scheduler()
+        self.blocked_task()
+        with self.assertRaisesRegex(S.SchedulerError, "give the reason"):
+            self.s.task_unblock("r1", "T1")
+        self.assertEqual(self.s.task_unblock("r1", "T1", note="plan step 2 named the wrong file")["status"],
+                         "READY")
+        bad = copy.deepcopy(self.cfg)
+        bad["decisions"]["require_user_for"] = ["everything"]
+        self.assertTrue(any("unknown kinds" in e for e in S.validate_config(bad)))
+
+
+class TestCli(Base):
+    def test_help_and_status(self):
+        for argv in (["--help"], ["run", "create", "--help"], ["research", "readiness", "--help"]):
+            with self.assertRaises(SystemExit) as cm, mock.patch("sys.stdout"):
+                S.main(argv)
+            self.assertEqual(cm.exception.code, 0)
+
+
+class TestWorkspaceMode(Base):
+    """repo/ is the only git repo; repo.workspace/ holds the kit, state, task files and worktrees
+    and reaches the repo through the relative symlink repo.workspace/repo -> ../repo."""
+
+    def setUp(self):
+        super().setUp()
+        sh(self.repo, "rm", "-rf", "packets")  # Base writes packets into the repo; here they live in the workspace
+        self.ws = Path(self.tmp.name) / "repo.workspace"
+        (self.ws / ".agent-system").mkdir(parents=True)
+        (self.ws / "repo").symlink_to("../repo")
+        (self.ws / "AGENTS.md").write_text("# worker rules\n")
+        for tid in ("T1", "T2", "T3"):
+            p = self.ws / "packets" / f"{tid}.md"
+            p.parent.mkdir(exist_ok=True)
+            p.write_text(f"# packet {tid}\n")
+        self.cfg["project"] = {"path": "repo"}
+        self.cfg["pool"]["worktree_root"] = "worktrees"
+        self.s = self.new_scheduler()
+
+    def new_scheduler(self):
+        if not hasattr(self, "ws"):  # Base.setUp builds an in-repo scheduler first
+            return super().new_scheduler()
+        return S.Scheduler(self.ws, cfg=self.cfg, herdr=self.herdr)
+
+    def repo_status(self):
+        return sh(self.repo, "git", "status", "--porcelain", "--untracked-files=all")
+
+    def test_roots(self):
+        self.assertTrue(self.s.workspace_mode)
+        self.assertEqual(self.s.project_root, self.repo.resolve())
+        self.assertEqual(self.s.workspace_root, self.ws.resolve())
+        self.assertEqual(self.s.worktree_root, (self.ws / "worktrees").resolve())
+
+    def test_full_run_keeps_repo_clean_and_state_in_workspace(self):
+        self.s.create_run("r1", [self.task("T1", trivial=True)])
+        self.s.dispatch_ready("r1", launch="herdr")
+        st = self.s.store.load("r1")
+        wt = Path(st["tasks"]["T1"]["worktree"])
+        self.assertEqual(wt.parent, (self.ws / "worktrees").resolve())
+        self.assertEqual(Path(st["integration_worktree"]).parent, (self.ws / "worktrees").resolve())
+        self.assertEqual(st["project_root"], str(self.repo.resolve()))
+        self.assertTrue((self.ws / ".orchestrator" / "runs" / "r1" / "state.json").is_file())
+        self.assertFalse((self.repo / ".orchestrator").exists())
+        prompt = [c for c in self.herdr.calls if c[0] == "agent_prompt"][-1][2]
+        self.assertIn(str(self.ws.resolve() / "packets" / "T1.md"), prompt)
+        self.assertIn(str(self.ws.resolve() / "AGENTS.md"), prompt)
+        self.assertEqual(self.repo_status(), "")
+        self.worker_commit("r1", "T1")
+        self.assertEqual(self.s.collect("r1", "T1")["result"], "REVIEW")
+        self.s.mark_reviewed("r1", "T1", "PASS")
+        self.assertEqual(self.s.integrate("r1")["results"][0]["result"], "MERGED")
+        self.assertEqual(self.s.verify("r1")["run_status"], "DONE")
+        self.assertEqual(self.repo_status(), "")
+        self.assertEqual(sh(self.repo, "git", "rev-parse", "main"), self.base_sha)  # user branch untouched
+        self.assertIn("agent/integration-r1", sh(self.repo, "git", "branch", "--list", "agent/*"))
+        r = subprocess.run(["git", "rev-parse", "--git-dir"], cwd=self.ws, capture_output=True, text=True)
+        self.assertNotEqual(r.returncode, 0, "the workspace must not be a git repo")
+        self.s.cleanup("r1", remove_worktrees=True)
+        self.assertEqual(sh(self.repo, "git", "worktree", "list").count("\n"), 0)
+
+    def test_refuses_bad_project(self):
+        cfg = copy.deepcopy(self.cfg)
+        cfg["project"] = {"path": "missing"}
+        with self.assertRaisesRegex(S.SchedulerError, "does not resolve"):
+            S.Scheduler(self.ws, cfg=cfg, herdr=self.herdr)
+        inner = self.repo / "inner.workspace"
+        inner.mkdir()
+        cfg["project"] = {"path": ".."}
+        with self.assertRaisesRegex(S.SchedulerError, "must not be inside the project"):
+            S.Scheduler(inner, cfg=cfg, herdr=self.herdr)
+        cfg["project"] = {"path": ""}
+        self.assertTrue(any("project must be" in e for e in S.validate_config(cfg)))
+
+    def test_doctor_checks_repo_separation(self):
+        (self.ws / ".agent-system" / "config.json").write_text(json.dumps(self.cfg))
+
+        def status(name):
+            return next(c["status"] for c in S.doctor(self.ws) if c["check"] == name)
+
+        self.assertEqual(status("project"), "ok")
+        self.assertEqual(status("git"), "ok")
+        self.assertEqual(status("project-clean-of-kit"), "ok")
+        self.assertEqual(status("claude-additional-dirs"), "warn")
+        self.assertNotIn("orchestrator-ignored", [c["check"] for c in S.doctor(self.ws)])
+        (self.ws / ".claude").mkdir()
+        (self.ws / ".claude" / "settings.json").write_text(
+            json.dumps({"permissions": {"additionalDirectories": [str(self.repo)]}}))
+        self.assertEqual(status("claude-additional-dirs"), "ok")
+        (self.repo / "CLAUDE.md").write_text("stray\n")
+        self.assertEqual(status("project-clean-of-kit"), "fail")
+
+
+class TestInstall(Base):
+    """scripts/install.sh (agent-kit) run for real against temp repos."""
+    INSTALL = Path(__file__).resolve().parents[1] / "scripts" / "install.sh"
+    KIT = Path(__file__).resolve().parents[2]
+
+    def setUp(self):
+        super().setUp()
+        sh(self.repo, "rm", "-rf", "packets")
+        self.ws = Path(self.tmp.name) / "repo.workspace"
+
+    def kit(self, *args, cwd=None, ok=True):
+        p = subprocess.run(["bash", str(self.INSTALL), *args], cwd=cwd or self.tmp.name,
+                           capture_output=True, text=True)
+        if ok:
+            self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        else:
+            self.assertNotEqual(p.returncode, 0, p.stdout)
+        return p
+
+    def repo_status(self):
+        return sh(self.repo, "git", "status", "--porcelain", "--untracked-files=all")
+
+    def assert_workspace(self):
+        ws = self.ws
+        self.assertEqual(os.readlink(ws / "repo"), "../repo")
+        for d in ("gen-tasks", "worktrees", "notes", ".claude/agents"):
+            self.assertTrue((ws / d).is_dir(), d)
+        self.assertEqual((ws / ".agent-system" / "scheduler.py").read_bytes(),
+                         (self.KIT / ".agent-system" / "scheduler.py").read_bytes())
+        self.assertEqual(list(ws.rglob("__pycache__")), [])
+        cfg = json.loads((ws / ".agent-system" / "config.json").read_text())
+        self.assertEqual(cfg["project"], {"path": "repo"})
+        self.assertEqual(cfg["pool"]["worktree_root"], "worktrees")
+        perms = json.loads((ws / ".claude" / "settings.json").read_text())["permissions"]
+        self.assertEqual(perms["additionalDirectories"], [str(self.repo.resolve())])
+        self.assertIn("Bash(.agent-system/scripts/decide)", perms["deny"])
+        claude = (ws / "CLAUDE.md").read_text()
+        self.assertTrue(claude.startswith("# repo\n"))
+        self.assertEqual(claude.count("<!-- agent-system:orchestrator:begin -->"), 1)
+        self.assertIn("<!-- agent-system:worker:begin -->", (ws / "AGENTS.md").read_text())
+        self.assertTrue((ws / ".claude" / "agents" / "scout.md").is_file())
+        s = S.Scheduler(ws, herdr=self.herdr)  # loads the written config from disk
+        self.assertEqual(s.project_root, self.repo.resolve())
+        self.assertEqual(self.repo_status(), "")
+
+    def test_create_from_parent_with_folder(self):
+        self.kit("create", "--folder=repo.workspace")
+        self.assert_workspace()
+
+    def test_create_in_current_folder(self):
+        self.ws.mkdir()
+        self.kit("create", cwd=self.ws)
+        self.assert_workspace()
+
+    def test_create_refusals(self):
+        other = Path(self.tmp.name) / "repo-tools"
+        other.mkdir()
+        self.assertIn("<repo>.workspace", self.kit("create", cwd=other, ok=False).stderr)
+        self.assertIn("not a Git repository", self.kit("create", "--folder=nope.workspace", ok=False).stderr)
+        self.kit("create", "--folder", "repo.workspace")
+        self.assertIn("agent-kit update", self.kit("create", "--folder=repo.workspace", ok=False).stderr)
+        self.assertIn("agent-kit create", self.kit("update", "--folder=" + str(other), ok=False).stderr)
+        self.assertEqual(self.repo_status(), "")
+
+    def test_update_keeps_config_and_notes(self):
+        self.kit("create", "--folder=repo.workspace")
+        cfg_path = self.ws / ".agent-system" / "config.json"
+        cfg = json.loads(cfg_path.read_text())
+        cfg["gate"]["verify_cmd"] = ["make", "check"]
+        cfg_path.write_text(json.dumps(cfg))
+        claude = self.ws / "CLAUDE.md"
+        claude.write_text(claude.read_text().replace("- Stack: TODO", "- Stack: Java 21"))
+        (self.ws / ".agent-system" / "scheduler.py").write_text("# stale\n")
+        self.kit("update", cwd=self.ws)
+        self.assert_workspace()
+        self.assertEqual(json.loads(cfg_path.read_text())["gate"]["verify_cmd"], ["make", "check"])
+        self.assertIn("- Stack: Java 21", claude.read_text())
+
+    def test_detects_stack(self):
+        (self.repo / "build.gradle").write_text("plugins { id 'java' }\n")
+        sh(self.repo, "git", "add", "-A")
+        sh(self.repo, "git", "commit", "-q", "-m", "gradle")
+        self.kit("create", "--folder=repo.workspace")
+        cfg = json.loads((self.ws / ".agent-system" / "config.json").read_text())
+        self.assertEqual(cfg["worker"]["writable_dirs"], ["~/.gradle"])
+        self.assertIn("`./gradlew build`", (self.ws / "CLAUDE.md").read_text())
+
+    def test_dry_run_writes_nothing(self):
+        out = self.kit("create", "--folder=repo.workspace", "--dry-run").stdout
+        self.assertIn("[dry-run]", out)
+        self.assertFalse(self.ws.exists())
+
+    def test_legacy_in_repo_mode_keeps_worktrees_outside(self):
+        self.kit(str(self.repo))
+        cfg = json.loads((self.repo / ".agent-system" / "config.json").read_text())
+        self.assertNotIn("project", cfg)
+        self.assertEqual(cfg["pool"]["worktree_root"], "../{repo_name}.agent-worktrees")
+        self.assertFalse(S.Scheduler(self.repo, herdr=self.herdr).workspace_mode)
+
+
+if __name__ == "__main__":
+    unittest.main()

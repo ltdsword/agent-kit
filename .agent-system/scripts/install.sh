@@ -1,0 +1,264 @@
+#!/usr/bin/env bash
+# agent-kit: copy the orchestration kit into a project workspace, or update one.
+#   agent-kit create [--folder=<dir>] [--dry-run]
+#   agent-kit update [--folder=<dir>] [--dry-run] [--force-agent]
+#   agent-kit [--dry-run] [--force-agent] <target-repo>    legacy in-repo mode (kit inside the repo)
+# <dir> is the destination workspace and defaults to the current folder. It must be named
+# <repo>.workspace and sit next to <repo>, which gets linked as <dir>/<repo> -> ../<repo>.
+# create: new workspace (kit, config with project.path, CLAUDE.md/AGENTS.md, .claude/, folders).
+# update: refresh the kit files; keeps config.json, project notes and customized scout.md.
+# The kit is copied from this script's kit home (e.g. ~/Code/agent-kit; ~/.local/bin/agent-kit
+# links here). Nothing is ever written into the repo: create/update fail if its git status changes.
+set -euo pipefail
+
+SELF="$(readlink -f "${BASH_SOURCE[0]}")"
+SRC="$(cd "$(dirname "$SELF")/../.." && pwd -P)"   # kit home: holds .agent-system/
+usage() { sed -n '2,11p' "$SELF" | sed 's/^# \{0,1\}//'; }
+die() { echo "error: $*" >&2; exit 1; }
+
+CMD=""; DRY=0; FORCE_AGENT=0; FOLDER=""; TARGET=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --folder=*) FOLDER="${1#--folder=}"; [ -n "$FOLDER" ] || die "--folder needs a value" ;;
+    --folder) [ $# -ge 2 ] || die "--folder needs a value"; FOLDER="$2"; shift ;;
+    --dry-run) DRY=1 ;;
+    --force-agent) FORCE_AGENT=1 ;;
+    -h|--help) usage; exit 0 ;;
+    -*) echo "unknown option: $1" >&2; usage >&2; exit 2 ;;
+    *)
+      if [ -z "$CMD$TARGET" ] && { [ "$1" = create ] || [ "$1" = update ]; }; then CMD="$1"
+      elif [ -z "$CMD$TARGET" ]; then TARGET="$1"
+      else echo "unexpected argument: $1" >&2; exit 2
+      fi ;;
+  esac
+  shift
+done
+[ -n "$CMD$TARGET" ] || { usage >&2; exit 2; }
+[ -z "$FOLDER" ] || [ -n "$CMD" ] || die "--folder only applies to create/update"
+
+do_() { if [ $DRY -eq 1 ]; then echo "[dry-run] $*"; else "$@"; fi; }
+repo_status() { git -C "$1" status --porcelain --untracked-files=all; }
+
+copy_kit() {  # copy_kit <dest>: kit code, docs, prompts, scripts, tests, templates (never config.json)
+  do_ mkdir -p "$1/.agent-system" "$1/.claude/agents"
+  for item in scheduler.py README.md GUIDE.md docs prompts scripts tests templates; do
+    [ -e "$SRC/.agent-system/$item" ] || continue
+    do_ rm -rf "$1/.agent-system/$item"
+    do_ cp -r "$SRC/.agent-system/$item" "$1/.agent-system/$item"
+  done
+  [ $DRY -eq 1 ] || find "$1/.agent-system" -name __pycache__ -type d -prune -exec rm -rf {} + 2>/dev/null || true
+}
+
+install_agent() {  # install_agent <dest>
+  local agent="$1/.claude/agents/scout.md"
+  if [ -f "$agent" ] && ! cmp -s "$agent" "$SRC/.claude/agents/scout.md" && [ $FORCE_AGENT -eq 0 ]; then
+    echo "kept existing .claude/agents/scout.md (differs; use --force-agent to replace)"
+  else
+    do_ cp "$SRC/.claude/agents/scout.md" "$agent"
+  fi
+}
+
+merge_settings() {  # merge_settings <settings.json> [<real repo path>]: deny rules (+ additionalDirectories)
+  if [ $DRY -eq 1 ]; then echo "[dry-run] merge deny rules${2:+ and additionalDirectories $2} into $1"; return; fi
+  python3 - "$1" "$SRC/.agent-system/templates/claude-settings.json" "${2:-}" <<'PY'
+import json, os, sys
+path, tpl, repo = sys.argv[1:]
+cur = json.load(open(path)) if os.path.exists(path) else {}
+perms = cur.setdefault("permissions", {})
+deny = perms.setdefault("deny", [])
+added = [r for r in json.load(open(tpl))["permissions"]["deny"] if r not in deny]
+deny.extend(added)
+msg = f"settings.json: {len(added)} deny rule(s) added" if added else "settings.json: deny rules present"
+if repo:
+    dirs = perms.setdefault("additionalDirectories", [])
+    if repo not in dirs:
+        dirs.append(repo)
+        msg += f"; additionalDirectories += {repo}"
+json.dump(cur, open(path, "w"), indent=2)
+open(path, "a").write("\n")
+print(msg)
+PY
+}
+
+merge_section() {  # merge_section <file> <template> <marker-name>
+  local file="$1" tpl="$2" name="$3"
+  local begin="<!-- agent-system:$name:begin -->" end="<!-- agent-system:$name:end -->"
+  if [ $DRY -eq 1 ]; then echo "[dry-run] merge $name section into $file"; return; fi
+  if [ -f "$file" ] && grep -qF "$begin" "$file"; then
+    python3 - "$file" "$tpl" "$begin" "$end" <<'PY'
+import sys
+path, tpl, begin, end = sys.argv[1:]
+text = open(path).read()
+head, rest = text.split(begin, 1)
+_, tail = rest.split(end, 1)
+open(path, "w").write(head + open(tpl).read().rstrip("\n") + tail)
+PY
+    echo "updated $name section in $(basename "$file")"
+  else
+    { [ -s "$file" ] && printf '\n'; cat "$tpl"; } >> "$file"
+    echo "appended $name section to $(basename "$file")"
+  fi
+}
+
+check_repo_unchanged() {  # check_repo_unchanged <repo> <status before>
+  [ $DRY -eq 1 ] || [ "$(repo_status "$1")" = "$2" ] || die "the repo's git status changed during install: inspect $1"
+}
+
+cmd_create() {
+  local dest name repo_name repo link before
+  dest="$(realpath -m -- "${FOLDER:-$PWD}")"
+  name="$(basename "$dest")"
+  case "$name" in
+    ?*.workspace) repo_name="${name%.workspace}" ;;
+    *) die "destination must be named <repo>.workspace next to the repo (got '$name')" ;;
+  esac
+  [ "$dest" != "$SRC" ] || die "destination is the kit home itself"
+  [ ! -e "$dest/.agent-system" ] || die "$dest already has .agent-system: use 'agent-kit update'"
+  repo="$(dirname "$dest")/$repo_name"
+  git -C "$repo" rev-parse --verify HEAD >/dev/null 2>&1 \
+    || die "$repo is not a Git repository with at least one commit (the repo must sit next to $name)"
+  repo="$(cd "$repo" && pwd -P)"
+  link="$dest/$repo_name"
+  if [ -L "$link" ]; then
+    [ "$(readlink -f "$link")" = "$repo" ] || die "$link is a symlink to somewhere else"
+  elif [ -e "$link" ]; then
+    die "$link exists and is not a symlink to the repo"
+  fi
+  before="$(repo_status "$repo")"
+
+  echo "creating workspace $dest for repo $repo (kit from $SRC)"
+  do_ mkdir -p "$dest/gen-tasks" "$dest/worktrees" "$dest/notes"
+  [ -L "$link" ] || do_ ln -s "../$repo_name" "$link"
+  copy_kit "$dest"
+  if [ $DRY -eq 1 ]; then
+    echo "[dry-run] write .agent-system/config.json (project.path=$repo_name, worktree_root=worktrees)"
+    echo "[dry-run] write CLAUDE.md project notes, AGENTS.md, .gitignore"
+  else
+    python3 - "$SRC/.agent-system/config.json" "$dest" "$repo_name" "$repo" <<'PY'
+import json, os, sys
+tpl, dest, name, repo = sys.argv[1:]
+cfg = json.load(open(tpl))
+has = lambda *files: any(os.path.exists(os.path.join(repo, f)) for f in files)
+stacks = [("~/.gradle", ("build.gradle", "build.gradle.kts", "settings.gradle", "settings.gradle.kts", "gradlew"),
+           "./gradlew build"),
+          ("~/.m2", ("pom.xml",), "mvn verify"),
+          ("~/.npm", ("package.json",), "npm test"),
+          ("~/go/pkg/mod", ("go.mod",), "go test ./..."),
+          ("~/.cargo", ("Cargo.toml",), "cargo test")]
+found = [(d, cmd) for d, files, cmd in stacks if has(*files)]
+out = {}
+for k, v in cfg.items():  # keep the template's key order; project goes right after the header
+    if k == "project":
+        continue
+    out[k] = v
+    if k == "_comment":
+        out["project"] = {"path": name}
+out.setdefault("project", {"path": name})
+out["pool"]["worktree_root"] = "worktrees"
+out["worker"]["writable_dirs"] = [d for d, _ in found]
+with open(os.path.join(dest, ".agent-system", "config.json"), "w") as f:
+    json.dump(out, f, indent=2)
+    f.write("\n")
+build = " / ".join(f"`{c}`" for _, c in found) or "TODO"
+claude = os.path.join(dest, "CLAUDE.md")
+if not os.path.exists(claude):
+    with open(claude, "w") as f:
+        f.write(f"# {name}\n\n"
+                f"- This folder is the AI workspace (`.agent-system/docs/WORKSPACE-SETUP.md`); the repo is the\n"
+                f"  symlink `{name}/` -> `../{name}`. Never write AI tooling files into the repo.\n"
+                f"- Stack: TODO\n"
+                f"- Build and test (run inside `{name}/`): {build}\n"
+                f"- Generated code not to edit: TODO\n\n")
+print(f"config.json: project.path={name}, writable_dirs={[d for d, _ in found]}")
+PY
+    [ -e "$dest/.gitignore" ] || printf '.orchestrator/\nworktrees/\n**/__pycache__/\n' > "$dest/.gitignore"
+  fi
+  install_agent "$dest"
+  merge_settings "$dest/.claude/settings.json" "$repo"
+  merge_section "$dest/CLAUDE.md" "$SRC/.agent-system/templates/CLAUDE.section.md" orchestrator
+  merge_section "$dest/AGENTS.md" "$SRC/.agent-system/templates/AGENTS.section.md" worker
+  check_repo_unchanged "$repo" "$before"
+  [ $DRY -eq 1 ] || python3 "$dest/.agent-system/scheduler.py" --workspace-root "$dest" pool show >/dev/null \
+    || die "the new workspace does not load: check $dest/.agent-system/config.json"
+
+  echo
+  echo "done. Next, in $dest:"
+  echo "  1. fill in the TODOs at the top of CLAUDE.md; check gate commands and writable_dirs in .agent-system/config.json"
+  echo "  2. .agent-system/scripts/doctor.sh"
+  echo "  3. start Herdr there and run: claude --model claude-opus-5-5"
+}
+
+cmd_update() {
+  local dest repo="" before=""
+  dest="$(realpath -m -- "${FOLDER:-$PWD}")"
+  [ -f "$dest/.agent-system/config.json" ] || die "$dest has no .agent-system/config.json: use 'agent-kit create'"
+  [ "$dest" != "$SRC" ] || die "destination is the kit home itself"
+  repo="$(python3 - "$dest" <<'PY'
+import json, os, sys
+dest = sys.argv[1]
+p = json.load(open(os.path.join(dest, ".agent-system", "config.json"))).get("project", {}).get("path")
+print(os.path.realpath(os.path.join(dest, os.path.expanduser(p))) if p else "")
+PY
+)"
+  if [ -n "$repo" ]; then  # workspace mode: the repo must stay untouched
+    git -C "$repo" rev-parse --verify HEAD >/dev/null 2>&1 || die "project.path $repo is not a Git repository"
+    before="$(repo_status "$repo")"
+    do_ mkdir -p "$dest/gen-tasks" "$dest/worktrees" "$dest/notes"
+  fi
+
+  echo "updating kit in $dest from $SRC"
+  copy_kit "$dest"
+  install_agent "$dest"
+  merge_settings "$dest/.claude/settings.json" "$repo"
+  merge_section "$dest/CLAUDE.md" "$SRC/.agent-system/templates/CLAUDE.section.md" orchestrator
+  merge_section "$dest/AGENTS.md" "$SRC/.agent-system/templates/AGENTS.section.md" worker
+  python3 - "$SRC/.agent-system/config.json" "$dest/.agent-system/config.json" <<'PY'
+import json, sys
+new, cur = (json.load(open(p)) for p in sys.argv[1:])
+missing = [k for k in new if k not in cur and k != "project"]
+print("kept .agent-system/config.json" + (f"; the kit template has new keys: {missing}" if missing else ""))
+PY
+  [ -z "$repo" ] || check_repo_unchanged "$repo" "$before"
+  echo "done. Run .agent-system/scripts/doctor.sh in $dest"
+}
+
+cmd_legacy() {  # kit inside the target repo (your own repos only: also edits its .gitignore)
+  TARGET="$(cd "$TARGET" && pwd -P)"
+  [ "$SRC" != "$TARGET" ] || die "target is the kit home"
+  git -C "$TARGET" rev-parse --verify HEAD >/dev/null 2>&1 \
+    || die "$TARGET is not a Git repository with at least one commit (run 'git init && git add -A && git commit' first)"
+  echo "installing agent-system (in-repo mode) from $SRC into $TARGET"
+  copy_kit "$TARGET"
+  if [ -f "$TARGET/.agent-system/config.json" ]; then
+    echo "kept existing .agent-system/config.json (compare with $SRC/.agent-system/config.json)"
+  elif [ $DRY -eq 1 ]; then
+    echo "[dry-run] write .agent-system/config.json (worktree_root=../{repo_name}.agent-worktrees)"
+  else  # in-repo mode: worktrees must live outside the repo
+    python3 - "$SRC/.agent-system/config.json" "$TARGET/.agent-system/config.json" <<'PY'
+import json, sys
+src, dst = sys.argv[1:]
+cfg = json.load(open(src))
+cfg.pop("project", None)
+cfg["pool"]["worktree_root"] = "../{repo_name}.agent-worktrees"
+with open(dst, "w") as f:
+    json.dump(cfg, f, indent=2)
+    f.write("\n")
+PY
+  fi
+  install_agent "$TARGET"
+  merge_settings "$TARGET/.claude/settings.json"
+  merge_section "$TARGET/CLAUDE.md" "$SRC/.agent-system/templates/CLAUDE.section.md" orchestrator
+  merge_section "$TARGET/AGENTS.md" "$SRC/.agent-system/templates/AGENTS.section.md" worker
+  if ! grep -qE '^/?\.orchestrator/?$' "$TARGET/.gitignore" 2>/dev/null; then
+    do_ sh -c "printf '\n# multi-agent orchestration runtime state\n.orchestrator/\n.agent-system/**/__pycache__/\n' >> '$TARGET/.gitignore'"
+  fi
+  echo
+  echo "done. Next, in $TARGET: check .agent-system/config.json, run .agent-system/scripts/doctor.sh,"
+  echo "commit the kit, then open the repo in Herdr and start Claude"
+}
+
+case "$CMD" in
+  create) cmd_create ;;
+  update) cmd_update ;;
+  *) cmd_legacy ;;
+esac

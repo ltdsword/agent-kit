@@ -1,0 +1,45 @@
+{
+  "schema_version": 1,
+  "_comment": "Read by scheduler.py. Every worker slot resolves to worker.model + worker.reasoning_effort; there is deliberately no fallback/downgrade setting.",
+  "orchestrator": {"model": "claude-opus-5-5"},
+  "scout": {"agent": "scout", "model": "claude-sonnet-5-5", "effort": "medium", "agent_file": ".claude/agents/scout.md"},
+  "worker": {
+    "kind": "codex",
+    "model": "gpt-6-luna",
+    "reasoning_effort": "xhigh",
+    "profile": "worker",
+    "sandbox": "workspace-write",
+    "approval_policy": "on-request",
+    "trust_worktree": true,
+    "writable_dirs": []
+  },
+  "pool": {
+    "size": 3,
+    "slots": ["worker-1", "worker-2", "worker-3"],
+    "worktree_root": "worktrees"
+  },
+  "limits": {
+    "max_tasks_per_request": 3,
+    "max_parallel": 3,
+    "max_major_repairs": 2,
+    "max_scout_rounds": 3
+  },
+  "decisions": {
+    "_comment": "Critical kinds: the user decides (--decision <id> answered via scripts/decide). The first routine_repairs repairs of a task are routine: Opus decides with --reason, recorded in the task file. A kind removed from require_user_for becomes routine.",
+    "require_user_for": ["blocker", "repair", "scope_exception", "abandon"],
+    "routine_repairs": 1
+  },
+  "tasks": {
+    "dir": "gen-tasks",
+    "inline_diff_max_lines": 400
+  },
+  "herdr": {
+    "agent_start_timeout_ms": 120000,
+    "prompt_ack_timeout_ms": 30000
+  },
+  "gate": {
+    "post_merge_check": [".agent-system/scripts/verify.sh", "--quick"],
+    "verify_cmd": [".agent-system/scripts/verify.sh"],
+    "timeout_seconds": 1800
+  }
+}
