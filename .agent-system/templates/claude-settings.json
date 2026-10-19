@@ -1,10 +1,6 @@
 {
   "permissions": {
     "deny": [
-      "Bash(.agent-system/scripts/decide)",
-      "Bash(.agent-system/scripts/decide:*)",
-      "Bash(python3 .agent-system/scheduler.py decision answer)",
-      "Bash(python3 .agent-system/scheduler.py decision answer:*)",
       "Edit(.orchestrator/**/state.json)",
       "Write(.orchestrator/**/state.json)",
       "Edit(.orchestrator/**/decisions/**)",

@@ -1485,8 +1485,7 @@ class Scheduler:
                       f" ({(d.get('answer') or {}).get('by', '-')})"
                       for d in state.get("decisions", {}).values()] or ["- none"]
             lines += ["", "## Next", "",
-                      "Review this report and the total diff, then answer the merge decision with "
-                      "`.agent-system/scripts/decide`."]
+                      "Review this report and the total diff, then answer the merge decision in chat."]
             report_path.write_text("\n".join(lines) + "\n")
             state["report"] = {"report": self.rel(report_path), "diff": self.rel(diff_path), "at": now(), "sha": head}
             log_event(state, "report", sha=head)
@@ -1634,7 +1633,7 @@ class Scheduler:
     # ---- user-held decisions
     def decision_ask(self, run_id: str, kind: str, title: str, question: str, options: list[str],
                      task: str | None = None, recommend: str | None = None, followup: dict | None = None) -> dict:
-        """Open a decision for the USER. Opus never answers it; `scripts/decide` does, run by the user."""
+        """Open a decision for the USER. Opus asks in chat and records only the user's own reply."""
         if kind not in DECISION_KINDS:
             raise SchedulerError(f"kind must be one of {DECISION_KINDS}")
         parsed = []
@@ -1662,18 +1661,23 @@ class Scheduler:
                     f"**{title}**", "", question, "",
                     *[f"- `{o['key']}`: {o['label']}" + (" (recommended)" if o["key"] == recommend else "")
                       for o in parsed],
-                    "", f"Waiting for the user: `.agent-system/scripts/decide {run_id} {did} <KEY>`"])
+                    "", "Waiting for the user's answer in chat."])
             log_event(state, "decision_opened", id=did, decision_kind=kind, task=task)
         return {"decision": did, "status": "PENDING", "file": self.rel(path),
-                "user_command": f".agent-system/scripts/decide {run_id} {did} <KEY> [\"note\"]",
-                "wait_command": f"python3 .agent-system/scheduler.py decision wait --run {run_id} --id {did}"}
+                "next": "ask the user in chat (question, options, your recommendation) and end your turn; "
+                        "when they reply, record their exact words with `decision record --run "
+                        f"{run_id} --id {did} --choice <KEY> --quote \"...\"`"}
 
-    def decision_answer(self, run_id: str, did: str, choice: str, note: str = "", channel: str = "terminal",
-                        by: str | None = None, followup: str | None = None, value: str | None = None) -> dict:
-        """Record the USER's answer. The CLI refuses to run this from inside Claude (see main).
+    def decision_answer(self, run_id: str, did: str, choice: str, note: str = "", channel: str = "chat",
+                        by: str | None = None, followup: str | None = None, value: str | None = None,
+                        quote: str = "") -> dict:
+        """Record the USER's answer, given in chat. `quote` is the user's reply, verbatim (required).
 
         `followup`/`value` answer the decision's second question (e.g. the branch to merge into)
-        when the first choice needs it; an option with "input" takes the typed `value`."""
+        when the first choice needs it; an option with "input" takes the given `value`."""
+        if not quote.strip():
+            raise SchedulerError("record the user's own words: --quote \"<their reply, verbatim>\". "
+                                 "No reply from the user means no answer: ask them and wait.")
         with self.txn(run_id) as state:
             d = self._decision(state, did)
             if d["status"] != "PENDING":
@@ -1696,12 +1700,14 @@ class Scheduler:
                 fu_answer = {"choice": fo["key"], "label": fo["label"], "value": val}
             d["status"] = "ANSWERED"
             d["answer"] = {"choice": opt["key"], "label": opt["label"], "note": note, "channel": channel,
-                           "by": by or os.environ.get("USER", "user"), "at": now(),
+                           "by": by or os.environ.get("USER", "user"), "at": now(), "quote": quote.strip(),
                            **({"followup": fu_answer} if fu_answer else {})}
             self._write_decision_file(run_id, d)
             if d["task"]:
                 self._append_task_file(state["tasks"][d["task"]], f"Decision {did} answered by the user", [
-                    f"- Choice: **{opt['key']}**: {opt['label']}", *([f"- Note: {note}"] if note else [])])
+                    f"- Choice: **{opt['key']}**: {opt['label']}",
+                    *([f"- {fu['question']} `{fu_answer['value']}`"] if fu_answer else []),
+                    f"- User's words ({channel}): \"{quote.strip()}\"", *([f"- Note: {note}"] if note else [])])
             log_event(state, "decision_answered", id=did, choice=opt["key"], channel=channel)
             return {"decision": did, "status": "ANSWERED", "choice": opt["key"], "label": opt["label"],
                     **({"followup": fu_answer} if fu_answer else {})}
@@ -1764,6 +1770,8 @@ class Scheduler:
         if d.get("answer"):
             a = d["answer"]
             lines += ["", f"## Answer: {a['choice']} ({a['by']} via {a['channel']}, {a['at']})", a["note"] or ""]
+            if a.get("quote"):
+                lines += [f"- User's words: \"{a['quote']}\""]
             if a.get("followup"):
                 lines += [f"- {d['followup']['question']} {a['followup']['choice']}: `{a['followup']['value']}`"]
         path.write_text("\n".join(lines).rstrip() + "\n")
@@ -1817,8 +1825,8 @@ class Scheduler:
             self._record_opus_decision(state, kind, tid, action, reason)
             return
         hint = (f"{action} is critical and needs the user's decision (kind {kind}). Open one with `decision ask --run "
-                f"{state['run_id']} --kind {kind}{f' --task {tid}' if tid else ''} ...`, then wait for the "
-                "user to answer it with `.agent-system/scripts/decide`. Never answer it yourself.")
+                f"{state['run_id']} --kind {kind}{f' --task {tid}' if tid else ''} ...`, ask the user in chat, and "
+                "record only their own reply with `decision record ... --quote`. Never answer it yourself.")
         if not did:
             raise SchedulerError(hint)
         d = self._decision(state, did)
@@ -2179,13 +2187,14 @@ def build_parser() -> argparse.ArgumentParser:
     dl = des.add_parser("list", help="pending decisions (all runs)")
     dl.add_argument("--run")
     dl.add_argument("--all", action="store_true", help="include answered/cancelled")
-    dn = des.add_parser("answer", help="USER ONLY: answer from a real terminal (refused inside Claude)")
-    dn.add_argument("--run")
-    dn.add_argument("--id")
-    dn.add_argument("--choice")
-    dn.add_argument("--note", default="")
+    dn = des.add_parser("record", help="record the user's answer given in chat (their exact words in --quote)")
+    dn.add_argument("--run", required=True)
+    dn.add_argument("--id", required=True)
+    dn.add_argument("--choice", required=True, help="option key the user chose")
+    dn.add_argument("--quote", required=True, help="the user's reply, verbatim (never paraphrased)")
     dn.add_argument("--followup", help="key for the decision's second question (e.g. which branch)")
-    dn.add_argument("--value", help="typed value when that key asks for one (e.g. a branch name)")
+    dn.add_argument("--value", help="value the user gave for that key (e.g. a branch name)")
+    dn.add_argument("--note", default="", help="extra instructions from the user's reply")
 
     wa = sub.add_parser("wait", help="block until a RUNNING task reports (or its agent needs approval)")
     wa.add_argument("--run", required=True)
@@ -2250,15 +2259,6 @@ def build_parser() -> argparse.ArgumentParser:
     return ap
 
 
-def _inside_agent() -> str | None:
-    """Why this process looks like it was started by an agent rather than typed by the user."""
-    if os.environ.get("CLAUDECODE"):
-        return "CLAUDECODE is set (command launched by Claude Code)"
-    if not sys.stdin.isatty():
-        return "stdin is not a terminal"
-    return None
-
-
 def _decision_cli(s: "Scheduler", a) -> dict:
     if a.action == "ask":
         return s.decision_ask(a.run, a.kind, a.title, a.question, a.option, a.task, a.recommend)
@@ -2268,43 +2268,8 @@ def _decision_cli(s: "Scheduler", a) -> dict:
         return s.decision_cancel(a.run, a.id, a.reason)
     if a.action == "list":
         return {"decisions": s.decision_list(a.run, pending_only=not a.all)}
-    # answer: the user's channel. Refused when an agent runs it, so Opus cannot decide for the user.
-    why = _inside_agent()
-    if why:
-        raise SchedulerError(f"decision answer is for the user only ({why}). Run "
-                             "`.agent-system/scripts/decide` yourself in a normal terminal or Herdr pane.")
-    pending = s.decision_list(a.run)
-    if not a.id:
-        if not pending:
-            return {"decisions": "none pending"}
-        for i, d in enumerate(pending, 1):
-            print(f"[{i}] {d['run']}/{d['id']} ({d['kind']}{', task ' + d['task'] if d['task'] else ''}): {d['title']}")
-        pick = input("Which decision? [1] ").strip() or "1"
-        d = pending[int(pick) - 1]
-        a.run, a.id = d["run"], d["id"]
-    d = next((x for x in s.decision_list(a.run, pending_only=False) if x["id"] == a.id), None)
-    if not d:
-        raise SchedulerError(f"no decision {a.id} in run {a.run}")
-    print(f"\n{d['id']} ({d['kind']}): {d['title']}\n\n{d['question']}\n")
-    for o in d["options"]:
-        print(f"  {o['key']}: {o['label']}" + ("   <- recommended by Opus" if o["key"] == d["recommend"] else ""))
-    choice = a.choice or input("\nYour choice (key): ").strip()
-    followup, value, shown = a.followup, a.value, choice
-    fu = d.get("followup")
-    if fu and choice.upper() in fu["when"]:
-        if not followup:
-            print(f"\n{fu['question']}")
-            for o in fu["options"]:
-                print(f"  {o['key']}: {o['label']}")
-            followup = input("Your choice (key): ").strip()
-        fo = next((o for o in fu["options"] if o["key"].lower() == followup.lower()), None)
-        if fo and fo.get("input") and not value:
-            value = input("Branch name: ").strip()
-        shown = f"{choice}, {fo['label'] if fo and not fo.get('input') else value}" if fo else choice
-    note = a.note or (input("Note for Opus (optional): ").strip() if not a.choice else "")
-    if input(f"Confirm {d['id']} = {shown}? [y/N] ").strip().lower() != "y":
-        return {"decision": a.id, "status": "PENDING", "result": "not confirmed"}
-    return s.decision_answer(a.run, a.id, choice, note, channel="terminal", followup=followup, value=value)
+    return s.decision_answer(a.run, a.id, a.choice, a.note, channel="chat", followup=a.followup, value=a.value,
+                             quote=a.quote)
 
 
 def main(argv=None) -> int:

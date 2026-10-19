@@ -28,10 +28,12 @@ How to operate (details: `.agent-system/GUIDE.md`, `.agent-system/README.md`):
    <file>`: it writes `.orchestrator/runs/<run>/final-report.md` and one total diff `final.diff`, so the
    user never has to compare worktrees. In chat, give the summary (what changed, tasks/commits, gate
    evidence, risks, your routine calls) and both paths. Then `scheduler.py finish ask --run <run>
-   --recommend A|B|C` and tell the user to run `.agent-system/scripts/decide`: it asks (1) A merge and
-   push / B merge locally only / C don't merge, then (2) for A/B, which branch: this branch or another
-   one they type. Wait with `decision wait`, then `scheduler.py finish apply --run <run> --decision D<n>`
-   and report its result (merged into, pushed to, cleanup). If apply refuses (uncommitted changes in the
+   --recommend A|B|C` and ask in chat, one question at a time: (1) "A merge and push / B merge locally
+   only / C don't merge"; if they pick A or B, (2) "What branch do you choose to merge? A this branch
+   (<name>) / B other branch (type its name)". Record their replies together:
+   `decision record --run <run> --id D<n> --choice <A|B|C> [--followup <A|B> [--value <branch>]]
+   --quote "<their replies, verbatim>"`, then `scheduler.py finish apply --run <run> --decision D<n>` and
+   report its result (merged into, pushed to, cleanup). If apply refuses (uncommitted changes in the
    user's folder, conflict, failed gate, no remote), tell the user exactly why; the decision stays
    usable when nothing changed. Never merge, push or deploy any other way.
 
@@ -43,7 +45,7 @@ Critical (the user decides; never resolve alone):
 - any change to requirements, scope, acceptance criteria, public contracts/APIs/schemas,
   dependencies, security-sensitive behavior, data or migrations, or anything irreversible;
 - merging or pushing the result (`finish ask`; always the user's call);
-- a worker approval prompt (Herdr `blocked`): never answer it yourself;
+- a worker approval prompt (Herdr `blocked`): ask the user; never approve it on your own;
 - a final-gate failure or integration conflict whose cause or fix is not clear-cut;
 - when you are unsure whether something is critical: treat it as critical.
 
@@ -53,22 +55,26 @@ via `repair ... --reason "<evidence>"`; MINOR_FIX; re-collect after a report-for
 `relaunch` of a lost session; correcting your own plan steps without changing goal, acceptance,
 or owned paths. The scheduler records each routine call in the task file; list them in your report.
 
-For a critical decision:
+For a critical decision (the user answers in chat; they get notified through Herdr / Remote Control):
 1. `scheduler.py decision ask --run <run> --kind blocker|repair|scope_exception|abandon|worker_approval|question
    [--task T] --title "..." --question "<what happened, evidence, consequence of each option>"
-   --option A="..." --option B="..." --recommend A`. Write it so the user can decide without
-   reading the code: short, concrete, with your recommendation.
-2. Tell the user in one line: what is blocked and `.agent-system/scripts/decide` (they run it in a
-   normal terminal or Herdr pane; it refuses to run inside Claude).
-3. Run `scheduler.py decision wait --run <run> --id D<n>` in the background; continue only work
-   that does not depend on the answer. When it returns, carry out exactly the chosen option.
-4. Pass the answered id to the command that acts: `repair|task-unblock|run close|commit-task
-   --allow-outside|mark-reviewed --accept-scope|--verdict FAIL ... --decision D<n>`. The scheduler
-   refuses critical actions without an answered, unused decision of the right kind (and routine
-   ones without a reason).
-Never run `decide` or `decision answer`, never edit `.orchestrator/**/state.json` or decision
-files, and never route around a refusal. If the user answers in chat instead, ask them to record
-it with `decide`.
+   --option A="..." --option B="..." --recommend A`.
+2. Ask the user in chat, short enough to answer from a phone: the decision id, what happened (2-3
+   lines), the options with keys, and your recommendation, ending with e.g. "Reply with D3 A, B or C".
+   Then end your turn (send a push notification first if that tool is available). Do not continue
+   work that depends on the answer.
+3. When the user replies: if the reply clearly picks one option of that decision, record it with
+   `scheduler.py decision record --run <run> --id D<n> --choice <KEY> --quote "<their reply, verbatim>"`
+   (add `--note` for extra instructions in the reply). If it is ambiguous, or could mean a different
+   decision, ask again; never guess.
+4. Carry out exactly the chosen option, passing the id to the command that acts: `repair|task-unblock|
+   run close|commit-task --allow-outside|mark-reviewed --accept-scope|--verdict FAIL|finish apply ...
+   --decision D<n>`. For `worker_approval`: send the matching key to the worker's prompt with
+   `herdr agent send-keys`, then check that it left `blocked`. The scheduler refuses critical actions
+   without an answered, unused decision of the right kind (and routine ones without a reason).
+Record only what the user actually wrote, in their words: never invent, paraphrase or pre-fill an
+answer, never record one from your own reasoning, never edit `.orchestrator/**/state.json` or
+decision files, and never route around a refusal.
 
 Rules: Herdr `idle` is not success; the scheduler's state is the authority for leases; never
 `git reset --hard`/`clean` an unknown worktree; never dispatch non-trivial work before READY.

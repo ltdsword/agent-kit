@@ -1,4 +1,6 @@
-# agent-kit
+# agent-kit: Low-cost solution for Multi-agent systen to Developers
+
+---
 
 A kit for multi-agent coding on any Git repository. You ask Claude for a change; Claude plans it,
 Codex workers implement it in parallel git worktrees, Claude reviews and integrates the results into
@@ -19,7 +21,7 @@ You ──request──> Claude Opus 5.5 (orchestrator: plans, reviews, integrat
                    ▼
                  final report + one total diff  (.orchestrator/runs/<run>/final-report.md, final.diff)
                    ▼
-You answer one decision with `decide`:
+Claude asks you in chat (you get notified via Herdr / Remote Control), you reply:
    1) A merge and push   B merge locally only, no push   C don't merge
    2) if A/B: which branch?   A this branch (<name>)   B other branch (you type it)
                    ▼
@@ -122,8 +124,8 @@ Then type a request in Claude, for example:
 > Add input validation to `registerUser`: reject empty names and malformed emails with a clear
 > error in `RegisterUserResp`, and add unit tests. Use the multi-agent workflow.
 
-When the run is done, Claude gives you the report and total diff, and `decide` asks whether to
-merge and push, and into which branch (section 6).
+When the run is done, Claude gives you the report and total diff and asks in chat whether to merge
+and push, and into which branch (section 6).
 
 ---
 
@@ -167,8 +169,10 @@ the same). Use that only for repos you own.
 - Results land on `agent/integration-<run>`. Your branches change, and anything is pushed, only after
   you answer the merge decision; merges are fast-forwards and pushes never use force.
 - Dirty worker worktrees are quarantined, never reset or cleaned.
-- Critical decisions belong to you (section 8). Claude cannot answer them: `.claude/settings.json`
-  denies it, and the scheduler refuses critical actions without your recorded answer.
+- Critical decisions belong to you (section 8). Claude asks in chat and stops; the scheduler refuses
+  critical actions until your answer is recorded, and every answer is stored with your exact words,
+  so you can audit what Claude acted on. This is a guardrail, not a sandbox: it relies on Claude
+  following its rules, and every step is logged.
 - `agent-kit` never writes into the repo and fails if the repo's `git status` changes while it runs.
 
 ---
@@ -255,28 +259,22 @@ Notes:
 3. **Watch** (optional): `ctrl+b w` jumps to a worker's Herdr workspace (`<run>-worker-N`).
    `ctrl+b q` detaches; agents keep running. Claude acts only while its turn is active: when you come
    back, ask it to "resume run r1".
-4. **Decide**: when Claude says a decision is waiting, run `.agent-system/scripts/decide` yourself in a
-   normal terminal or Herdr pane (section 8).
+4. **Decide**: when Claude needs you, it asks in chat and stops; Herdr (and Remote Control, if you use
+   it) notifies you. Reply with the decision id and your choice, e.g. `D3 A`, from the terminal or your
+   phone (section 8).
 5. **Review and merge** when the run is DONE. Claude runs `report` and gives you a summary plus two files:
    `.orchestrator/runs/<run>/final-report.md` (tasks, commits, files, gate result, risks, decisions) and
-   `final.diff` (everything the run changed, as one diff). Read them, then run
-   `.agent-system/scripts/decide`:
+   `final.diff` (everything the run changed, as one diff). Then Claude asks, one question at a time:
 
    ```text
-   D3 (finish): Merge run r1?
-     A: Merge and push
-     B: Merge locally only, no push   <- recommended by Opus
-     C: Don't merge
-   Your choice (key): B
-
-   What branch do you choose to merge?
-     A: This branch (main)
-     B: Other branch (type its name; a new name creates that branch)
-   Your choice (key): A
-   Confirm D3 = B, This branch (main)? [y/N] y
+   Claude: D3 - merge run r1?  A merge and push / B merge locally only / C don't merge.
+           I recommend B. Reply with D3 A, B or C.
+   You:    D3 B
+   Claude: What branch do you choose to merge?  A this branch (main) / B other branch (type its name)
+   You:    A
    ```
 
-   Claude then runs `finish apply`:
+   Claude records your replies word for word (`decision record ... --quote`) and runs `finish apply`:
    - **Merge into a branch checked out in your folder** (usually "this branch"): your folder must have no
      uncommitted changes (commit or stash first); your files update to the result.
    - **Other branch**: a new name is created at the result, an existing one is fast-forwarded; your
@@ -307,8 +305,6 @@ Most of these are run by Claude as orchestrator. The ones marked **you** are mea
 |---|---|---|
 | `.agent-system/scripts/doctor.sh [--probe-codex]` | you | Tool versions, Herdr and Codex status, sandbox check, then `scheduler.py doctor`. `--probe-codex` makes one tiny live gpt-6-luna request |
 | `.agent-system/scripts/verify.sh [--quick] [--dir PATH]` | you / scheduler | Quality gate for the stacks in section 5. `--quick` = post-merge smoke test |
-| `.agent-system/scripts/decide` | **you only** | List pending decisions, pick one, choose, confirm. Refuses to run inside Claude |
-| `.agent-system/scripts/decide <run> <id> <KEY> ["note"]` | **you only** | Answer one decision directly (still asks for confirmation) |
 
 ### Setup and inspection
 
@@ -368,10 +364,10 @@ Most of these are run by Claude as orchestrator. The ones marked **you** are mea
 | Command | Who | What it does |
 |---|---|---|
 | `S decision ask --run R --kind KIND [--task T] --title ".." --question ".." --option A=".." --option B=".." [--recommend A]` | Claude | Open a decision for you. Kinds: `blocker`, `repair`, `scope_exception`, `abandon`, `worker_approval`, `question` |
-| `S decision wait --run R --id D<n> [--timeout SEC]` | Claude | Wait for your answer |
+| `S decision record --run R --id D<n> --choice K --quote "<your reply>" [--followup K [--value TEXT]] [--note ..]` | Claude | Record the answer you gave in chat, with your exact words (`--followup`/`--value` for the second question, e.g. the branch) |
+| `S decision wait --run R --id D<n> [--timeout SEC]` | Claude | Block until a decision is answered (rarely needed: Claude simply stops and waits for your reply) |
 | `S decision list [--run R] [--all]` | anyone | Show pending (or all) decisions |
 | `S decision cancel --run R --id D<n> --reason ".."` | Claude | Withdraw a decision that is no longer needed |
-| `S decision answer [--run R --id D<n> --choice K] [--followup K --value TEXT]` | **you only** | What `decide` runs (`--followup`/`--value` answer the second question, e.g. the branch); denied to Claude |
 
 ### Task states
 
@@ -384,14 +380,14 @@ pushed to, or not merged). One run is active at a time.
 
 ## 8. Who decides what
 
-**You decide (critical)**, through `.agent-system/scripts/decide`:
+**You decide (critical)**. Claude opens a decision, asks you in chat, and stops until you reply:
 
 - unblocking a BLOCKED task, or a 2nd+ repair of the same task;
 - accepting changes outside a task's owned paths; giving up a task (FAIL) or a run;
 - any change to requirements, scope, acceptance criteria, public APIs/schemas, dependencies,
   security-sensitive behavior, data or migrations, or anything irreversible;
 - **worker approval prompts** (Herdr shows the worker as `blocked`): Claude shows you what is asked,
-  with a recommendation, but never answers it;
+  with a recommendation; if you approve, it types the matching key into the worker's prompt;
 - a final-gate failure or integration conflict whose fix is not clear-cut;
 - **merging and pushing the result** (`finish ask`): always yours, whatever `decisions.require_user_for` says.
 
@@ -424,8 +420,8 @@ To avoid approval prompts in the first place, list the build cache folders your 
 | `herdr.*_timeout_ms` | Agent start and prompt acknowledgement timeouts |
 | `gate.post_merge_check`, `gate.verify_cmd`, `gate.timeout_seconds` | Commands for the post-merge check and the final gate |
 
-`.claude/settings.json` in the workspace holds the deny rules (Claude cannot run `decide` or edit
-decision state) and `permissions.additionalDirectories` with the real repo path, so Claude started in
+`.claude/settings.json` in the workspace holds the deny rules (Claude cannot edit run state or decision
+files directly) and `permissions.additionalDirectories` with the real repo path, so Claude started in
 the workspace can read and edit the repo through the symlink.
 
 ---
@@ -449,10 +445,10 @@ agent-kit update --folder=~/Code/myrepo              # roll it out to each works
 | `config.json` | Config template (no `project`; `create` fills it in) |
 | `prompts/` | Task and repair file templates, review checklist, research packet, readiness gate |
 | `scripts/install.sh` | `agent-kit` itself |
-| `scripts/doctor.sh`, `verify.sh`, `decide` | Health check, quality gate, your decision tool |
+| `scripts/doctor.sh`, `verify.sh` | Health check, quality gate |
 | `templates/` | `CLAUDE.md`/`AGENTS.md` sections and Claude deny rules |
 | `tests/test_scheduler.py` | Scheduler, workspace mode and installer tests |
-| `docs/` | Workspace rule, Decision Hub plan |
+| `docs/` | Workspace rule; Decision Hub plan (not planned) |
 | `../.claude/agents/scout.md` | The Sonnet scout definition |
 
 ---
@@ -467,7 +463,7 @@ agent-kit update --folder=~/Code/myrepo              # roll it out to each works
 | Worker: `bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted` | Add the bubblewrap AppArmor profile (GUIDE.md Part 2, step 2) |
 | Worker's build fails on a lock file in `~/.gradle` (or another cache) | Add that cache folder to `worker.writable_dirs` |
 | Report says `committed: false`, `index.lock: Read-only file system` | Expected: the sandbox keeps `.git` read-only. Review, then `commit-task` |
-| A worker sits `blocked` | It wants an approval: Claude opens a decision; answer with `decide` |
+| A worker sits `blocked` | It wants an approval: Claude asks you in chat; reply with your choice |
 | `collect` says `pending` / `ambiguous` | No report yet / report disagrees with git: inspect `worktrees/worker-N` |
 | `doctor`: `project-clean-of-kit` FAIL | AI tooling files show in the repo's `git status`: move them to the workspace |
 | `agent-kit create`: "inside a Git repository, not its top folder" | Run it from the repo's top folder, or pass `--folder=<repo>` |
@@ -483,7 +479,8 @@ Inside `.agent-system/` (copied into every workspace):
 - `GUIDE.md`: step-by-step walkthrough (Herdr basics, setup, first task, adopting results).
 - `README.md`: scheduler file and command reference.
 - `docs/WORKSPACE-SETUP.md`: the workspace rule (why the tooling lives outside the repo) and setup.
-- `docs/DECISION-HUB-PLAN.md`: plan for a web dashboard and remote decisions (not built).
+- `docs/DECISION-HUB-PLAN.md`: a web dashboard for remote decisions, not planned: Claude Remote Control
+  plus chat answers covers it for a single user. Kept for reference.
 - `prompts/review-checklist.md`, `prompts/task-packet.md`: how tasks are written and reviewed.
 
 ---

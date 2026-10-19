@@ -13,7 +13,7 @@ User request -> Claude Opus 5.5 (orchestrator: plan, review, integrate)
                  -> wait -> collect (diff captured + appended to the task file) -> Opus review
                  (verdict + report appended) -> sequential cherry-pick onto agent/integration-<run>
                  -> post-merge check -> verify.sh full gate -> report (final-report.md + final.diff)
-                 -> you answer `finish ask` with decide (merge+push / merge / don't; which branch)
+                 -> Opus asks in chat (`finish ask`): merge+push / merge / don't; which branch
                  -> finish apply: fast-forward, push if chosen (never force), cleanup
 ```
 
@@ -31,7 +31,6 @@ User request -> Claude Opus 5.5 (orchestrator: plan, review, integrate)
 | `scripts/doctor.sh` | Tooling/model/integration report (`--probe-codex` for a live model check) |
 | `scripts/verify.sh` | Stack-detecting quality gate (`--quick` for post-merge smoke) |
 | `scripts/install.sh` | `agent-kit create/update [--folder=<repo>]`: create `<repo>.workspace` next to the repo with the kit, or refresh it (`docs/WORKSPACE-SETUP.md` section 4). `agent-kit <repo>`: legacy in-repo install |
-| `scripts/decide` | **You** answer pending decisions (refuses to run inside Claude) |
 | `docs/WORKSPACE-SETUP.md` | Rule for work projects: tooling in `<repo>.workspace/`, repo via symlink (workspace mode) |
 | `docs/DECISION-HUB-PLAN.md` | Plan: web dashboard + remote decisions (not built yet) |
 | `templates/claude-settings.json` | Deny rules: Claude can't answer decisions or edit decision state |
@@ -66,7 +65,7 @@ Prefix every command with `python3 .agent-system/scheduler.py`. Add `--json` bef
 | `relaunch --run ID --task T` | Restart a lost session for a RUNNING task (same worktree) |
 | `decision ask --run ID --kind K [--task T] --title .. --question .. --option A=.. --option B=.. [--recommend A]` | Opus asks the user (kinds: blocker, repair, scope_exception, abandon, worker_approval, question) |
 | `decision wait --run ID --id D1` / `decision list [--all]` / `decision cancel` | Wait for / list / withdraw decisions |
-| `decision answer` (via `scripts/decide`) | User only; refused when run by Claude or without a terminal |
+| `decision record --run ID --id D<n> --choice K --quote "<user's reply>" [--followup K --value V]` | Record the user's chat answer with their exact words |
 | `wait --run ID [--task T] [--timeout 540]` | Block until a worker writes its report or shows an approval prompt; exit 3 on timeout |
 | `collect --run ID --task T` | Validate the report against git (`pending` / `ambiguous` / `REVIEW`); save `reports/T.diff` (commits + uncommitted + new files); append "Worker result" to the task file |
 | `commit-task --run ID --task T -m MSG` | Audited orchestrator commit of an uncommitted worker diff or Opus minor fix |
@@ -102,10 +101,11 @@ user decision of the right kind for that task: `task-unblock` (blocker), `run cl
 --accept-scope` (scope_exception), and `repair` (repair) from the task's 2nd repair on. The first
 `decisions.routine_repairs` repairs (default 1) are routine: `repair ... --reason "<evidence>"`.
 Configure in `config.json` -> `decisions`. Policy-level critical items (requirement/scope/API/
-dependency/security/data changes, worker approval prompts) are in `CLAUDE.md`. Guardrails: deny rules in `.claude/settings.json`, `decide` refuses
-when `CLAUDECODE` is set or there is no terminal, and every answer is logged and appended to the
-task file. Local guardrails stop accidents; signed answers from the planned hub are the strong
-form (see `docs/DECISION-HUB-PLAN.md`, section 12.3).
+dependency/security/data changes, worker approval prompts, merge/push) are in `CLAUDE.md`. The user
+answers in chat; Opus records only the user's reply, verbatim (`decision record --quote`), and every
+answer is logged with those words in the decision file and the task file. Deny rules in
+`.claude/settings.json` keep Claude from editing state and decision files directly. These are
+guardrails that make every decision auditable, not a sandbox.
 
 ## State machine
 

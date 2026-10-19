@@ -28,7 +28,7 @@ normally. Nothing else is written into the repo.
 5. **The repo's own instructions win.** If the team ships its own `CLAUDE.md`/`AGENTS.md`, keep
    it. Ours add orchestration rules and must not contradict it.
 6. **Humans approve the merge and push.** Agents work on `agent/*` branches and git worktrees. You review
-   the final report and total diff and answer the merge decision (`finish ask` / `decide`); the scheduler
+   the final report and total diff and answer the merge decision in chat (`finish ask`); the scheduler
    then fast-forwards the branch you chose and pushes only if you chose to, never with force. If team
    conventions require a PR, choose "merge and push" with a new branch name (e.g. `feature/...`) and
    open the PR yourself; never push straight to a protected team branch.

@@ -141,7 +141,7 @@ What happens next, and where you come in:
 | 8. Integrate | scheduler | Accepted commits are cherry-picked onto `agent/integration-<run>`; `./gradlew test` after each |
 | 9. Final gate | scheduler | `verify.sh` (full `./gradlew build` + checks); run is DONE only if it passes |
 | 10. Report | Opus | Summary in chat + `final-report.md` and one total diff `final.diff` |
-| 11. Merge decision | You | `decide`: A merge and push / B merge locally / C don't merge, then which branch |
+| 11. Merge decision | You | In chat: A merge and push / B merge locally / C don't merge, then which branch |
 | 12. Finish | scheduler | Fast-forward the chosen branch, push if A (never force), clean up worktrees and branches |
 
 Under the hood Opus runs commands like these (you can run them too):
@@ -192,18 +192,19 @@ data change, a worker's approval prompt, an unclear final-gate failure. Routine,
 and writes its reason into the task file: the first repair with clear evidence (failing test,
 review finding, mechanical conflict), minor fixes, relaunching a lost session, fixing its own plan
 steps without changing the goal. For a critical one, Opus opens a decision (question, evidence,
-options, its recommendation) and tells you in one line. Answer it yourself in a normal terminal or
-a spare Herdr pane:
+options, its recommendation), asks you in chat, and stops. Herdr marks the session as waiting, and
+Remote Control (if you use it) notifies your phone. Reply in the chat:
 
-```bash
-.agent-system/scripts/decide            # lists pending decisions, pick, choose, confirm
-.agent-system/scripts/decide r1 D2 B "use the 2024 contract"   # direct
+```text
+Claude: D2 - T1 is blocked: the spec doesn't say whether to use contract X or Y.
+        A use X / B use Y. I recommend A. Reply with D2 A or B.
+You:    D2 B, use the 2024 contract
 ```
 
-`decide` refuses to run inside Claude, and Claude is denied from running it. The scheduler refuses
-critical actions (`task-unblock`, 2nd+ `repair`, `run close`, scope exceptions, FAIL) without your
-answered decision, and routine ones without Opus's reason.
-Opus waits in the background and continues as soon as you answer. Every question and answer is
+Opus records your reply word for word (`decision record --run r1 --id D2 --choice B --quote "..."`) and
+carries it out. The scheduler refuses critical actions (`task-unblock`, 2nd+ `repair`, `run close`,
+scope exceptions, FAIL, merge/push) without a recorded answer, and routine ones without Opus's reason.
+If your reply is ambiguous, Opus asks again instead of guessing. Every question and answer is
 appended to the task file and saved in `.orchestrator/runs/<run>/decisions/`. Tune it in
 `config.json` -> `decisions`: `require_user_for` (critical kinds) and `routine_repairs` (how many
 repairs per task Opus may start alone; default 1, set 0 to approve every repair).
@@ -219,26 +220,18 @@ for three workers and a DAG for a one-line change.
 
 ## Part 5 - Adopting the result
 
-Nothing touches your branches until you decide. When the run is DONE, Opus runs `report` and points you
+Nothing touches your branches until you answer. When the run is DONE, Opus runs `report` and points you
 to two files in `.orchestrator/runs/<run>/`: `final-report.md` (tasks, commits, files, gate, risks,
 decisions) and `final.diff` (the whole run as one diff; no need to look at individual worktrees). You
 can also inspect the branch directly: `git -C thrift-demo log --oneline main..agent/integration-r1`.
 
-Then Opus opens the merge decision and you run `.agent-system/scripts/decide`:
+Then Opus asks you in chat, one question at a time:
 
 ```text
-D3 (finish): Merge run r1?
-  A: Merge and push
-  B: Merge locally only, no push   <- recommended by Opus
-  C: Don't merge
-Your choice (key): A
-
-What branch do you choose to merge?
-  A: This branch (main)
-  B: Other branch (type its name; a new name creates that branch)
-Your choice (key): B
-Branch name: feature/register-validation
-Confirm D3 = A, feature/register-validation? [y/N] y
+Claude: D3 - merge run r1?  A merge and push / B merge locally only / C don't merge. I recommend B.
+You:    D3 A
+Claude: What branch do you choose to merge?  A this branch (main) / B other branch (type its name)
+You:    B feature/register-validation
 ```
 
 Opus then runs `finish apply`. It fast-forwards the chosen branch (a new name is created at the result;

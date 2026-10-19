@@ -67,9 +67,15 @@ path, tpl, repo = sys.argv[1:]
 cur = json.load(open(path)) if os.path.exists(path) else {}
 perms = cur.setdefault("permissions", {})
 deny = perms.setdefault("deny", [])
+# rules for the removed `decide` script / `decision answer` command (answers now come through chat)
+obsolete = [r for r in deny if "scripts/decide" in r or "scheduler.py decision answer" in r]
+for r in obsolete:
+    deny.remove(r)
 added = [r for r in json.load(open(tpl))["permissions"]["deny"] if r not in deny]
 deny.extend(added)
 msg = f"settings.json: {len(added)} deny rule(s) added" if added else "settings.json: deny rules present"
+if obsolete:
+    msg += f"; {len(obsolete)} obsolete rule(s) removed"
 if repo:
     dirs = perms.setdefault("additionalDirectories", [])
     if repo not in dirs:

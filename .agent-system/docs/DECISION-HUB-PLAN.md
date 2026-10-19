@@ -1,7 +1,12 @@
 # Agent Hub: web dashboard and remote decisions for the multi-agent workflow
 
-Status: **plan, not built** (written 2026-10-16). Builds on the local decision system that already
-exists in `scheduler.py` (`decision ask / wait / answer`, gated commands, `scripts/decide`).
+Status: **not planned** (decided 2026-10-19). For a single user, Claude Code Remote Control covers
+what this hub was for: notifications reach your phone, and you answer decisions in the Claude chat,
+which Opus records with your exact words (`decision record --quote`). The `scripts/decide` terminal
+tool this plan builds on has been removed. Kept for reference, e.g. if a team ever needs a shared
+dashboard. A review on 2026-10-19 found it would need changes first: asymmetric answer signatures
+(the HMAC key in 12.3 would sit on the same machine as the agent), the `finish` decision and its
+branch question, long `decision wait` timeouts, and polling only while a decision is pending.
 
 Contents
 1. Summary and feasibility

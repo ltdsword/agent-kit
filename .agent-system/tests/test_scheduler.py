@@ -132,7 +132,7 @@ class Base(unittest.TestCase):
         """Open a decision as Opus would and answer it as the user would; returns its id."""
         did = self.s.decision_ask(run, kind, f"{kind}?", "what happened", ["A=go ahead", "B=stop"], task,
                                   "A")["decision"]
-        self.s.decision_answer(run, did, choice, "ok", by="tester")
+        self.s.decision_answer(run, did, choice, "ok", by="tester", quote=f"{did} {choice}")
         return did
 
     def drive_to_merged(self, run, tid):
@@ -606,7 +606,8 @@ class TestDecisions(Base):
         wrong = self.user_decides("r1", "repair", "T1")
         with self.assertRaisesRegex(S.SchedulerError, "needs kind blocker"):
             self.s.task_unblock("r1", "T1", decision=wrong)
-        self.s.decision_answer("r1", did, "b", "Y is the 2024 contract", by="tester")
+        self.s.decision_answer("r1", did, "b", "Y is the 2024 contract", by="tester",
+                               quote=f"{did} B, Y is the 2024 contract")
         self.assertEqual(self.s.task_unblock("r1", "T1", decision=did)["status"], "READY")
         st = self.s.store.load("r1")
         self.assertIn("task-unblock", st["decisions"][did]["consumed_by"])
@@ -667,14 +668,14 @@ class TestDecisions(Base):
         ticks = iter(range(100))
         out = self.s.decision_wait("r1", did, timeout_s=2, sleep=lambda s: None, clock=lambda: next(ticks))
         self.assertEqual(out["result"], "timeout")
-        self.s.decision_answer("r1", did, "A", by="tester")
+        self.s.decision_answer("r1", did, "A", by="tester", quote="A")
         self.assertEqual(self.s.decision_wait("r1", did)["answer"]["choice"], "A")
         with self.assertRaisesRegex(S.SchedulerError, "not PENDING"):
-            self.s.decision_answer("r1", did, "B")
+            self.s.decision_answer("r1", did, "B", quote="B")
         d2 = self.s.decision_ask("r1", "question", "Other?", "q", ["A=x", "B=y"])["decision"]
         self.s.decision_cancel("r1", d2, "superseded")
         with self.assertRaisesRegex(S.SchedulerError, "CANCELLED"):
-            self.s.decision_answer("r1", d2, "A")
+            self.s.decision_answer("r1", d2, "A", quote="A")
         with self.assertRaisesRegex(S.SchedulerError, "at least 2 options"):
             self.s.decision_ask("r1", "question", "t", "q", ["A=only"])
 
@@ -706,18 +707,25 @@ class TestDecisions(Base):
         with self.assertRaisesRegex(S.SchedulerError, "critical"):
             self.s.close_run("r1", "BLOCKED", "Opus gives up")
 
-    def test_cli_answer_refused_inside_claude_or_without_tty(self):
+    def test_record_needs_users_words_and_logs_them(self):
         self.s.create_run("r1", [self.task("T1", trivial=True)])
-        did = self.s.decision_ask("r1", "question", "Which?", "q", ["A=x", "B=y"])["decision"]
-        argv = ["--repo-root", str(self.repo), "decision", "answer", "--run", "r1", "--id", did, "--choice", "A"]
-        with mock.patch.object(S, "load_config", return_value=self.cfg), mock.patch("sys.stderr") as err:
-            with mock.patch.dict(os.environ, {"CLAUDECODE": "1"}):
-                self.assertEqual(S.main(argv), 1)
-            with mock.patch.dict(os.environ, {"CLAUDECODE": ""}), mock.patch("sys.stdin") as stdin:
-                stdin.isatty.return_value = False
-                self.assertEqual(S.main(argv), 1)
-        self.assertIn("user only", "".join(str(c) for c in err.write.call_args_list))
+        did = self.s.decision_ask("r1", "blocker", "Which?", "q", ["A=x", "B=y"], "T1")["decision"]
+        for quote in ("", "   "):
+            with self.assertRaisesRegex(S.SchedulerError, "user's own words"):
+                self.s.decision_answer("r1", did, "A", quote=quote)
         self.assertEqual(self.s.store.load("r1")["decisions"][did]["status"], "PENDING")
+        argv = ["--repo-root", str(self.repo), "decision", "record", "--run", "r1", "--id", did,
+                "--choice", "b", "--quote", "D1 b, keep the old name", "--note", "keep the old name"]
+        with mock.patch.object(S, "load_config", return_value=self.cfg), mock.patch("builtins.print"):
+            self.assertEqual(S.main(argv), 0)
+        a = self.s.store.load("r1")["decisions"][did]["answer"]
+        self.assertEqual((a["choice"], a["channel"], a["quote"]), ("B", "chat", "D1 b, keep the old name"))
+        self.assertIn('User\'s words (chat): "D1 b, keep the old name"', (self.repo / "packets" / "T1.md").read_text())
+        dfile = self.s.store.run_dir("r1") / "decisions" / f"{did}.md"
+        self.assertIn('User\'s words: "D1 b, keep the old name"', dfile.read_text())
+        with mock.patch.object(S, "load_config", return_value=self.cfg), mock.patch("sys.stderr"):
+            with self.assertRaises(SystemExit):  # --quote is required on the command line
+                S.main(argv[:-4])
 
     def test_gate_can_be_relaxed_in_config(self):
         self.cfg["decisions"]["require_user_for"] = ["abandon"]
@@ -851,7 +859,8 @@ class TestFinish(WorkspaceBase):
     def ask_and_answer(self, choice, followup=None, value=None, run="r1"):
         self.s.report(run, "Added t1/out.txt.")
         did = self.s.finish_ask(run, "B")["decision"]
-        self.s.decision_answer(run, did, choice, "ok", by="tester", followup=followup, value=value)
+        self.s.decision_answer(run, did, choice, "ok", by="tester", followup=followup, value=value,
+                               quote=f"{choice} {followup or ''} {value or ''}".strip())
         return did
 
     def head(self, ref="main"):
@@ -886,7 +895,7 @@ class TestFinish(WorkspaceBase):
                             ({"followup": "B", "value": "bad..name"}, "not a valid branch"),
                             ({"followup": "B", "value": "agent/x"}, "agent branch")):
             with self.assertRaisesRegex(S.SchedulerError, msg):
-                self.s.decision_answer("r1", did, "B", **kwargs)
+                self.s.decision_answer("r1", did, "B", quote="B", **kwargs)
         st = self.s.store.load("r1")
         self.assertTrue(self.s._is_critical(st, "finish", None))
         self.s.cfg["decisions"]["require_user_for"] = []
@@ -959,41 +968,36 @@ class TestFinish(WorkspaceBase):
             self.s.finish_apply("r1", did)
         self.assertEqual(self.head(), self.base_sha)
 
-    def decide_interactively(self, keys):
-        """Simulate the user's terminal session in `decide` (answers typed in order)."""
-        args = S.build_parser().parse_args(["decision", "answer", "--run", "r1"])
-        with mock.patch.object(S, "_inside_agent", return_value=None), \
-                mock.patch("builtins.input", side_effect=keys), \
-                mock.patch("builtins.print") as out:
-            res = S._decision_cli(self.s, args)
-        return res, "\n".join(" ".join(map(str, c.args)) for c in out.call_args_list)
+    def record(self, *extra):
+        argv = ["--workspace-root", str(self.ws), "decision", "record", "--run", "r1", *extra]
+        with mock.patch.object(S, "load_config", return_value=self.cfg), mock.patch("builtins.print"):
+            self.assertEqual(S.main(argv), 0)
+        return self.s.store.load("r1")
 
-    def test_decide_asks_action_then_branch(self):
+    def test_chat_answer_this_branch(self):
         self.done_run()
         self.s.report("r1")
         did = self.s.finish_ask("r1", "B")["decision"]
-        # pick decision 1, merge locally (B), "This branch (main)" (A), no note, confirm
-        res, shown = self.decide_interactively(["1", "B", "A", "", "y"])
-        self.assertIn("What branch do you choose to merge?", shown)
-        self.assertIn("A: This branch (main)", shown)
-        self.assertIn("B: Other branch", shown)
-        self.assertEqual(res["followup"]["value"], "main")
-        self.assertEqual(self.s.store.load("r1")["decisions"][did]["answer"]["followup"]["value"], "main")
+        st = self.record("--id", did, "--choice", "B", "--followup", "A", "--quote", "B, then A (main)")
+        a = st["decisions"][did]["answer"]
+        self.assertEqual((a["choice"], a["followup"]["value"], a["quote"]), ("B", "main", "B, then A (main)"))
+        self.s.finish_apply("r1", did)
+        self.assertIn("merged into main", self.s.store.load("r1")["finish"]["result"])
 
-    def test_decide_other_branch_is_typed(self):
+    def test_chat_answer_other_branch(self):
         self.done_run()
         self.s.report("r1")
-        self.s.finish_ask("r1")
-        res, _ = self.decide_interactively(["1", "A", "B", "release/1.2", "", "y"])
-        self.assertEqual((res["choice"], res["followup"]["value"]), ("A", "release/1.2"))
+        did = self.s.finish_ask("r1")["decision"]
+        st = self.record("--id", did, "--choice", "A", "--followup", "B", "--value", "release/1.2",
+                         "--quote", "A. other branch: release/1.2")
+        self.assertEqual(st["decisions"][did]["answer"]["followup"]["value"], "release/1.2")
 
-    def test_decide_dont_merge_skips_branch_question(self):
+    def test_chat_answer_dont_merge_needs_no_branch(self):
         self.done_run()
         self.s.report("r1")
-        self.s.finish_ask("r1")
-        res, shown = self.decide_interactively(["1", "C", "", "y"])
-        self.assertEqual(res["choice"], "C")
-        self.assertNotIn("What branch", shown)
+        did = self.s.finish_ask("r1")["decision"]
+        st = self.record("--id", did, "--choice", "C", "--quote", "C, leave it")
+        self.assertNotIn("followup", st["decisions"][did]["answer"])
 
     def test_dont_merge_keeps_everything(self):
         self.done_run()
@@ -1039,7 +1043,8 @@ class TestInstall(Base):
         self.assertEqual(cfg["pool"]["worktree_root"], "worktrees")
         perms = json.loads((ws / ".claude" / "settings.json").read_text())["permissions"]
         self.assertEqual(perms["additionalDirectories"], [str(self.repo.resolve())])
-        self.assertIn("Bash(.agent-system/scripts/decide)", perms["deny"])
+        self.assertIn("Edit(.orchestrator/**/state.json)", perms["deny"])
+        self.assertFalse([r for r in perms["deny"] if "decide" in r or "decision answer" in r])
         claude = (ws / "CLAUDE.md").read_text()
         self.assertTrue(claude.startswith("# repo\n"))
         self.assertEqual(claude.count("<!-- agent-system:orchestrator:begin -->"), 1)
@@ -1086,7 +1091,16 @@ class TestInstall(Base):
         claude = self.ws / "CLAUDE.md"
         claude.write_text(claude.read_text().replace("- Stack: TODO", "- Stack: Java 21"))
         (self.ws / ".agent-system" / "scheduler.py").write_text("# stale\n")
+        settings = self.ws / ".claude" / "settings.json"
+        old = json.loads(settings.read_text())
+        old["permissions"]["deny"] += ["Bash(.agent-system/scripts/decide)",
+                                       "Bash(python3 .agent-system/scheduler.py decision answer:*)", "Bash(rm:*)"]
+        settings.write_text(json.dumps(old))
+        (self.ws / ".agent-system" / "scripts" / "decide").write_text("#!/bin/sh\n")
         self.kit("update", cwd=self.ws)  # from inside the workspace
+        deny = json.loads(settings.read_text())["permissions"]["deny"]
+        self.assertIn("Bash(rm:*)", deny)  # the user's own rules stay
+        self.assertFalse((self.ws / ".agent-system" / "scripts" / "decide").exists())
         self.assert_workspace()
         self.kit("update", "--folder=repo")  # from the parent, naming the repo
         self.assert_workspace()
