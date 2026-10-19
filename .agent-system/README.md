@@ -123,8 +123,9 @@ written atomically under an exclusive file lock (`.orchestrator/scheduler.lock`)
 ## Safety
 
 - Codex workers: `workspace-write` sandbox, `on-request` approvals; network on when `worker.network_access`
-  is true (default, so tests can open sockets; Codex can't limit it to localhost), no downloads or installs
-  unless the task file allows them;
+  is true (default, so tests can open sockets; Codex can't limit it to localhost); web search on when
+  `worker.web_search` is true (default) to look up docs; no downloads or installs unless the task file
+  allows them;
   never `danger-full-access` or `--dangerously-bypass-approvals-and-sandbox` (config validation rejects it).
 - `writable_dirs` (default `["~/.gradle"]`) adds build-tool caches as extra writable roots so tests
   can run inside the sandbox (Gradle needs its lock files). Use `~/.m2` for Maven, `~/.npm` for npm,

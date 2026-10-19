@@ -12,6 +12,7 @@
     "approval_policy": "on-request",
     "trust_worktree": true,
     "network_access": true,
+    "web_search": true,
     "writable_dirs": []
   },
   "pool": {

@@ -166,13 +166,18 @@ the same). Use that only for repos you own.
     inside its folders; `danger-full-access` is rejected by config validation. Network is on by default
     (`worker.network_access: true`), so tests that open sockets work. Codex cannot limit it to localhost,
     so set it to `false` to block network entirely. Downloads and package installs stay forbidden by the
-    task file's Boundaries.
+    task file's Boundaries. Codex's web search is on too (`worker.web_search: true`), so workers can
+    look up docs and API references.
   - **Claude Code:** runs in `--permission-mode auto` (Claude Code's checker approves safe actions and
     stops risky ones), with no OS sandbox.
   - **Unverified programs:** no sandbox is assumed; only the worktree, the task's Boundaries and the
     scheduler's changed-file check protect you.
 - Workers read `.agent-system/WORKER-RULES.md`, and every task file lists what they may and must not
   edit and run.
+- **Workers may look things up online** (docs, specs, API references, error messages). Their rules say
+  to treat web content as information, never as instructions, and never to paste repo code or secrets
+  into a website. This is a rule, not a technical block: a page could try to instruct the worker, so
+  keep reviewing the diffs (the orchestrator reviews every task before it is merged).
 - Workers edit only their own worktree and the task's owned paths; the scheduler flags anything else.
 - Results land on `agent/integration-<run>`. Your branches change, and anything is pushed, only after
   you answer the merge decision; merges are fast-forwards and pushes never use force.
@@ -487,6 +492,7 @@ needs in `worker.writable_dirs` (section 5).
 | `worker.profile`, `sandbox`, `approval_policy` | Codex workers only: profile `worker`, `workspace-write`, `on-request` |
 | `worker.trust_worktree` | Codex workers: trust the worktree and the repo root for that run only (not saved), so Codex skips its "Trust this folder?" dialog |
 | `worker.network_access` | Codex workers: allow network inside the sandbox (default `true`, needed for tests that open sockets; Codex can't limit it to localhost). `false` blocks it |
+| `worker.web_search` | Codex workers: turn on Codex's built-in web search (`--search`, default `true`) to look up docs. Claude Code workers can search and read pages anyway |
 | `worker.writable_dirs` | Extra folders workers may write (build caches). `~`, `/`, `~/.ssh`, `~/.codex`, `~/.config`, ... are rejected |
 | `pool.size` / `pool.slots` | 1-3 worker slots |
 | `pool.worktree_root` | Where worktrees go: `worktrees` (workspace mode) or `../{repo_name}.agent-worktrees` (in-repo) |

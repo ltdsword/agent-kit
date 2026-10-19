@@ -219,11 +219,14 @@ class TestConfig(Base):
             self.assertNotIn("--dangerously-bypass-approvals-and-sandbox", args)
 
     def test_codex_trusts_worktree_and_repo_root_for_the_run_and_network_switch(self):
-        self.cfg["worker"].update(trust_worktree=True, network_access=True)
+        self.cfg["worker"].update(trust_worktree=True, network_access=True, web_search=False)
         args = self.new_scheduler().codex_args("/wt", "r1")
         self.assertIn('projects."/wt".trust_level="trusted"', args)
         self.assertIn(f'projects."{self.repo.resolve()}".trust_level="trusted"', args)
         self.assertIn("sandbox_workspace_write.network_access=true", args)
+        self.assertNotIn("--search", args)
+        self.cfg["worker"]["web_search"] = True
+        self.assertIn("--search", self.new_scheduler().codex_args("/wt", "r1"))
         self.cfg["worker"].update(network_access=False)
         self.assertNotIn("sandbox_workspace_write.network_access=true", self.new_scheduler().codex_args("/wt", "r1"))
 

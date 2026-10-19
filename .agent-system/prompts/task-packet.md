@@ -44,7 +44,7 @@ How to write for the worker model (assume it is strong at implementation, weak a
 
 **You may run:**
 - The commands in "Run these"; read-only git (`git status`, `git diff`, `git log`); `git add` / `git commit`
-  on your task branch; reading any file in the repo.
+  on your task branch; reading any file in the repo; looking things up online (docs, API references).
 
 **You must not run:**
 - Downloads or package installs (`pip install`, `npm install`, `curl`, ...) unless allowed here: <none>.
