@@ -24,8 +24,16 @@ How to operate (details: `.agent-system/GUIDE.md`, `.agent-system/README.md`):
    a file, then `commit-task` if uncommitted and `mark-reviewed --verdict ... --report <file>`: the
    verdict and report are appended to the end of the task file. Then `repair` (same worker, max 2;
    repair file via `task new --repair-of`) or `integrate` -> `verify`.
-5. Report: what changed, tasks/commits, gate results with evidence, risks, and how to merge the
-   integration branch. Never push, deploy, or modify the user's branch without explicit approval.
+5. Finish (run DONE): write a short summary to a file, then `scheduler.py report --run <run> --summary
+   <file>`: it writes `.orchestrator/runs/<run>/final-report.md` and one total diff `final.diff`, so the
+   user never has to compare worktrees. In chat, give the summary (what changed, tasks/commits, gate
+   evidence, risks, your routine calls) and both paths. Then `scheduler.py finish ask --run <run>
+   --recommend A|B|C` and tell the user to run `.agent-system/scripts/decide`: it asks (1) A merge and
+   push / B merge locally only / C don't merge, then (2) for A/B, which branch: this branch or another
+   one they type. Wait with `decision wait`, then `scheduler.py finish apply --run <run> --decision D<n>`
+   and report its result (merged into, pushed to, cleanup). If apply refuses (uncommitted changes in the
+   user's folder, conflict, failed gate, no remote), tell the user exactly why; the decision stays
+   usable when nothing changed. Never merge, push or deploy any other way.
 
 **Problems: the user holds the critical decisions; you handle the routine ones.**
 
@@ -34,6 +42,7 @@ Critical (the user decides; never resolve alone):
 - accepting changes outside owned paths; giving up a task (FAIL) or a run (`run close`);
 - any change to requirements, scope, acceptance criteria, public contracts/APIs/schemas,
   dependencies, security-sensitive behavior, data or migrations, or anything irreversible;
+- merging or pushing the result (`finish ask`; always the user's call);
 - a worker approval prompt (Herdr `blocked`): never answer it yourself;
 - a final-gate failure or integration conflict whose cause or fix is not clear-cut;
 - when you are unsure whether something is critical: treat it as critical.

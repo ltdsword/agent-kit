@@ -21,14 +21,17 @@ normally. Nothing else is written into the repo.
 1. **One workspace per work repo**: `<repo>.workspace` next to the repo, e.g.
    `~/Code/thrift-demo` and `~/Code/thrift-demo.workspace`.
 2. **All AI-generated files live in the workspace.** In the repo, only the intended code changes
-   ever appear, and only on agent branches until you merge them.
+   ever appear, and only on agent branches until you approve the merge.
 3. **Only the repo is a git repo for the kit.** The scheduler runs every git command in the repo
    (`project.path`); it never treats the workspace as a repo.
 4. **Never edit the repo's `.gitignore`, `.git/info/exclude`, hooks or git config** for our tooling.
 5. **The repo's own instructions win.** If the team ships its own `CLAUDE.md`/`AGENTS.md`, keep
    it. Ours add orchestration rules and must not contradict it.
-6. **Humans merge and push.** Agents work on `agent/*` branches and git worktrees. You review, merge
-   into your work branch following team conventions, and push yourself.
+6. **Humans approve the merge and push.** Agents work on `agent/*` branches and git worktrees. You review
+   the final report and total diff and answer the merge decision (`finish ask` / `decide`); the scheduler
+   then fast-forwards the branch you chose and pushes only if you chose to, never with force. If team
+   conventions require a PR, choose "merge and push" with a new branch name (e.g. `feature/...`) and
+   open the PR yourself; never push straight to a protected team branch.
 7. **Check team policy before using AI on the code at all**, and before sending any code or text to
    an external service (including a dashboard, see `DECISION-HUB-PLAN.md`). Commit trailers like
    `Co-Authored-By: Claude` may also be against team convention: check, and drop them if needed.

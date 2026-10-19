@@ -12,7 +12,9 @@ User request -> Claude Opus 5.5 (orchestrator: plan, review, integrate)
                  task plan per worker: gen-tasks/<task-name>-<dd-mm-yy>.md (written by Opus)
                  -> wait -> collect (diff captured + appended to the task file) -> Opus review
                  (verdict + report appended) -> sequential cherry-pick onto agent/integration-<run>
-                 -> post-merge check -> verify.sh full gate -> report (you merge; nothing is pushed)
+                 -> post-merge check -> verify.sh full gate -> report (final-report.md + final.diff)
+                 -> you answer `finish ask` with decide (merge+push / merge / don't; which branch)
+                 -> finish apply: fast-forward, push if chosen (never force), cleanup
 ```
 
 ## Files
@@ -72,6 +74,9 @@ Prefix every command with `python3 .agent-system/scheduler.py`. Add `--json` bef
 | `repair --run ID --task T --packet FILE` | Repair packet to the same worker session (max 2) |
 | `integrate --run ID` | Cherry-pick PASSED tasks in DAG order; post-merge check; MERGED; unlock dependents |
 | `verify --run ID` | Full `verify.sh` on the integration worktree; run becomes DONE only on pass |
+| `report --run ID [--summary FILE]` | DONE run: `final-report.md` + `final.diff` (the whole run as one diff) for the user |
+| `finish ask --run ID [--recommend A\|B\|C]` | User decision: A merge+push / B merge locally / C don't, then the branch (this one or typed) |
+| `finish apply --run ID --decision D<n>` | Carry it out: fast-forward (moved branch merged in + re-gated), push if A (never force), cleanup |
 | `resume --run ID` | Reconcile after interruption; prints next actions; never relaunches by itself |
 | `worker-release --run ID --worker W` | Return an inspected, clean BLOCKED/BROKEN slot to IDLE |
 | `task-unblock --run ID --task T [--reset-repairs]` | BLOCKED -> PENDING after Opus re-scopes |

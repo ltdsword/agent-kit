@@ -67,9 +67,11 @@ SECRET_PATTERNS = (".env", ".env.*", "*.pem", "*.key", "*.p12", "*.pfx", "id_rsa
 
 # User-held decisions. Problems and blockers are escalated to the user; the commands that act on
 # them refuse to run without an answered decision of the matching kind (see decision_* below).
-DECISION_KINDS = ("blocker", "repair", "scope_exception", "abandon", "worker_approval", "question")
+DECISION_KINDS = ("blocker", "repair", "scope_exception", "abandon", "worker_approval", "question", "finish")
 # kind -> commands that require it. worker_approval / question are policy-only (no command to gate).
 GATED_KINDS = ("blocker", "repair", "scope_exception", "abandon")
+# Always the user's call, whatever decisions.require_user_for says: merging/pushing is irreversible.
+ALWAYS_USER_KINDS = ("finish",)
 DECISION_ID_RE = re.compile(r"^D[0-9]{1,4}$")
 
 # Never granted to workers through worker.writable_dirs.
@@ -744,6 +746,11 @@ class Scheduler:
                 raise SchedulerError(f"run(s) {active} still RUNNING; worker slots are shared. "
                                      "Finish or close them first (run close).")
             base_sha = git_out(self.project_root, "rev-parse", "--verify", f"{base}^{{commit}}")
+            if base == "HEAD":  # the branch checked out in the repo folder; None when detached
+                base_branch = git(self.project_root, "symbolic-ref", "-q", "--short", "HEAD",
+                                  check=False).stdout.strip() or None
+            else:
+                base_branch = base if git_branch_exists(self.project_root, base) else None
             branch = f"agent/integration-{run_id}"
             if git_branch_exists(self.project_root, branch):
                 raise SchedulerError(f"branch {branch} already exists")
@@ -768,7 +775,8 @@ class Scheduler:
                 "schema_version": SCHEMA_VERSION, "run_id": run_id, "request_id": request_id,
                 "status": "RUNNING", "created_at": now(), "workspace_root": str(self.workspace_root),
                 "project_root": str(self.project_root),
-                "base_sha": base_sha, "integration_branch": branch, "integration_worktree": str(iwt),
+                "base_sha": base_sha, "base_branch": base_branch,
+                "integration_branch": branch, "integration_worktree": str(iwt),
                 "integration_base_sha": base_sha, "integration_sha": base_sha,
                 "research": research,
                 "tasks": {tid: {"id": tid, "title": t["title"], "status": "PENDING",
@@ -1434,9 +1442,198 @@ class Scheduler:
             return {"exit_code": code, "log": str(log), "run_status": state["status"],
                     "all_tasks_merged": all_merged}
 
+    # ---- finish: one report + one diff for the user, then merge/push on the user's decision
+    def report(self, run_id: str, summary: str = "") -> dict:
+        """Write final-report.md and final.diff (base -> integration) for a DONE run."""
+        with self.txn(run_id) as state:
+            if state["status"] != "DONE":
+                raise SchedulerError(f"run {run_id} is {state['status']}; report needs a DONE run (verify passed)")
+            p, rd = self.project_root, self.store.run_dir(run_id)
+            base, head, bb = state["base_sha"], state["integration_sha"], state.get("base_branch")
+            diff_path, report_path = rd / "final.diff", rd / "final-report.md"
+            diff_path.write_text(git(p, "diff", f"{base}..{head}").stdout)
+            short = git_out(p, "diff", "--shortstat", f"{base}..{head}") or "no changes"
+            moved = ""
+            if bb and git_branch_exists(p, bb):
+                tip = git_out(p, "rev-parse", f"refs/heads/{bb}")
+                if tip != base:
+                    moved = f" (`{bb}` has moved since, now `{tip[:12]}`: finish will merge it in and rerun the gate)"
+            v = state.get("verify") or {}
+            lines = [f"# Run {run_id}: final report", "", "## Summary", "", summary.strip() or "_No summary given._", "",
+                     "## Result", "",
+                     f"- Started from: `{bb or 'detached HEAD'}` at `{base[:12]}`{moved}",
+                     f"- Integration branch: `{state['integration_branch']}` at `{head[:12]}`",
+                     f"- Final gate: {'PASS' if v.get('exit_code') == 0 else 'FAIL'}"
+                     + (f" (log `{v['log']}`)" if v.get("log") else ""),
+                     f"- Total diff: `{self.rel(diff_path)}` ({short})", "",
+                     "## Tasks", "", "| Task | Title | Status | Repairs |", "|---|---|---|---|"]
+            lines += [f"| {tid} | {t['title']} | {t['status']} | {t['major_repairs']} |"
+                      for tid, t in sorted(state["tasks"].items())]
+            lines += ["", "## Commits", "", "```",
+                      git_out(p, "log", "--reverse", "--format=%h %s", f"{base}..{head}") or "(none)", "```",
+                      "", "## Files changed", "", "```",
+                      git_out(p, "diff", "--stat", f"{base}..{head}") or "(none)", "```", "", "## Risks reported by workers", ""]
+            risks = []
+            for tid in sorted(state["tasks"]):
+                with contextlib.suppress(OSError, ValueError):
+                    rep = json.loads((rd / "reports" / f"{tid}.json").read_text())
+                    risks += [f"- {tid}: {r}" for r in rep.get("risks") or []]
+            lines += risks or ["- none"]
+            lines += ["", "## Decisions in this run", ""]
+            lines += [f"- {d['id']} ({d['kind']}{', ' + d['task'] if d['task'] else ''}): {d['title']} -> "
+                      f"{(d.get('answer') or {}).get('choice', d['status'])}"
+                      f" ({(d.get('answer') or {}).get('by', '-')})"
+                      for d in state.get("decisions", {}).values()] or ["- none"]
+            lines += ["", "## Next", "",
+                      "Review this report and the total diff, then answer the merge decision with "
+                      "`.agent-system/scripts/decide`."]
+            report_path.write_text("\n".join(lines) + "\n")
+            state["report"] = {"report": self.rel(report_path), "diff": self.rel(diff_path), "at": now(), "sha": head}
+            log_event(state, "report", sha=head)
+            return {"report": str(report_path), "diff": str(diff_path), "stat": short}
+
+    def finish_ask(self, run_id: str, recommend: str | None = None) -> dict:
+        """Open the user's merge decision: A merge+push / B merge only / C don't merge, then the branch."""
+        state = self.store.load(run_id)
+        if state["status"] != "DONE" or not state.get("report"):
+            raise SchedulerError(f"run {run_id} needs status DONE and a report first (`report --run {run_id}`)")
+        if state.get("finish"):
+            raise SchedulerError(f"run {run_id} is already finished: {state['finish']['result']}")
+        bb = state.get("base_branch") or git(self.project_root, "symbolic-ref", "-q", "--short", "HEAD",
+                                             check=False).stdout.strip() or None
+        fu_opts = [{"key": "A", "label": f"This branch ({bb})", "value": bb}] if bb else []
+        fu_opts.append({"key": "B" if bb else "A", "input": True,
+                        "label": "Other branch (type its name; a new name creates that branch)"})
+        followup = {"when": ["A", "B"], "question": "What branch do you choose to merge?",
+                    "options": fu_opts, "validate": "branch"}
+        r = state["report"]
+        question = (f"Run {run_id} is done and passed the final gate. Review the report `{r['report']}` and the "
+                    f"total diff `{r['diff']}`, then choose. A and B fast-forward your branch to the result "
+                    "(if the branch has moved, it is merged in first and the gate runs again); A also pushes it, "
+                    "never with force. C leaves everything on the integration branch.")
+        return self.decision_ask(run_id, "finish", f"Merge run {run_id}?", question,
+                                 ["A=Merge and push", "B=Merge locally only, no push", "C=Don't merge"],
+                                 None, recommend, followup=followup)
+
+    def _branch_checkouts(self) -> dict[str, Path]:
+        out, wt = {}, None
+        for line in git(self.project_root, "worktree", "list", "--porcelain").stdout.splitlines():
+            if line.startswith("worktree "):
+                wt = Path(line[len("worktree "):])
+            elif line.startswith("branch refs/heads/"):
+                out[line[len("branch refs/heads/"):]] = wt
+        return out
+
+    def _push_target(self, branch: str) -> tuple[str, str, bool] | None:
+        """(remote, remote branch, set upstream?) for pushing `branch`, or None without a remote."""
+        p = self.project_root
+        remote = git(p, "config", "--get", f"branch.{branch}.remote", check=False).stdout.strip()
+        merge = git(p, "config", "--get", f"branch.{branch}.merge", check=False).stdout.strip()
+        if remote and merge.startswith("refs/heads/"):
+            return remote, merge[len("refs/heads/"):], False
+        remotes = git_out(p, "remote").split()
+        if "origin" in remotes or len(remotes) == 1:
+            return ("origin" if "origin" in remotes else remotes[0]), branch, True
+        return None
+
+    def finish_apply(self, run_id: str, did: str) -> dict:
+        """Carry out the user's answered finish decision. Checks everything it can before using it."""
+        p = self.project_root
+        with self.txn(run_id) as state:
+            if state["status"] != "DONE":
+                raise SchedulerError(f"run {run_id} is {state['status']}, not DONE")
+            if state.get("finish"):
+                raise SchedulerError(f"run {run_id} is already finished: {state['finish']['result']}")
+            d = self._decision(state, did)
+            if d["kind"] != "finish" or d["status"] != "ANSWERED" or d["consumed_by"]:
+                raise SchedulerError(f"{did} must be an answered, unused finish decision (see `finish ask`)")
+            choice, fu = d["answer"]["choice"], d["answer"].get("followup")
+            result = {"decision": did, "choice": choice, "at": now()}
+            if choice == "C":
+                self._require_decision(state, "finish", None, did, "finish: don't merge")
+                result.update(result="not merged; results stay on " + state["integration_branch"])
+                return self._record_finish(state, result)
+            if not fu:
+                raise SchedulerError(f"{did} has no branch answer; open a new one with `finish ask`")
+            branch, iwt, isha = fu["value"], Path(state["integration_worktree"]), state["integration_sha"]
+            if git_out(iwt, "rev-parse", "HEAD") != isha:
+                raise SchedulerError("integration worktree HEAD differs from the recorded integration_sha")
+            where = self._branch_checkouts().get(branch)
+            if where and git_dirty_files(where):
+                raise SchedulerError(f"{branch} is checked out in {where}, which has uncommitted changes "
+                                     f"({', '.join(git_dirty_files(where)[:5])}). Commit or stash them, then run "
+                                     f"`finish apply --run {run_id} --decision {did}` again ({did} is still unused).")
+            target = self._push_target(branch) if choice == "A" else None
+            if choice == "A" and not target:
+                raise SchedulerError(f"the repo has no git remote to push {branch} to; answer B (merge only) "
+                                     f"in a new decision, or add a remote ({did} is still unused)")
+            self._require_decision(state, "finish", None, did, f"finish {choice} into {branch}")
+            result.update(branch=branch, from_sha=None)
+            if not git_branch_exists(p, branch):
+                git(p, "branch", branch, isha)
+                result.update(how=f"created {branch} at the integration result", to_sha=isha)
+            else:
+                tip = git_out(p, "rev-parse", f"refs/heads/{branch}")
+                result["from_sha"] = tip
+                if git(p, "merge-base", "--is-ancestor", tip, isha, check=False).returncode != 0:
+                    # The branch moved: bring it into the integration branch, gate again, then fast-forward.
+                    m = git(iwt, "merge", "--no-ff", "-m", f"Merge {branch} into {state['integration_branch']}",
+                            tip, check=False)
+                    if m.returncode != 0:
+                        git(iwt, "merge", "--abort", check=False)
+                        raise SchedulerError(f"merging {branch} into the integration branch conflicts; nothing was "
+                                             f"changed on {branch}. Resolve it by hand or start a new run.")
+                    log = self.store.run_dir(run_id) / "logs" / f"finish-gate-{int(time.time())}.log"
+                    if self._run_logged(self.cfg["gate"]["verify_cmd"], iwt, log) != 0:
+                        git(iwt, "reset", "--hard", isha)  # our own worktree, back to the verified result
+                        raise SchedulerError(f"the gate failed after merging {branch} in (log {log}); nothing was "
+                                             f"changed on {branch}")
+                    isha = git_out(iwt, "rev-parse", "HEAD")
+                    state["integration_sha"] = isha
+                    result["gate_after_merge"] = self.rel(log)
+                if where:
+                    git(where, "merge", "--ff-only", isha)
+                else:
+                    git(p, "update-ref", f"refs/heads/{branch}", isha, tip)
+                result.update(how=f"fast-forwarded {branch}" + (f" in {where}" if where else ""), to_sha=isha)
+            result["result"] = f"merged into {branch}"
+            if target:
+                remote, rbranch, upstream = target
+                env = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}  # fail instead of waiting for a password
+                pr = subprocess.run(["git", "push", *(["-u"] if upstream else []), remote,
+                                     f"refs/heads/{branch}:refs/heads/{rbranch}"],
+                                    cwd=str(p), capture_output=True, text=True, env=env)
+                result.update(pushed=pr.returncode == 0, remote=f"{remote}/{rbranch}")
+                if pr.returncode == 0:
+                    result["result"] += f", pushed to {remote}/{rbranch}"
+                else:
+                    result["push_error"] = (pr.stderr or pr.stdout).strip()[-1500:]
+                    result["result"] += f"; PUSH FAILED to {remote}/{rbranch} (merged locally; push by hand)"
+            self._record_finish(state, result)
+        result["cleanup"] = self._finish_cleanup(run_id)
+        return result
+
+    def _record_finish(self, state: dict, result: dict) -> dict:
+        state["finish"] = result
+        log_event(state, "finish", **{k: v for k, v in result.items() if k in ("choice", "branch", "result")})
+        for t in state["tasks"].values():
+            self._append_task_file(t, "Finished", [f"- {result['result']} (decision {result['decision']})"])
+        return result
+
+    def _finish_cleanup(self, run_id: str) -> list[str]:
+        """After a merge: close Herdr workspaces, remove clean worktrees, delete the run's merged branches."""
+        done = self.cleanup(run_id, remove_worktrees=True)["actions"]
+        state = self.store.load(run_id)
+        branches = [state["integration_branch"]] + [t["branch"] for t in state["tasks"].values()
+                                                     if t.get("branch") and t["status"] == "MERGED"]
+        for b in branches:
+            r = git(self.project_root, "branch", "-D", b, check=False)
+            done.append(f"deleted branch {b}" if r.returncode == 0 else f"kept branch {b}: {r.stderr.strip()}")
+        return done
+
     # ---- user-held decisions
     def decision_ask(self, run_id: str, kind: str, title: str, question: str, options: list[str],
-                     task: str | None = None, recommend: str | None = None) -> dict:
+                     task: str | None = None, recommend: str | None = None, followup: dict | None = None) -> dict:
         """Open a decision for the USER. Opus never answers it; `scripts/decide` does, run by the user."""
         if kind not in DECISION_KINDS:
             raise SchedulerError(f"kind must be one of {DECISION_KINDS}")
@@ -1457,7 +1654,7 @@ class Scheduler:
             did = f"D{len(decisions) + 1}"
             d = {"id": did, "kind": kind, "task": task, "title": title, "question": question,
                  "options": parsed, "recommend": recommend, "status": "PENDING", "created_at": now(),
-                 "answer": None, "consumed_by": None}
+                 "answer": None, "consumed_by": None, "followup": followup}
             decisions[did] = d
             path = self._write_decision_file(run_id, d)
             if task:
@@ -1472,8 +1669,11 @@ class Scheduler:
                 "wait_command": f"python3 .agent-system/scheduler.py decision wait --run {run_id} --id {did}"}
 
     def decision_answer(self, run_id: str, did: str, choice: str, note: str = "", channel: str = "terminal",
-                        by: str | None = None) -> dict:
-        """Record the USER's answer. The CLI refuses to run this from inside Claude (see main)."""
+                        by: str | None = None, followup: str | None = None, value: str | None = None) -> dict:
+        """Record the USER's answer. The CLI refuses to run this from inside Claude (see main).
+
+        `followup`/`value` answer the decision's second question (e.g. the branch to merge into)
+        when the first choice needs it; an option with "input" takes the typed `value`."""
         with self.txn(run_id) as state:
             d = self._decision(state, did)
             if d["status"] != "PENDING":
@@ -1481,15 +1681,36 @@ class Scheduler:
             opt = next((o for o in d["options"] if o["key"].lower() == choice.lower()), None)
             if not opt:
                 raise SchedulerError(f"{choice!r} is not an option of {did}: {[o['key'] for o in d['options']]}")
+            fu_answer = None
+            fu = d.get("followup")
+            if fu and opt["key"] in fu["when"]:
+                fo = next((o for o in fu["options"] if o["key"].lower() == (followup or "").lower()), None)
+                if not fo:
+                    raise SchedulerError(f"{did} = {opt['key']} needs an answer to: {fu['question']} "
+                                         f"(options {[o['key'] for o in fu['options']]})")
+                val = (value or "").strip() if fo.get("input") else fo["value"]
+                if not val:
+                    raise SchedulerError(f"{fo['label']}: type a value")
+                if fu.get("validate") == "branch":
+                    self._check_branch_name(val, state)
+                fu_answer = {"choice": fo["key"], "label": fo["label"], "value": val}
             d["status"] = "ANSWERED"
             d["answer"] = {"choice": opt["key"], "label": opt["label"], "note": note, "channel": channel,
-                           "by": by or os.environ.get("USER", "user"), "at": now()}
+                           "by": by or os.environ.get("USER", "user"), "at": now(),
+                           **({"followup": fu_answer} if fu_answer else {})}
             self._write_decision_file(run_id, d)
             if d["task"]:
                 self._append_task_file(state["tasks"][d["task"]], f"Decision {did} answered by the user", [
                     f"- Choice: **{opt['key']}**: {opt['label']}", *([f"- Note: {note}"] if note else [])])
             log_event(state, "decision_answered", id=did, choice=opt["key"], channel=channel)
-            return {"decision": did, "status": "ANSWERED", "choice": opt["key"], "label": opt["label"]}
+            return {"decision": did, "status": "ANSWERED", "choice": opt["key"], "label": opt["label"],
+                    **({"followup": fu_answer} if fu_answer else {})}
+
+    def _check_branch_name(self, name: str, state: dict) -> None:
+        if git(self.project_root, "check-ref-format", "--branch", name, check=False).returncode != 0:
+            raise SchedulerError(f"{name!r} is not a valid branch name")
+        if name.startswith("agent/") or name == state["integration_branch"]:
+            raise SchedulerError(f"{name!r} is an agent branch; choose your own branch")
 
     def decision_cancel(self, run_id: str, did: str, reason: str) -> dict:
         """Withdraw a PENDING question (e.g. superseded). Cancelling never authorizes anything."""
@@ -1536,9 +1757,15 @@ class Scheduler:
                  f"- Status: {d['status']}", f"- Opened: {d['created_at']}", "", d["question"], ""]
         lines += [f"- `{o['key']}`: {o['label']}" + (" (recommended)" if o["key"] == d["recommend"] else "")
                   for o in d["options"]]
+        if d.get("followup"):
+            fu = d["followup"]
+            lines += ["", f"If {' or '.join(fu['when'])}: {fu['question']}"]
+            lines += [f"- `{o['key']}`: {o['label']}" for o in fu["options"]]
         if d.get("answer"):
             a = d["answer"]
             lines += ["", f"## Answer: {a['choice']} ({a['by']} via {a['channel']}, {a['at']})", a["note"] or ""]
+            if a.get("followup"):
+                lines += [f"- {d['followup']['question']} {a['followup']['choice']}: `{a['followup']['value']}`"]
         path.write_text("\n".join(lines).rstrip() + "\n")
         return path
 
@@ -1548,6 +1775,8 @@ class Scheduler:
         Kinds listed in decisions.require_user_for are critical, except that the first
         decisions.routine_repairs repairs of a task (default 1) are routine."""
         dc = self.cfg.get("decisions", {})
+        if kind in ALWAYS_USER_KINDS:
+            return True
         if kind not in dc.get("require_user_for", GATED_KINDS):
             return False
         if kind == "repair" and tid:
@@ -1932,7 +2161,8 @@ def build_parser() -> argparse.ArgumentParser:
     des = de.add_subparsers(dest="action", required=True)
     da = des.add_parser("ask", help="open a decision for the user")
     da.add_argument("--run", required=True)
-    da.add_argument("--kind", required=True, choices=DECISION_KINDS)
+    da.add_argument("--kind", required=True, choices=[k for k in DECISION_KINDS if k not in ALWAYS_USER_KINDS],
+                    help="(merge decisions are opened with `finish ask`)")
     da.add_argument("--task")
     da.add_argument("--title", required=True)
     da.add_argument("--question", required=True, help="context: what happened, evidence, consequences")
@@ -1954,6 +2184,8 @@ def build_parser() -> argparse.ArgumentParser:
     dn.add_argument("--id")
     dn.add_argument("--choice")
     dn.add_argument("--note", default="")
+    dn.add_argument("--followup", help="key for the decision's second question (e.g. which branch)")
+    dn.add_argument("--value", help="typed value when that key asks for one (e.g. a branch name)")
 
     wa = sub.add_parser("wait", help="block until a RUNNING task reports (or its agent needs approval)")
     wa.add_argument("--run", required=True)
@@ -1988,6 +2220,17 @@ def build_parser() -> argparse.ArgumentParser:
     rp.add_argument("--reason", default="", help="why, when Opus decides a routine repair itself")
     it = sub.add_parser("integrate", help="sequentially cherry-pick PASSED tasks + post-merge checks")
     it.add_argument("--run", required=True)
+    rp = sub.add_parser("report", help="write the final report + total diff of a DONE run for the user")
+    rp.add_argument("--run", required=True)
+    rp.add_argument("--summary", type=Path, help="file with Opus's summary (markdown) for the top of the report")
+    fi = sub.add_parser("finish", help="merge decision: ask the user, then merge/push as they chose")
+    fis = fi.add_subparsers(dest="action", required=True)
+    fa = fis.add_parser("ask", help="open the user's decision: merge+push / merge only / don't, then the branch")
+    fa.add_argument("--run", required=True)
+    fa.add_argument("--recommend", choices=["A", "B", "C"])
+    fp = fis.add_parser("apply", help="carry out the user's answered finish decision")
+    fp.add_argument("--run", required=True)
+    fp.add_argument("--decision", required=True)
     v = sub.add_parser("verify", help="run the full quality gate on the integration branch")
     v.add_argument("--run", required=True)
     r = sub.add_parser("resume", help="reconcile state after interruption and print next actions")
@@ -2046,10 +2289,22 @@ def _decision_cli(s: "Scheduler", a) -> dict:
     for o in d["options"]:
         print(f"  {o['key']}: {o['label']}" + ("   <- recommended by Opus" if o["key"] == d["recommend"] else ""))
     choice = a.choice or input("\nYour choice (key): ").strip()
+    followup, value, shown = a.followup, a.value, choice
+    fu = d.get("followup")
+    if fu and choice.upper() in fu["when"]:
+        if not followup:
+            print(f"\n{fu['question']}")
+            for o in fu["options"]:
+                print(f"  {o['key']}: {o['label']}")
+            followup = input("Your choice (key): ").strip()
+        fo = next((o for o in fu["options"] if o["key"].lower() == followup.lower()), None)
+        if fo and fo.get("input") and not value:
+            value = input("Branch name: ").strip()
+        shown = f"{choice}, {fo['label'] if fo and not fo.get('input') else value}" if fo else choice
     note = a.note or (input("Note for Opus (optional): ").strip() if not a.choice else "")
-    if input(f"Confirm {d['id']} = {choice}? [y/N] ").strip().lower() != "y":
+    if input(f"Confirm {d['id']} = {shown}? [y/N] ").strip().lower() != "y":
         return {"decision": a.id, "status": "PENDING", "result": "not confirmed"}
-    return s.decision_answer(a.run, a.id, choice, note, channel="terminal")
+    return s.decision_answer(a.run, a.id, choice, note, channel="terminal", followup=followup, value=value)
 
 
 def main(argv=None) -> int:
@@ -2118,6 +2373,10 @@ def main(argv=None) -> int:
             out = s.integrate(a.run)
         elif a.cmd == "verify":
             out = s.verify(a.run)
+        elif a.cmd == "report":
+            out = s.report(a.run, a.summary.read_text() if a.summary else "")
+        elif a.cmd == "finish":
+            out = s.finish_ask(a.run, a.recommend) if a.action == "ask" else s.finish_apply(a.run, a.decision)
         elif a.cmd == "resume":
             out = s.resume(a.run)
         elif a.cmd == "worker-release":

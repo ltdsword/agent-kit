@@ -740,7 +740,7 @@ class TestCli(Base):
             self.assertEqual(cm.exception.code, 0)
 
 
-class TestWorkspaceMode(Base):
+class WorkspaceBase(Base):
     """repo/ is the only git repo; repo.workspace/ holds the kit, state, task files and worktrees
     and reaches the repo through the relative symlink repo.workspace/repo -> ../repo."""
 
@@ -767,6 +767,9 @@ class TestWorkspaceMode(Base):
     def repo_status(self):
         return sh(self.repo, "git", "status", "--porcelain", "--untracked-files=all")
 
+
+
+class TestWorkspaceMode(WorkspaceBase):
     def test_roots(self):
         self.assertTrue(self.s.workspace_mode)
         self.assertEqual(self.s.project_root, self.repo.resolve())
@@ -830,6 +833,175 @@ class TestWorkspaceMode(Base):
         self.assertEqual(status("claude-additional-dirs"), "ok")
         (self.repo / "CLAUDE.md").write_text("stray\n")
         self.assertEqual(status("project-clean-of-kit"), "fail")
+
+
+class TestFinish(WorkspaceBase):
+    """report -> finish ask -> (user answers) -> finish apply."""
+
+    def done_run(self, run="r1"):
+        self.s.create_run(run, [self.task("T1", trivial=True)])
+        self.s.dispatch_ready(run, launch="herdr")
+        self.worker_commit(run, "T1")
+        self.s.collect(run, "T1")
+        self.s.mark_reviewed(run, "T1", "PASS")
+        self.s.integrate(run)
+        self.assertEqual(self.s.verify(run)["run_status"], "DONE")
+        return self.s.store.load(run)["integration_sha"]
+
+    def ask_and_answer(self, choice, followup=None, value=None, run="r1"):
+        self.s.report(run, "Added t1/out.txt.")
+        did = self.s.finish_ask(run, "B")["decision"]
+        self.s.decision_answer(run, did, choice, "ok", by="tester", followup=followup, value=value)
+        return did
+
+    def head(self, ref="main"):
+        return sh(self.repo, "git", "rev-parse", ref)
+
+    def test_report_has_summary_and_total_diff(self):
+        self.done_run()
+        out = self.s.report("r1", "Added t1/out.txt.")
+        text = Path(out["report"]).read_text()
+        for needle in ("Added t1/out.txt.", "Started from: `main`", "Final gate: PASS", "| T1 |", "T1: work"):
+            self.assertIn(needle, text)
+        self.assertIn("+++ b/t1/out.txt", Path(out["diff"]).read_text())
+
+    def test_finish_needs_done_run_and_report(self):
+        self.s.create_run("r1", [self.task("T1", trivial=True)])
+        with self.assertRaisesRegex(S.SchedulerError, "DONE"):
+            self.s.report("r1")
+        with self.assertRaisesRegex(S.SchedulerError, "report first"):
+            self.s.finish_ask("r1")
+
+    def test_decision_shape_and_answer_validation(self):
+        self.done_run()
+        self.s.report("r1")
+        did = self.s.finish_ask("r1", "B")["decision"]
+        d = self.s.store.load("r1")["decisions"][did]
+        self.assertEqual([o["label"] for o in d["options"]],
+                         ["Merge and push", "Merge locally only, no push", "Don't merge"])
+        self.assertEqual(d["followup"]["question"], "What branch do you choose to merge?")
+        self.assertEqual(d["followup"]["options"][0]["label"], "This branch (main)")
+        self.assertTrue(d["followup"]["options"][1]["input"])
+        for kwargs, msg in (({}, "needs an answer"), ({"followup": "B", "value": ""}, "type a value"),
+                            ({"followup": "B", "value": "bad..name"}, "not a valid branch"),
+                            ({"followup": "B", "value": "agent/x"}, "agent branch")):
+            with self.assertRaisesRegex(S.SchedulerError, msg):
+                self.s.decision_answer("r1", did, "B", **kwargs)
+        st = self.s.store.load("r1")
+        self.assertTrue(self.s._is_critical(st, "finish", None))
+        self.s.cfg["decisions"]["require_user_for"] = []
+        self.assertTrue(self.s._is_critical(st, "finish", None))  # config cannot make merging routine
+
+    def test_merge_locally_into_this_branch_fast_forwards_and_cleans_up(self):
+        isha = self.done_run()
+        did = self.ask_and_answer("B", "A")
+        out = self.s.finish_apply("r1", did)
+        self.assertEqual(self.head(), isha)
+        self.assertEqual((self.repo / "t1" / "out.txt").read_text(), "done\n")  # the user's folder updated
+        self.assertNotIn("pushed", out)
+        self.assertEqual(sh(self.repo, "git", "branch", "--list", "agent/*"), "")
+        self.assertEqual(sh(self.repo, "git", "worktree", "list").count("\n"), 0)
+        self.assertIn("merged into main", self.s.store.load("r1")["finish"]["result"])
+        with self.assertRaisesRegex(S.SchedulerError, "already finished"):
+            self.s.finish_apply("r1", did)
+
+    def test_other_new_branch_leaves_users_folder_alone(self):
+        isha = self.done_run()
+        did = self.ask_and_answer("B", "B", "feature/r1")
+        self.s.finish_apply("r1", did)
+        self.assertEqual(self.head("feature/r1"), isha)
+        self.assertEqual(self.head(), self.base_sha)
+        self.assertFalse((self.repo / "t1").exists())
+
+    def test_moved_branch_is_merged_in_and_gated_again(self):
+        self.done_run()
+        (self.repo / "other.txt").write_text("user work\n")
+        sh(self.repo, "git", "add", "-A")
+        sh(self.repo, "git", "commit", "-q", "-m", "user commit")
+        user_tip = self.head()
+        did = self.ask_and_answer("B", "A")
+        out = self.s.finish_apply("r1", did)
+        self.assertIn("gate_after_merge", out)
+        self.assertEqual(sh(self.repo, "git", "merge-base", "--is-ancestor", user_tip, "main"), "")
+        self.assertTrue((self.repo / "t1" / "out.txt").exists() and (self.repo / "other.txt").exists())
+
+    def test_conflict_or_dirty_folder_changes_nothing_and_keeps_decision(self):
+        self.done_run()
+        (self.repo / "t1").mkdir()
+        (self.repo / "t1" / "out.txt").write_text("conflicting\n")
+        sh(self.repo, "git", "add", "-A")
+        sh(self.repo, "git", "commit", "-q", "-m", "user edits the same file")
+        tip = self.head()
+        did = self.ask_and_answer("B", "A")
+        with self.assertRaisesRegex(S.SchedulerError, "conflicts"):
+            self.s.finish_apply("r1", did)
+        self.assertEqual(self.head(), tip)
+        (self.repo / "scratch.txt").write_text("wip\n")
+        with self.assertRaisesRegex(S.SchedulerError, "uncommitted changes"):
+            self.s.finish_apply("r1", did)
+        d = self.s.store.load("r1")["decisions"][did]
+        self.assertIsNone(d["consumed_by"])  # still usable after the user fixes things
+
+    def test_merge_and_push(self):
+        isha = self.done_run()
+        remote = Path(self.tmp.name) / "remote.git"
+        sh(self.tmp.name, "git", "init", "-q", "--bare", str(remote))
+        sh(self.repo, "git", "remote", "add", "origin", str(remote))
+        did = self.ask_and_answer("A", "A")
+        out = self.s.finish_apply("r1", did)
+        self.assertTrue(out["pushed"], out)
+        self.assertEqual(sh(remote, "git", "rev-parse", "main"), isha)
+
+    def test_push_without_remote_is_refused_before_merging(self):
+        self.done_run()
+        did = self.ask_and_answer("A", "A")
+        with self.assertRaisesRegex(S.SchedulerError, "no git remote"):
+            self.s.finish_apply("r1", did)
+        self.assertEqual(self.head(), self.base_sha)
+
+    def decide_interactively(self, keys):
+        """Simulate the user's terminal session in `decide` (answers typed in order)."""
+        args = S.build_parser().parse_args(["decision", "answer", "--run", "r1"])
+        with mock.patch.object(S, "_inside_agent", return_value=None), \
+                mock.patch("builtins.input", side_effect=keys), \
+                mock.patch("builtins.print") as out:
+            res = S._decision_cli(self.s, args)
+        return res, "\n".join(" ".join(map(str, c.args)) for c in out.call_args_list)
+
+    def test_decide_asks_action_then_branch(self):
+        self.done_run()
+        self.s.report("r1")
+        did = self.s.finish_ask("r1", "B")["decision"]
+        # pick decision 1, merge locally (B), "This branch (main)" (A), no note, confirm
+        res, shown = self.decide_interactively(["1", "B", "A", "", "y"])
+        self.assertIn("What branch do you choose to merge?", shown)
+        self.assertIn("A: This branch (main)", shown)
+        self.assertIn("B: Other branch", shown)
+        self.assertEqual(res["followup"]["value"], "main")
+        self.assertEqual(self.s.store.load("r1")["decisions"][did]["answer"]["followup"]["value"], "main")
+
+    def test_decide_other_branch_is_typed(self):
+        self.done_run()
+        self.s.report("r1")
+        self.s.finish_ask("r1")
+        res, _ = self.decide_interactively(["1", "A", "B", "release/1.2", "", "y"])
+        self.assertEqual((res["choice"], res["followup"]["value"]), ("A", "release/1.2"))
+
+    def test_decide_dont_merge_skips_branch_question(self):
+        self.done_run()
+        self.s.report("r1")
+        self.s.finish_ask("r1")
+        res, shown = self.decide_interactively(["1", "C", "", "y"])
+        self.assertEqual(res["choice"], "C")
+        self.assertNotIn("What branch", shown)
+
+    def test_dont_merge_keeps_everything(self):
+        self.done_run()
+        did = self.ask_and_answer("C")
+        self.s.finish_apply("r1", did)
+        self.assertEqual(self.head(), self.base_sha)
+        self.assertIn("agent/integration-r1", sh(self.repo, "git", "branch", "--list", "agent/*"))
+        self.assertIn("not merged", self.s.store.load("r1")["finish"]["result"])
 
 
 class TestInstall(Base):

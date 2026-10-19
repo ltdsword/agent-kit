@@ -7,7 +7,7 @@ you mostly use part 4. Command reference: [README.md](README.md).
 
 | Role | Model | Job |
 |---|---|---|
-| You | - | Ask for a feature, answer questions, merge the result |
+| You | - | Ask for a feature, answer decisions, approve the merge and push |
 | Orchestrator | Claude Opus 5.5 (your Claude session) | Plans, writes task specs, reviews, integrates |
 | Scout | Claude Sonnet 5.5, read-only | Reads the codebase and reports evidence to Opus |
 | Workers 1-3 | Codex `gpt-6-luna` at `xhigh` | Write the code, each in its own git worktree |
@@ -63,10 +63,11 @@ Worker agents are named `<slot>-<run>`, e.g. `worker-1-r1`. Their workspaces are
 
 ## Part 2 - One-time setup checklist
 
-Already done for this repo: kit files, scout agent, `~/.codex/worker.config.toml`, Herdr
+`agent-kit create` sets up the kit files and the scout agent. You set up once per machine:
+`~/.codex/worker.config.toml` (see the top-level README), the Herdr
 claude/codex integrations, git repo with a baseline commit.
 
-1. **Codex client 0.163.0 or newer, logged in.** Older clients (0.154.0 here) reject the worker model
+1. **Codex client 0.163.0 or newer, logged in.** Older clients (e.g. 0.154.0) reject the worker model
    with *"The 'gpt-6-luna' model is not supported when using Codex with a ChatGPT account."* even on
    an account that has access. Fix with `codex update`, then confirm:
    ```bash
@@ -76,7 +77,7 @@ claude/codex integrations, git repo with a baseline commit.
 2. **Codex's sandbox must be able to start.** Run `codex sandbox -- sh -c 'echo sandbox-ok'`.
    On Ubuntu 24.04+ it fails with `bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted`
    because `kernel.apparmor_restrict_unprivileged_userns=1` blocks user namespaces. Fix it by
-   allowing only bubblewrap (done on this machine 2026-10-16; needs sudo):
+   allowing only bubblewrap (needs sudo):
    ```bash
    sudo tee /etc/apparmor.d/bwrap-codex >/dev/null <<'EOF'
    abi <abi/4.0>,
@@ -99,7 +100,7 @@ claude/codex integrations, git repo with a baseline commit.
    python3 -m unittest discover -s .agent-system/tests
    ```
 4. Optional: review `owned_paths`/gate commands in `.agent-system/config.json` and `scripts/verify.sh`
-   (for this repo: `./gradlew test` after each merge, `./gradlew build` for the final gate).
+   (for a Gradle project: `./gradlew test` after each merge, `./gradlew build` for the final gate).
 
 ---
 
@@ -139,7 +140,9 @@ What happens next, and where you come in:
 | 7. Review | Opus | `wait` -> `collect` captures the worker's diff and appends it to the task file -> Opus reviews and appends its verdict + report -> PASS / minor fix / repair (same worker, max 2) |
 | 8. Integrate | scheduler | Accepted commits are cherry-picked onto `agent/integration-<run>`; `./gradlew test` after each |
 | 9. Final gate | scheduler | `verify.sh` (full `./gradlew build` + checks); run is DONE only if it passes |
-| 10. Report | Opus | What changed, commits, test evidence, risks, merge instructions |
+| 10. Report | Opus | Summary in chat + `final-report.md` and one total diff `final.diff` |
+| 11. Merge decision | You | `decide`: A merge and push / B merge locally / C don't merge, then which branch |
+| 12. Finish | scheduler | Fast-forward the chosen branch, push if A (never force), clean up worktrees and branches |
 
 Under the hood Opus runs commands like these (you can run them too):
 
@@ -216,20 +219,34 @@ for three workers and a DAG for a one-line change.
 
 ## Part 5 - Adopting the result
 
-Nothing touches your branch automatically. When the run is DONE (git commands run in the repo,
-reached through the workspace symlink):
+Nothing touches your branches until you decide. When the run is DONE, Opus runs `report` and points you
+to two files in `.orchestrator/runs/<run>/`: `final-report.md` (tasks, commits, files, gate, risks,
+decisions) and `final.diff` (the whole run as one diff; no need to look at individual worktrees). You
+can also inspect the branch directly: `git -C thrift-demo log --oneline main..agent/integration-r1`.
 
-```bash
-git -C thrift-demo log --oneline main..agent/integration-r1   # review commits
-git -C thrift-demo diff main...agent/integration-r1           # full diff
-git -C thrift-demo merge --ff-only agent/integration-r1       # or: git merge / cherry-pick / open a PR yourself
+Then Opus opens the merge decision and you run `.agent-system/scripts/decide`:
+
+```text
+D3 (finish): Merge run r1?
+  A: Merge and push
+  B: Merge locally only, no push   <- recommended by Opus
+  C: Don't merge
+Your choice (key): A
+
+What branch do you choose to merge?
+  A: This branch (main)
+  B: Other branch (type its name; a new name creates that branch)
+Your choice (key): B
+Branch name: feature/register-validation
+Confirm D3 = A, feature/register-validation? [y/N] y
 ```
 
-Then clean up (closes only Herdr workspaces the run created; removes only clean worktrees):
-
-```bash
-python3 .agent-system/scheduler.py cleanup --run r1 --remove-worktrees
-```
+Opus then runs `finish apply`. It fast-forwards the chosen branch (a new name is created at the result;
+if the branch moved during the run it is merged in first and the gate runs again), pushes for A (to the
+branch's upstream or `origin`, never with force), then closes the run's Herdr workspaces, removes its
+worktrees and deletes its `agent/*` branches. Merging into the branch checked out in your folder needs a
+clean folder (commit or stash first). With C, everything stays on `agent/integration-r1`; clean up later
+with `python3 .agent-system/scheduler.py cleanup --run r1 --remove-worktrees`.
 
 ---
 
