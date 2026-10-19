@@ -16,6 +16,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import scheduler as S  # noqa: E402
 import models as M  # noqa: E402
 import kitconfig as K  # noqa: E402
+import kitstart as KS  # noqa: E402
 
 REAL_CONFIG = json.loads((Path(__file__).resolve().parents[1] / "config.json").read_text())
 PY_OK = [sys.executable, "-c", "raise SystemExit(0)"]
@@ -44,8 +45,9 @@ class FakeHerdr(S.Herdr):
     def workspace_close(self, ws):
         self.calls.append(("workspace_close", ws))
 
-    def agent_start(self, name, pane, agent_args, timeout_ms):
+    def agent_start(self, name, pane, agent_args, timeout_ms, kind="codex"):
         self.calls.append(("agent_start", name, pane, list(agent_args)))
+        self.kinds = getattr(self, "kinds", []) + [kind]
         self.live[name] = "idle"
         return {}
 
@@ -828,7 +830,7 @@ class TestWorkspaceMode(WorkspaceBase):
         self.assertFalse((self.repo / ".orchestrator").exists())
         prompt = [c for c in self.herdr.calls if c[0] == "agent_prompt"][-1][2]
         self.assertIn(str(self.ws.resolve() / "packets" / "T1.md"), prompt)
-        self.assertIn(str(self.ws.resolve() / "AGENTS.md"), prompt)
+        self.assertIn("WORKER-RULES.md", prompt)
         self.assertEqual(self.repo_status(), "")
         self.worker_commit("r1", "T1")
         self.assertEqual(self.s.collect("r1", "T1")["result"], "REVIEW")
@@ -1069,13 +1071,40 @@ class TestModels(Base):
             M.check_effort(x, "xhigh")
         self.assertEqual(M.check_effort(M.resolve("grok/grok-4"), "whatever"), "whatever")
 
-    def test_non_codex_worker_refused_at_dispatch(self):
+    def test_claude_worker_launches_with_its_flags(self):
+        self.cfg["worker"].update(kind="claude", model="claude-sonnet-5-5", reasoning_effort="high")
+        self.s = self.new_scheduler()
+        self.s.create_run("r1", [self.task("T1", trivial=True)])
+        with mock.patch.object(S.shutil, "which", return_value="/usr/bin/claude"):
+            self.s.dispatch_ready("r1", launch="herdr")
+        start = [c for c in self.herdr.calls if c[0] == "agent_start"][0]
+        args = start[3]
+        self.assertEqual(self.herdr.kinds, ["claude"])
+        self.assertEqual(args[:4], ["--model", "claude-sonnet-5-5", "--effort", "high"])
+        self.assertEqual(args[-2:], ["--permission-mode", "auto"])
+        self.assertIn(str(self.s.store.run_dir("r1") / "reports"), args)
+        prompt = [c for c in self.herdr.calls if c[0] == "agent_prompt"][0][2]
+        self.assertIn("You are a worker, not the orchestrator", prompt)
+        self.assertIn("WORKER-RULES.md", prompt)
+        st = self.s.store.load("r1")
+        self.assertEqual(self.s.manual_command(st, "T1", "go")[0], "claude")
+
+    def test_missing_worker_program_refused_before_leasing(self):
         self.cfg["worker"].update(kind="grok", model="grok-4")
         self.s = self.new_scheduler()
         self.s.create_run("r1", [self.task("T1", trivial=True)])
-        with self.assertRaisesRegex(S.SchedulerError, "Codex workers only"):
-            self.s.dispatch_ready("r1", launch="herdr")
+        with mock.patch.object(S.shutil, "which", return_value=None):
+            with self.assertRaisesRegex(S.SchedulerError, "not installed"):
+                self.s.dispatch_ready("r1", launch="herdr")
         self.assertEqual(self.s.store.load("r1")["tasks"]["T1"]["status"], "READY")  # nothing leased
+
+    def test_unverified_worker_uses_generic_or_configured_args(self):
+        self.cfg["worker"].update(kind="gemini", model="gemini-3-pro", reasoning_effort=None)
+        self.s = self.new_scheduler()
+        self.assertEqual(self.s.worker_args("/wt", "r1"), ["--model", "gemini-3-pro"])
+        self.cfg["worker"]["launch_args"] = ["-m", "{model}", "--yolo-off", "--cwd", "{cwd}"]
+        self.assertEqual(self.s.worker_args("/wt", "r1"), ["-m", "gemini-3-pro", "--yolo-off", "--cwd", "/wt"])
+        self.assertIn("UNVERIFIED", M.sandbox_note("gemini"))
 
     def test_interactive_picker(self):
         ws = Path(self.tmp.name) / "ws"
@@ -1096,6 +1125,94 @@ class TestModels(Base):
         self.assertEqual((cfg["worker"]["model"], cfg["worker"]["reasoning_effort"]), ("gpt-x-sol", "ultra"))
         self.assertEqual(json.loads((ws / ".claude" / "settings.json").read_text())["model"], "claude-fable-5-1")
         self.assertIn("model: claude-sonnet-5-5", (ws / ".claude" / "agents" / "scout.md").read_text())
+
+
+class StartHerdr(FakeHerdr):
+    """FakeHerdr plus the raw calls `agent-kit start` makes (focus)."""
+
+    def _call(self, *args, timeout_s=None):
+        self.calls.append(("call", *args))
+        return {}
+
+
+class TestStart(WorkspaceBase):
+    def setUp(self):
+        super().setUp()
+        (self.ws / ".agent-system" / "config.json").write_text(json.dumps(self.cfg))
+        self.h = StartHerdr()
+
+    def set_orch(self, **role):
+        self.cfg["orchestrator"] = role
+        (self.ws / ".agent-system" / "config.json").write_text(json.dumps(self.cfg))
+
+    def start(self, *extra, env=None, running=True):
+        execs, popens = [], []
+        runner = lambda *a, **k: subprocess.CompletedProcess(a, 0, "server:\n  status: running\n" if running else
+                                                             "server:\n  status: stopped\n", "")
+        with mock.patch.object(KS.shutil, "which", return_value="/usr/bin/x"), \
+                mock.patch.object(KS.subprocess, "Popen", side_effect=lambda *a, **k: popens.append(a)), \
+                mock.patch("builtins.print"):
+            rc = KS.main(["--workspace", str(self.ws), *extra], herdr=self.h, env=env or {},
+                         execvp=lambda *a: execs.append(a), runner=runner)
+        return rc, execs, popens
+
+    def test_plan_per_program(self):
+        self.set_orch(kind="claude", model="claude-opus-5-5", effort="high")
+        p = KS.plan(self.ws, self.cfg)
+        self.assertEqual((p["kind"], p["args"], p["prompt"], p["name"], p["label"]),
+                         ("claude", ["--model", "claude-opus-5-5", "--effort", "high"], None, "orch-repo", "repo"))
+        self.set_orch(kind="codex", model="gpt-6-sol", effort="high")
+        p = KS.plan(self.ws, self.cfg)
+        self.assertEqual(p["args"], ["-m", "gpt-6-sol", "-c", 'model_reasoning_effort="high"', "-C", str(self.ws),
+                                     "--add-dir", str(self.repo.resolve())])
+        self.assertIn("read AGENTS.md", p["prompt"])
+        self.set_orch(kind="gemini", model="gemini-3-pro", launch_args=["-m", "{model}"])
+        p = KS.plan(self.ws, self.cfg)
+        self.assertEqual((p["args"], p["verified"]), (["-m", "gemini-3-pro"], False))
+
+    def test_inside_herdr_starts_and_focuses(self):
+        self.set_orch(kind="codex", model="gpt-6-sol", effort="high")
+        rc, execs, _ = self.start(env={"HERDR_ENV": "1"})
+        self.assertEqual(rc, 0)
+        create = [c for c in self.h.calls if c[0] == "workspace_create"][0]
+        self.assertEqual(create[1:], (str(self.ws), "repo"))
+        self.assertEqual(self.h.kinds, ["codex"])
+        self.assertTrue(any(c[0] == "agent_prompt" and "read AGENTS.md" in c[2] for c in self.h.calls))
+        self.assertTrue(any(c[:3] == ("call", "workspace", "focus") for c in self.h.calls))
+        self.assertEqual(execs, [])  # already inside Herdr: no attach
+
+    def test_claude_gets_no_bootstrap_prompt_and_outside_attaches(self):
+        self.set_orch(kind="claude", model="claude-opus-5-5", effort=None)
+        rc, execs, _ = self.start()
+        self.assertEqual(rc, 0)
+        self.assertFalse([c for c in self.h.calls if c[0] == "agent_prompt"])
+        self.assertEqual(execs, [("herdr", ["herdr"])])
+        rc, execs, _ = self.start("--no-attach")
+        self.assertEqual(execs, [])
+
+    def test_already_running_is_focused_not_restarted(self):
+        self.set_orch(kind="claude", model="claude-opus-5-5")
+        self.h.live["orch-repo"] = "idle"
+        self.start(env={"HERDR_ENV": "1"})
+        self.assertFalse([c for c in self.h.calls if c[0] in ("workspace_create", "agent_start")])
+        self.assertIn(("call", "agent", "focus", "orch-repo"), self.h.calls)
+
+    def test_herdr_not_running_spawns_helper_then_starts_herdr(self):
+        self.set_orch(kind="claude", model="claude-opus-5-5")
+        rc, execs, popens = self.start(running=False)
+        self.assertEqual(rc, 0)
+        self.assertIn("--when-ready", popens[0][0])
+        self.assertEqual(execs, [("herdr", ["herdr"])])
+        self.assertFalse([c for c in self.h.calls if c[0] == "agent_start"])  # the helper does that
+
+    def test_missing_program_and_dry_run(self):
+        self.set_orch(kind="grok", model="grok-4")
+        with mock.patch.object(KS.shutil, "which", return_value=None), mock.patch("sys.stderr"), \
+                mock.patch("builtins.print"):
+            self.assertEqual(KS.main(["--workspace", str(self.ws)], herdr=self.h, env={}), 1)
+        rc, execs, _ = self.start("--dry-run")
+        self.assertEqual((rc, execs), (0, []))
+        self.assertFalse([c for c in self.h.calls if c[0] in ("workspace_create", "agent_start")])
 
 
 class TestInstall(Base):
@@ -1138,7 +1255,11 @@ class TestInstall(Base):
         claude = (ws / "CLAUDE.md").read_text()
         self.assertTrue(claude.startswith("# repo\n"))
         self.assertEqual(claude.count("<!-- agent-system:orchestrator:begin -->"), 1)
-        self.assertIn("<!-- agent-system:worker:begin -->", (ws / "AGENTS.md").read_text())
+        agents = (ws / "AGENTS.md").read_text()
+        self.assertTrue(agents.startswith("# repo\n"))
+        self.assertEqual(agents.count("<!-- agent-system:orchestrator:begin -->"), 1)
+        self.assertNotIn("agent-system:worker:begin", agents)
+        self.assertTrue((ws / ".agent-system" / "WORKER-RULES.md").is_file())
         self.assertTrue((ws / ".claude" / "agents" / "scout.md").is_file())
         s = S.Scheduler(ws, herdr=self.herdr)  # loads the written config from disk
         self.assertEqual(s.project_root, self.repo.resolve())
@@ -1147,6 +1268,7 @@ class TestInstall(Base):
     def test_create_from_parent_with_folder(self):
         self.kit("create", "--folder=repo")  # names the repo; repo.workspace does not exist yet
         self.assert_workspace()
+        self.assertIn("Project notes: see the top of CLAUDE.md", (self.ws / "AGENTS.md").read_text())
 
     def test_create_inside_repo_without_folder(self):
         self.kit("create", cwd=self.repo)
@@ -1187,10 +1309,16 @@ class TestInstall(Base):
                                        "Bash(python3 .agent-system/scheduler.py decision answer:*)", "Bash(rm:*)"]
         settings.write_text(json.dumps(old))
         (self.ws / ".agent-system" / "scripts" / "decide").write_text("#!/bin/sh\n")
+        (self.ws / "AGENTS.md").write_text("# repo\n\nmy own note\n\n<!-- agent-system:worker:begin -->\nold worker "
+                                             "rules\n<!-- agent-system:worker:end -->\n")
         self.kit("update", cwd=self.ws)  # from inside the workspace
         deny = json.loads(settings.read_text())["permissions"]["deny"]
         self.assertIn("Bash(rm:*)", deny)  # the user's own rules stay
         self.assertFalse((self.ws / ".agent-system" / "scripts" / "decide").exists())
+        agents = (self.ws / "AGENTS.md").read_text()  # migrated: worker block gone, orchestrator rules in
+        self.assertIn("my own note", agents)
+        self.assertNotIn("old worker rules", agents)
+        self.assertIn("<!-- agent-system:orchestrator:begin -->", agents)
         self.assert_workspace()
         self.kit("update", "--folder=repo")  # from the parent, naming the repo
         self.assert_workspace()
@@ -1270,7 +1398,7 @@ class TestInstall(Base):
         settings = self.ws / ".claude" / "settings.json"
         self.assertEqual(json.loads(settings.read_text())["model"], "claude-opus-5-5")
         out = self.kit("config", "--model-orchestrator=sonnet", "--effort-orchestrator=max", cwd=self.ws).stdout
-        self.assertIn("claude --model claude-sonnet-5-5 --effort max", out)
+        self.assertIn("launches claude claude-sonnet-5-5, effort max", out)
         self.assertEqual(json.loads(settings.read_text())["model"], "claude-sonnet-5-5")
         bad = self.kit("config", "--model-worker=gpt-7", cwd=self.ws, ok=False)
         self.assertEqual(bad.returncode, 2)
@@ -1280,7 +1408,7 @@ class TestInstall(Base):
         self.assertIn("Claude Code subagent", self.kit("config", "--model-scout=gpt-x-sol", cwd=self.ws, ok=False).stderr)
         out = self.kit("config", "--folder=repo", "--model-worker=grok/grok-4").stdout
         self.assertIn("UNVERIFIED", out)
-        self.assertIn("Codex workers only until phase 2", out)
+        self.assertIn("worker.launch_args", out)
         self.kit("config", "--model-scout=haiku", cwd=self.ws)
         self.kit("update", cwd=self.ws)  # keeps the chosen scout model in the refreshed scout.md
         scout = (self.ws / ".claude" / "agents" / "scout.md").read_text()

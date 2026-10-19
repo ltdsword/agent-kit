@@ -194,7 +194,7 @@ Already enforced locally (2026-10-16), and the hub only adds a channel. **Only c
 decisions reach you.** Routine ones (first repair with clear evidence, minor fixes, relaunches,
 plan-step corrections) are Opus's call, recorded as `DECIDED_BY_OPUS` with a reason. The hub shows
 them in the activity feed for audit, but they never wait for you. The split is described in
-`templates/CLAUDE.section.md` and configured by `decisions.require_user_for` +
+`templates/ORCHESTRATOR.section.md` and configured by `decisions.require_user_for` +
 `decisions.routine_repairs`.
 
 1. **Detection** (scheduler, deterministic): a task enters BLOCKED or FIX_REQUIRED; `collect`
@@ -627,4 +627,4 @@ per task, decisions per run); multi-user read-only sharing.
 ```
 
 ### 19.3 CLAUDE.md rule text (already installed; hub adds nothing for Opus)
-See `templates/CLAUDE.section.md`, section "The user holds every decision about problems".
+See `templates/ORCHESTRATOR.section.md`, section "The user holds every decision about problems".

@@ -3,6 +3,7 @@
 #   agent-kit create [--folder=<repo>] [--dry-run] [model options]
 #   agent-kit update [--folder=<repo>] [--dry-run] [--force-agent]
 #   agent-kit config [--folder=<repo>] [model options] [--show] [--list]
+#   agent-kit start  [--folder=<repo>] [--dry-run] [--no-attach]   open Herdr + launch the orchestrator
 #   model options: --model-orchestrator=M --effort-orchestrator=E --model-scout=M --effort-scout=E
 #                  --model-worker=M --effort-worker=E  (M: model or alias, or <program>/<model>)
 #   agent-kit [--dry-run] [--force-agent] <target-repo>    legacy in-repo mode (kit inside the repo)
@@ -17,15 +18,16 @@ set -euo pipefail
 
 SELF="$(readlink -f "${BASH_SOURCE[0]}")"
 SRC="$(cd "$(dirname "$SELF")/../.." && pwd -P)"   # kit home: holds .agent-system/
-usage() { sed -n '2,15p' "$SELF" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,16p' "$SELF" | sed 's/^# \{0,1\}//'; }
 die() { echo "error: $*" >&2; exit 1; }
 
-CMD=""; DRY=0; FORCE_AGENT=0; FOLDER=""; TARGET=""; MODEL_ARGS=()
+CMD=""; DRY=0; FORCE_AGENT=0; FOLDER=""; TARGET=""; MODEL_ARGS=(); NO_ATTACH=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --model-*=*|--effort-*=*) MODEL_ARGS+=("$1") ;;
     --model-*|--effort-*) [ $# -ge 2 ] || die "$1 needs a value"; MODEL_ARGS+=("$1=$2"); shift ;;
     --show|--list|--no-input) MODEL_ARGS+=("$1") ;;
+    --no-attach) NO_ATTACH=1 ;;
     --folder=*) FOLDER="${1#--folder=}"; [ -n "$FOLDER" ] || die "--folder needs a value" ;;
     --folder) [ $# -ge 2 ] || die "--folder needs a value"; FOLDER="$2"; shift ;;
     --dry-run) DRY=1 ;;
@@ -33,7 +35,7 @@ while [ $# -gt 0 ]; do
     -h|--help) usage; exit 0 ;;
     -*) echo "unknown option: $1" >&2; usage >&2; exit 2 ;;
     *)
-      if [ -z "$CMD$TARGET" ] && { [ "$1" = create ] || [ "$1" = update ] || [ "$1" = config ]; }; then CMD="$1"
+      if [ -z "$CMD$TARGET" ] && { [ "$1" = create ] || [ "$1" = update ] || [ "$1" = config ] || [ "$1" = start ]; }; then CMD="$1"
       elif [ -z "$CMD$TARGET" ]; then TARGET="$1"
       else echo "unexpected argument: $1" >&2; exit 2
       fi ;;
@@ -41,7 +43,7 @@ while [ $# -gt 0 ]; do
   shift
 done
 [ -n "$CMD$TARGET" ] || { usage >&2; exit 2; }
-[ -z "$FOLDER" ] || [ -n "$CMD" ] || die "--folder only applies to create/update/config"
+[ -z "$FOLDER" ] || [ -n "$CMD" ] || die "--folder only applies to create/update/config/start"
 [ ${#MODEL_ARGS[@]} -eq 0 ] || [ "$CMD" = create ] || [ "$CMD" = config ] \
   || die "model options only apply to create and config"
 
@@ -50,7 +52,7 @@ repo_status() { git -C "$1" status --porcelain --untracked-files=all; }
 
 copy_kit() {  # copy_kit <dest>: kit code, docs, prompts, scripts, tests, templates (never config.json)
   do_ mkdir -p "$1/.agent-system" "$1/.claude/agents"
-  for item in scheduler.py models.py kitconfig.py README.md GUIDE.md docs prompts scripts tests templates; do
+  for item in scheduler.py models.py kitconfig.py kitstart.py WORKER-RULES.md README.md GUIDE.md docs prompts scripts tests templates; do
     [ -e "$SRC/.agent-system/$item" ] || continue
     do_ rm -rf "$1/.agent-system/$item"
     do_ cp -r "$SRC/.agent-system/$item" "$1/.agent-system/$item"
@@ -122,6 +124,32 @@ PY
     { [ -s "$file" ] && printf '\n'; cat "$tpl"; } >> "$file"
     echo "appended $name section to $(basename "$file")"
   fi
+}
+
+remove_section() {  # remove_section <file> <marker-name>: drop a marked block (migrations)
+  local file="$1" name="$2"
+  [ -f "$file" ] && grep -qF "<!-- agent-system:$name:begin -->" "$file" || return 0
+  if [ $DRY -eq 1 ]; then echo "[dry-run] remove old $name section from $file"; return; fi
+  python3 - "$file" "<!-- agent-system:$name:begin -->" "<!-- agent-system:$name:end -->" <<'PY'
+import sys
+path, begin, end = sys.argv[1:]
+text = open(path).read()
+head, rest = text.split(begin, 1)
+_, tail = rest.split(end, 1)
+open(path, "w").write((head.rstrip("\n") + "\n" + tail.lstrip("\n")).lstrip("\n"))
+PY
+  echo "removed old $name section from $(basename "$file") (worker rules are now .agent-system/WORKER-RULES.md)"
+}
+
+write_instructions() {  # write_instructions <dir>: orchestrator rules into CLAUDE.md and AGENTS.md
+  local dir="$1" tpl="$SRC/.agent-system/templates/ORCHESTRATOR.section.md"
+  merge_section "$dir/CLAUDE.md" "$tpl" orchestrator
+  remove_section "$dir/AGENTS.md" worker
+  if [ ! -s "$dir/AGENTS.md" ] && [ $DRY -eq 0 ]; then
+    printf '# %s\n\nProject notes: see the top of CLAUDE.md in this folder.\n' "$(basename "${dir%.workspace}")" \
+      > "$dir/AGENTS.md"
+  fi
+  merge_section "$dir/AGENTS.md" "$tpl" orchestrator
 }
 
 check_repo_unchanged() {  # check_repo_unchanged <repo> <status before>
@@ -221,8 +249,7 @@ PY
   fi
   install_agent "$dest"
   merge_settings "$dest/.claude/settings.json" "$repo"
-  merge_section "$dest/CLAUDE.md" "$SRC/.agent-system/templates/CLAUDE.section.md" orchestrator
-  merge_section "$dest/AGENTS.md" "$SRC/.agent-system/templates/AGENTS.section.md" worker
+  write_instructions "$dest"
   if [ $DRY -eq 1 ]; then
     echo "[dry-run] choose models (asked on a terminal, or from --model-* options)"
   else
@@ -261,8 +288,7 @@ PY
   copy_kit "$dest"
   install_agent "$dest"
   merge_settings "$dest/.claude/settings.json" "$repo"
-  merge_section "$dest/CLAUDE.md" "$SRC/.agent-system/templates/CLAUDE.section.md" orchestrator
-  merge_section "$dest/AGENTS.md" "$SRC/.agent-system/templates/AGENTS.section.md" worker
+  write_instructions "$dest"
   python3 - "$SRC/.agent-system/config.json" "$dest/.agent-system/config.json" <<'PY'
 import json, sys
 new, cur = (json.load(open(p)) for p in sys.argv[1:])
@@ -299,8 +325,7 @@ PY
   fi
   install_agent "$TARGET"
   merge_settings "$TARGET/.claude/settings.json"
-  merge_section "$TARGET/CLAUDE.md" "$SRC/.agent-system/templates/CLAUDE.section.md" orchestrator
-  merge_section "$TARGET/AGENTS.md" "$SRC/.agent-system/templates/AGENTS.section.md" worker
+  write_instructions "$TARGET"
   if ! grep -qE '^/?\.orchestrator/?$' "$TARGET/.gitignore" 2>/dev/null; then
     do_ sh -c "printf '\n# multi-agent orchestration runtime state\n.orchestrator/\n.agent-system/**/__pycache__/\n' >> '$TARGET/.gitignore'"
   fi
@@ -316,8 +341,18 @@ cmd_config() {
   kitconfig "$dest" "${MODEL_ARGS[@]}"
 }
 
+cmd_start() {
+  local dest repo_name args=()
+  resolve_folder
+  [ -f "$dest/.agent-system/config.json" ] || die "$dest has no kit (.agent-system/config.json): use 'agent-kit create'"
+  [ $DRY -eq 1 ] && args+=(--dry-run)
+  [ $NO_ATTACH -eq 1 ] && args+=(--no-attach)
+  PYTHONDONTWRITEBYTECODE=1 exec python3 "$dest/.agent-system/kitstart.py" --workspace "$dest" "${args[@]}"
+}
+
 case "$CMD" in
   create) cmd_create ;;
+  start) cmd_start ;;
   update) cmd_update ;;
   config) cmd_config ;;
   *) cmd_legacy ;;

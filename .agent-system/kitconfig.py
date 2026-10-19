@@ -145,19 +145,15 @@ def describe(cfg: dict) -> str:
 def notes(cfg: dict) -> list[str]:
     out = []
     o, s, w = (get_role(cfg, r) for r in ROLES)
-    if o["kind"] == "claude":
-        out.append(f"orchestrator: start it with `claude --model {o['model']}"
-                   + (f" --effort {o['effort']}`" if o["effort"] else "`") + " in the workspace")
-    else:
-        out.append(f"orchestrator: {o['kind']} is recorded; launching it with `agent-kit start` arrives in phase 3")
+    out.append("orchestrator: start it with `agent-kit start` (opens Herdr and launches "
+               f"{o['kind']} {o['model']}" + (f", effort {o['effort']}" if o["effort"] else "") + ")")
     if o["kind"] != "claude":
         out.append("scout: used only when the orchestrator is Claude Code")
-    if w["kind"] != "codex":
-        out.append(f"worker: {w['kind']} is recorded, but the scheduler launches Codex workers only until "
-                   "phase 2 (dispatch will refuse)")
+    out.append(f"worker: {w['kind']}: {M.sandbox_note(w['kind'])}")
     for role, r in zip(ROLES, (o, s, w)):
         if not M.is_verified(r["kind"]):
-            out.append(f"{role}: {r['kind']} is UNVERIFIED with this kit (not tested; model name not checked)")
+            out.append(f"{role}: {r['kind']} is UNVERIFIED with this kit (not tested; model name not checked; "
+                       f"if its CLI flags differ, set {role}.launch_args in .agent-system/config.json)")
     return out
 
 

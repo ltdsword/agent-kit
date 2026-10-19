@@ -8,9 +8,9 @@ you mostly use part 4. Command reference: [README.md](README.md).
 | Role | Model | Job |
 |---|---|---|
 | You | - | Ask for a feature, answer decisions, approve the merge and push |
-| Orchestrator | Claude Code, the model you choose (default Opus 5.5) | Plans, writes task specs, reviews, integrates |
+| Orchestrator | Any agent program and model you choose (default Claude Code, Opus 5.5) | Plans, writes task specs, reviews, integrates |
 | Scout | Claude Code subagent, the model you choose (default Sonnet 5.5), read-only | Reads the codebase and reports evidence to Opus |
-| Workers 1-3 | Codex, the model you choose (default `gpt-6-luna` at `xhigh`) | Write the code, each in its own git worktree |
+| Workers 1-3 | Any agent program and model you choose (default Codex `gpt-6-luna` at `xhigh`) | Write the code, each in its own git worktree |
 | Herdr | - | Runs and shows all of these terminals; keeps them alive if you detach |
 | `scheduler.py` | - | Tracks who works on what, enforces the rules |
 
@@ -63,9 +63,11 @@ Worker agents are named `<slot>-<run>`, e.g. `worker-1-r1`. Their workspaces are
 
 ## Part 2 - One-time setup checklist
 
-`agent-kit create` sets up the kit files and the scout agent. You set up once per machine:
-`~/.codex/worker.config.toml` (see the top-level README), the Herdr
-claude/codex integrations, git repo with a baseline commit.
+`agent-kit create` sets up the kit files and the scout agent. You set up once per machine: the
+programs you chose for each role, installed and logged in; their Herdr integrations
+(`herdr integration install <program>`, so Herdr can track their state); for Codex workers
+`~/.codex/worker.config.toml` (see the top-level README); and a git repo with a baseline commit.
+Steps 1-2 below apply to Codex.
 
 1. **Codex client 0.163.0 or newer, logged in.** Older clients (e.g. 0.154.0) reject the worker model
    with *"The '<model>' model is not supported when using Codex with a ChatGPT account."* even on
@@ -106,17 +108,27 @@ claude/codex integrations, git repo with a baseline commit.
 
 ## Part 3 - Start a session the right way
 
-The workflow only dispatches live workers when Claude runs **inside** Herdr (it checks `HERDR_ENV=1`).
+The workflow only dispatches live workers when the orchestrator runs **inside** Herdr (it checks
+`HERDR_ENV=1`). `agent-kit start` takes care of that:
 
 ```bash
 cd ~/Code/thrift-demo.workspace    # workspace: kit + state; the repo is the symlink thrift-demo/
-herdr                         # opens/attaches the session
-# in the Herdr pane:
-claude                        # starts with the orchestrator model you chose (agent-kit config --show)
+agent-kit start                    # opens Herdr (starts it if needed) and launches the orchestrator
 ```
 
-Inside Claude, check it: `!echo $HERDR_ENV` should print `1`. If Claude was already running before the
-scout agent existed, restart it once so `.claude/agents/scout.md` loads.
+**What `agent-kit start` does:**
+- It launches the program, model and effort you chose (`agent-kit config --show`) in a new Herdr
+  workspace named after the project, as agent `orch-<repo>`.
+- From a normal terminal it attaches you to Herdr afterwards; inside Herdr it just switches to the
+  new workspace.
+- Running it again switches to the running orchestrator instead of starting a second one.
+- Programs other than Claude Code get a first prompt telling them to read `AGENTS.md` (their rules)
+  and the notes in `CLAUDE.md`.
+- If the program asks something at startup (e.g. "trust this folder"), answer it in the pane.
+
+**Doing it by hand instead:** run `herdr`, then start the program in a pane, e.g. plain `claude`
+(it uses the model from `.claude/settings.json`). If Claude was already running before the scout
+agent existed, restart it once so `.claude/agents/scout.md` loads.
 
 ---
 
@@ -135,8 +147,8 @@ What happens next, and where you come in:
 | 2. Scout round 1 | Sonnet | Opus says what it is asking; the dossier is saved to `.orchestrator/runs/<run>/research/` |
 | 3. Readiness gate | Opus | READY, or a targeted round 2/3 (max 3 total). If still not ready, Opus inspects directly, narrows scope, or tells you what is missing |
 | 4. Plan | Opus | 1-3 tasks with dependencies; one plan file per task in `gen-tasks/<task-name>-<dd-mm-yy>.md` (open them to see exactly what each worker is told) |
-| 5. Dispatch | scheduler | New Herdr workspaces `<run>-worker-N` appear with Codex running. Each worker gets a short prompt: read your task file + key facts + cautions |
-| 6. Work | Codex | Watch with `ctrl+b w` or `herdr agent read ...`. A `blocked` worker is waiting on an approval: Opus will ask you |
+| 5. Dispatch | scheduler | New Herdr workspaces `<run>-worker-N` appear with the worker program running. Each worker gets a short prompt: read your task file, `WORKER-RULES.md`, key facts, cautions |
+| 6. Work | Workers | Watch with `ctrl+b w` or `herdr agent read ...`. A `blocked` worker is waiting on an approval: the orchestrator approves routine ones and asks you about the rest |
 | 7. Review | Opus | `wait` -> `collect` captures the worker's diff and appends it to the task file -> Opus reviews and appends its verdict + report -> PASS / minor fix / repair (same worker, max 2) |
 | 8. Integrate | scheduler | Accepted commits are cherry-picked onto `agent/integration-<run>`; `./gradlew test` after each |
 | 9. Final gate | scheduler | `verify.sh` (full `./gradlew build` + checks); run is DONE only if it passes |
@@ -277,8 +289,8 @@ block), keep an existing `config.json` and a customized `scout.md`, and never to
 Re-run them later to update the kit. The Codex profile `~/.codex/worker.config.toml` is global, so it
 is shared by every project.
 
-In-repo mode: commit the kit before the first run. Codex workers read `AGENTS.md` from their worktree,
-which is created from a commit. (In workspace mode the worker prompt points to the workspace `AGENTS.md`.)
+Workers read `.agent-system/WORKER-RULES.md` (their prompt points to it) in both modes. In in-repo
+mode, commit the kit before the first run, since worktrees are created from a commit.
 
 ---
 
@@ -286,7 +298,8 @@ which is created from a commit. (In workspace mode the worker prompt points to t
 
 | Problem | What to do |
 |---|---|
-| Opus says "not running inside Herdr" | Quit Claude, start it from a Herdr pane (Part 3) |
+| Orchestrator says "not running inside Herdr" | Quit it and use `agent-kit start` (Part 3) |
+| An unverified program fails to start, or ignores the model | Set `launch_args` for that role in `.agent-system/config.json` (README, "Choosing models") |
 | Model not supported with ChatGPT account | Old client: `codex update` (Part 2, step 1), or choose another model with `agent-kit config` |
 | Worker says `bwrap: ... RTM_NEWADDR: Operation not permitted` | Ubuntu's user-namespace restriction blocks Codex's sandbox: add the AppArmor profile (Part 2, step 2). Never switch workers to `danger-full-access` |
 | Worker's `./gradlew test` fails on a lock file in `~/.gradle` | Gradle's cache must be writable: keep `"writable_dirs": ["~/.gradle"]` in `config.json` (other stacks: README, Safety) |

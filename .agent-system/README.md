@@ -4,11 +4,11 @@ Reference for the files and commands in this directory. For a step-by-step walkt
 (Herdr basics, first task, adopting results, reusing in another repo) read **[GUIDE.md](GUIDE.md)**.
 
 ```text
-User request -> orchestrator: Claude Code, configured model (default Opus 5.5): plan, review, integrate
+User request -> orchestrator: configured program + model (default Claude Code, Opus 5.5), launched by `agent-kit start`
                  |- scout subagent: configured Claude model (default Sonnet 5.5, effort medium), read-only (max 3 rounds/request)
                  v
-            1..3 task DAG -> scheduler.py (leases, states, durable JSON) -> Codex workers
-                 worker-1 / worker-2 / worker-3: the configured worker model (default gpt-6-luna @ xhigh), one Herdr workspace + git worktree each
+            1..3 task DAG -> scheduler.py (leases, states, durable JSON) -> workers
+                 worker-1 / worker-2 / worker-3: the configured program + model (default Codex gpt-6-luna @ xhigh), one Herdr workspace + git worktree each
                  task plan per worker: gen-tasks/<task-name>-<dd-mm-yy>.md (written by Opus)
                  -> wait -> collect (diff captured + appended to the task file) -> Opus review
                  (verdict + report appended) -> sequential cherry-pick onto agent/integration-<run>
@@ -24,6 +24,9 @@ User request -> orchestrator: Claude Code, configured model (default Opus 5.5): 
 | `config.json` | Program/model/effort per role (orchestrator, scout, worker; set with `agent-kit config`), pool size 3, task cap 3, parallel 3, max 2 major repairs, 3 scout rounds, gate commands |
 | `models.py` | Model registry: Herdr agent programs (Claude Code and Codex verified, others unverified), Claude list, Codex catalog, effort checks, pick-from table |
 | `kitconfig.py` | `agent-kit config`: choose program/model/effort per role (flags, or interactive on a terminal) |
+| `kitstart.py` | `agent-kit start`: open Herdr and launch the orchestrator with its program/model/effort |
+| `WORKER-RULES.md` | Rules every worker reads, whatever its program (the worker prompt points to it) |
+| `templates/ORCHESTRATOR.section.md` | Orchestrator rules, written into the workspace's `CLAUDE.md` and `AGENTS.md` |
 | `scheduler.py` | Stdlib CLI: DAG validation, readiness, leases, state machine, research gate, git/Herdr wrappers |
 | `prompts/task-packet.md` | Template + authoring guidance for a worker task file (`task new` copies it) |
 | `prompts/repair-packet.md` | Template for a repair file to the same worker (`task new --repair-of`) |
@@ -32,11 +35,10 @@ User request -> orchestrator: Claude Code, configured model (default Opus 5.5): 
 | `prompts/architecture-readiness.md` | Planning gate checklist (a)-(e) |
 | `scripts/doctor.sh` | Tooling/model/integration report (`--probe-codex` for a live model check) |
 | `scripts/verify.sh` | Stack-detecting quality gate (`--quick` for post-merge smoke) |
-| `scripts/install.sh` | `agent-kit create/update/config [--folder=<repo>]`: create `<repo>.workspace` next to the repo with the kit, or refresh it (`docs/WORKSPACE-SETUP.md` section 4). `agent-kit <repo>`: legacy in-repo install |
+| `scripts/install.sh` | `agent-kit create/update/config/start [--folder=<repo>]`: create `<repo>.workspace` next to the repo with the kit, or refresh it (`docs/WORKSPACE-SETUP.md` section 4). `agent-kit <repo>`: legacy in-repo install |
 | `docs/WORKSPACE-SETUP.md` | Rule for work projects: tooling in `<repo>.workspace/`, repo via symlink (workspace mode) |
 | `docs/DECISION-HUB-PLAN.md` | Web dashboard + remote decisions: not planned for now (Remote Control covers it for Claude users); kept for a later version |
 | `templates/claude-settings.json` | Deny rules: Claude can't edit run state or decision files directly |
-| `templates/*.section.md` | Marker blocks merged into CLAUDE.md / AGENTS.md |
 | `tests/test_scheduler.py` | Offline tests (real git in temp dirs, fake Herdr, no model calls) |
 | `../.claude/agents/scout.md` | Sonnet scout definition |
 | `../gen-tasks/<task-name>-<dd-mm-yy>.md` | One file per worker task: Opus's plan, then appended Worker result (with diff), Review (verdict + report), Integration, Final gate. Not git-ignored: commit them if you want the history |

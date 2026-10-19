@@ -134,3 +134,53 @@ def table(kind: str | None = None) -> str:
 def numbered(kind: str | None = None) -> list[dict]:
     """The rows of `table(kind)` in the same order, for picking by number."""
     return [m for m in catalog() if kind in (None, m["kind"])]
+
+
+# ---------------------------------------------------------------- launching (phase 2/3)
+# How to start each program in a Herdr pane. "{model}", "{effort}", "{cwd}", "{dir}" are filled in.
+# Only claude and codex are verified. Every other program gets a GUESS (`--model <model>`, no
+# effort flag); if its CLI differs, set "launch_args" for that role in config.json, e.g.
+#   "worker": {"kind": "gemini", "model": "gemini-3-pro", "launch_args": ["-m", "{model}"]}
+ADAPTERS = {
+    "codex": {"model": ["-m", "{model}"], "effort": ["-c", 'model_reasoning_effort="{effort}"'],
+              "cwd": ["-C", "{cwd}"], "add_dir": ["--add-dir", "{dir}"],
+              "sandbox": "Codex sandbox (workspace-write) + approvals: writes only inside its folders"},
+    "claude": {"model": ["--model", "{model}"], "effort": ["--effort", "{effort}"],
+               "cwd": [], "add_dir": ["--add-dir", "{dir}"],
+               "worker": ["--permission-mode", "auto"],
+               "sandbox": "no OS sandbox; Claude Code auto mode approves safe actions and stops risky ones"},
+}
+GENERIC = {"model": ["--model", "{model}"], "effort": [], "cwd": [], "add_dir": [],
+           "sandbox": "UNVERIFIED program: no sandbox assumed; only the worktree, Boundaries and the "
+                      "scheduler's changed-file check protect you"}
+
+
+def adapter(kind: str) -> dict:
+    return ADAPTERS.get(kind, GENERIC)
+
+
+def binary(kind: str) -> str:
+    """The executable: Herdr's kind names are the programs' canonical executables."""
+    return kind
+
+
+def launch_args(role: dict, cwd: str | None = None, add_dirs: tuple = (), worker: bool = False) -> list[str]:
+    """Arguments to start `role` ({kind, model, effort[, launch_args]}) after `herdr agent start --`."""
+    if role.get("launch_args"):
+        fill = {"model": role["model"], "effort": role.get("effort") or "", "cwd": cwd or ""}
+        return [a.format(**fill) for a in role["launch_args"]]
+    ad = adapter(role["kind"])
+    args = [a.format(model=role["model"]) for a in ad["model"]]
+    if role.get("effort") and ad["effort"]:
+        args += [a.format(effort=role["effort"]) for a in ad["effort"]]
+    if cwd and ad["cwd"]:
+        args += [a.format(cwd=cwd) for a in ad["cwd"]]
+    for d in add_dirs:
+        args += [a.format(dir=d) for a in ad["add_dir"]]
+    if worker:
+        args += ad.get("worker", [])
+    return args
+
+
+def sandbox_note(kind: str) -> str:
+    return adapter(kind)["sandbox"]

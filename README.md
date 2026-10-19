@@ -9,19 +9,19 @@ into which branch; the kit then does it. All AI tooling lives in a separate **wo
 to the repo, so the repo only ever sees the code changes you approve.
 
 ```text
-You ──request──> orchestrator: Claude Code, model you choose (default Opus 5.5): plans, reviews, integrates
+You ──request──> orchestrator: any program + model you choose (default Claude Code, Opus 5.5): plans, reviews, integrates
                    ├─ scout: Claude Code subagent (default Sonnet 5.5), read-only (max 3 research rounds per request)
                    ▼
                  1-3 tasks ──> scheduler.py (leases, state machine, durable JSON)
                    ├─ worker-1 ┐
-                   ├─ worker-2 ├─ your chosen worker model (default Codex gpt-6-luna @ xhigh), one Herdr pane + git worktree each
+                   ├─ worker-2 ├─ any program + model you choose (default Codex gpt-6-luna @ xhigh), one Herdr pane + git worktree each
                    └─ worker-3 ┘
                    ▼
                  review ─> cherry-pick onto agent/integration-<run> ─> quality gate
                    ▼
                  final report + one total diff  (.orchestrator/runs/<run>/final-report.md, final.diff)
                    ▼
-Claude asks with clickable choices (you get notified via Herdr / Remote Control), you click:
+The orchestrator asks with clickable choices (you get notified via Herdr / Remote Control), you click:
    1) A merge and push   B merge locally only, no push   C don't merge
    2) if A/B: which branch?   A this branch (<name>)   B other branch (you type it)
                    ▼
@@ -31,9 +31,9 @@ Claude asks with clickable choices (you get notified via Herdr / Remote Control)
 | Role | Who | Job |
 |---|---|---|
 | You | - | Ask for a change, make the critical decisions, approve the merge and push |
-| Orchestrator | Claude Code, the model you choose (default Opus 5.5) | Plans tasks, writes task files, reviews, integrates |
+| Orchestrator | Any agent program and model you choose (default Claude Code, Opus 5.5) | Plans tasks, writes task files, reviews, integrates |
 | Scout | Claude Code subagent, the model you choose (default Sonnet 5.5), read-only | Reads the codebase and reports evidence |
-| Workers 1-3 | Codex, any model you choose (default `gpt-6-luna`, `xhigh`) | Write the code, each in its own git worktree |
+| Workers 1-3 | Any agent program and model you choose (default Codex `gpt-6-luna`, `xhigh`) | Write the code, each in its own git worktree |
 | Herdr | terminal multiplexer | Runs all agents; keeps them alive when you detach |
 | `scheduler.py` | Python stdlib CLI | Tracks who works on what and enforces the rules |
 
@@ -61,8 +61,7 @@ Claude asks with clickable choices (you get notified via Herdr / Remote Control)
 | Tool | Why | Check |
 |---|---|---|
 | Linux or macOS, `bash`, `git`, `python3` 3.11+ | scheduler and scripts (Python stdlib only, no pip installs) | `python3 --version` |
-| Claude Code, logged in (any Claude model) | orchestrator and scout | `claude --version` |
-| Codex CLI 0.163.0+, logged in (any Codex model) | workers | `codex --version`, `codex login status` |
+| The agent programs you choose, installed and logged in. Defaults: Claude Code (orchestrator and scout) and Codex CLI 0.163.0+ (workers) | run the roles; any program Herdr supports can be chosen (section 4) | `claude --version`, `codex --version`, `codex login status` |
 | Herdr 0.9+ (terminal workspace manager for AI coding agents), with its Claude and Codex integrations | runs and shows the agents; live dispatch needs `HERDR_ENV=1` | `herdr status` |
 | `jq` (optional) | nicer error messages in `doctor.sh --probe-codex` | |
 
@@ -112,12 +111,13 @@ cd myrepo.workspace
 $EDITOR CLAUDE.md                            # fill in the remaining TODOs at the top
 .agent-system/scripts/doctor.sh              # every line should be OK
 
-# 3. Start working, inside Herdr.
-herdr
-claude                                       # uses the orchestrator model you chose (agent-kit config --show)
+# 3. Start working.
+agent-kit start                              # opens Herdr and launches the orchestrator with its model
 ```
 
-Then type a request in Claude, for example:
+`agent-kit start` works from a normal terminal (it starts Herdr if needed and attaches you) or inside
+Herdr (it opens the project in a new Herdr workspace). Running it again switches to the running
+orchestrator instead of starting a second one. Then type a request, for example:
 
 > Add input validation to `registerUser`: reject empty names and malformed emails with a clear
 > error in `RegisterUserResp`, and add unit tests. Use the multi-agent workflow.
@@ -137,8 +137,8 @@ and push, and into which branch (section 6).
 ├── myrepo/                           # the repo: untouched except for merges you approve
 └── myrepo.workspace/                 # created by `agent-kit create`
     ├── myrepo -> ../myrepo           # relative symlink to the repo
-    ├── CLAUDE.md                     # project notes + orchestrator rules (Claude reads it here)
-    ├── AGENTS.md                     # worker rules (workers are told to read it)
+    ├── CLAUDE.md                     # project notes + orchestrator rules (Claude Code reads it)
+    ├── AGENTS.md                     # the same orchestrator rules for other programs (Codex, ...)
     ├── .claude/
     │   ├── agents/scout.md           # the Sonnet scout
     │   └── settings.json             # deny rules + additionalDirectories (the real repo path)
@@ -161,8 +161,15 @@ the same). Use that only for repos you own.
 
 ### Safety rules built in
 
-- Workers run in Codex's `workspace-write` sandbox with `on-request` approvals and no network.
-  `danger-full-access` is rejected by config validation.
+- **How a worker is contained depends on its program** (`doctor` reports it as `worker-safety`):
+  - **Codex:** runs in its `workspace-write` sandbox with `on-request` approvals and no network;
+    `danger-full-access` is rejected by config validation.
+  - **Claude Code:** runs in `--permission-mode auto` (Claude Code's checker approves safe actions and
+    stops risky ones), with no OS sandbox.
+  - **Unverified programs:** no sandbox is assumed; only the worktree, the task's Boundaries and the
+    scheduler's changed-file check protect you.
+- Workers read `.agent-system/WORKER-RULES.md`, and every task file lists what they may and must not
+  edit and run.
 - Workers edit only their own worktree and the task's owned paths; the scheduler flags anything else.
 - Results land on `agent/integration-<run>`. Your branches change, and anything is pushed, only after
   you answer the merge decision; merges are fast-forwards and pushes never use force.
@@ -193,6 +200,7 @@ agent-kit --help
 | `agent-kit config --model-worker=gpt-6-sol --effort-worker=high` | Change a workspace's models (orchestrator, scout, worker); see "Choosing models" below |
 | `agent-kit config` | On a terminal: asks for each role (program → model → effort), picking from a numbered table |
 | `agent-kit config --show` / `--list` | Show the workspace's current roles / every known model |
+| `agent-kit start` | Open the workspace in Herdr and launch the orchestrator with its program, model and effort (from a normal terminal: starts Herdr if needed, then attaches) |
 | `agent-kit <target-repo>` | Legacy: install the kit **inside** a repo you own (also edits its `.gitignore`) |
 
 | Flag | Meaning |
@@ -204,6 +212,7 @@ agent-kit --help
 | `--effort-orchestrator=E`, `--effort-scout=E`, `--effort-worker=E` | (`create`, `config`) Effort per role; must be one the model supports |
 | `--show`, `--list` | (`config`) Show the workspace's roles / every known model with its efforts |
 | `--no-input` | (`create`, `config`) Never prompt; fail on an unknown model instead of asking |
+| `--no-attach` | (`start`) Don't attach to Herdr afterwards |
 
 **`create`** makes `<repo>.workspace/` with:
 
@@ -212,7 +221,8 @@ agent-kit --help
   `worktree_root: worktrees` and the detected cache folders (section 5);
 - `.claude/agents/scout.md` and `.claude/settings.json` (deny rules + the real repo path);
 - `CLAUDE.md` with project notes (detected stack and build/test command; TODOs for the rest) plus the
-  orchestrator section, and `AGENTS.md` with the worker section.
+  orchestrator rules, and `AGENTS.md` with the same orchestrator rules for programs other than Claude
+  Code (worker rules live in `.agent-system/WORKER-RULES.md`).
 
 It refuses when the workspace already has a kit (use `update`), when the folder is not a Git repo's
 top folder, or when the repo has no commit. At the end it checks that the new workspace loads.
@@ -220,7 +230,13 @@ top folder, or when the repo has no commit. At the end it checks that the new wo
 **`update`** replaces the kit files (scheduler, prompts, scripts, docs, tests, templates) and the
 marked sections of `CLAUDE.md`/`AGENTS.md`. It **keeps** `config.json`, your project notes, your task
 files and state, and a customized `scout.md`. It reports keys in the kit's config template that your
-`config.json` lacks.
+`config.json` lacks. Older workspaces are migrated: the worker section in `AGENTS.md` is replaced by
+the orchestrator rules.
+
+**`start`** creates a Herdr workspace for the project, launches the orchestrator in it (agent name
+`orch-<repo>`), and focuses it. Programs other than Claude Code first get a short prompt telling them
+to read `AGENTS.md` and the notes in `CLAUDE.md` (Claude Code reads `CLAUDE.md` by itself). If the
+program waits at a startup prompt (e.g. "trust this folder"), answer it in the Herdr pane.
 
 ---
 
@@ -231,9 +247,9 @@ Each workspace has three roles. `agent-kit create` asks for them on a terminal (
 
 | Role | What it does | Programs | Default |
 |---|---|---|---|
-| orchestrator | The main session: plans, reviews, integrates, asks you | Claude Code (verified); Codex and others recorded, launched by `agent-kit start` in a later version | `claude-opus-5-5`, `high` |
-| scout | Read-only research subagent | Claude Code only | `claude-sonnet-5-5`, `medium` |
-| worker | Implements the tasks | Codex (verified). Other programs are recorded but not launched yet | `gpt-6-luna`, `xhigh` |
+| orchestrator | The main session: plans, reviews, integrates, asks you | Any program (Claude Code and Codex verified); launched by `agent-kit start` | `claude-opus-5-5`, `high` |
+| scout | Read-only research subagent | Claude Code only (with another orchestrator, it researches itself) | `claude-sonnet-5-5`, `medium` |
+| worker | Implements the tasks | Any program (Claude Code and Codex verified); launched by the scheduler | `gpt-6-luna`, `xhigh` |
 
 ```bash
 agent-kit config --model-orchestrator=opus --effort-orchestrator=high
@@ -252,6 +268,15 @@ agent-kit config --list                          # every known model with its ef
   kilo, kimi, kiro, letta, maki, mastracode, muse, omp, opencode, pi, qodercli, qwen, i.e. every
   agent Herdr supports apart from Claude Code and Codex) are typed as `<program>/<model>`. They are
   not tested with this kit, their model names are not checked, and `doctor` warns about them.
+- **How programs are launched:** Claude Code gets `--model`/`--effort` (workers also
+  `--permission-mode auto`); Codex gets `-m`, `model_reasoning_effort`, `-C` and its sandbox
+  settings. An unverified program gets a guess, `--model <model>`, and no effort flag. If its command
+  line differs, set `launch_args` for that role in `.agent-system/config.json`, e.g.
+  `"worker": {"kind": "gemini", "model": "gemini-3-pro", "launch_args": ["-m", "{model}"]}`
+  (`{model}`, `{effort}` and `{cwd}` are filled in).
+- **A Codex orchestrator** is launched with the repo as an extra writable folder. Codex keeps `.git`
+  read-only, so expect approval prompts when it runs git and Herdr commands; approve them (or "don't
+  ask again" for `python3 .agent-system/scheduler.py`).
 
 ## 5. Language detection
 
@@ -286,9 +311,8 @@ Notes:
 
 ## 6. Daily workflow
 
-1. **Start**: `cd ~/Code/myrepo.workspace && herdr`, then `claude` in a pane (it starts with the orchestrator
-   model you chose; add `--effort <level>` if you set one).
-   Inside Claude, `!echo $HERDR_ENV` must print `1`.
+1. **Start**: `cd ~/Code/myrepo.workspace && agent-kit start`. It opens Herdr and launches the
+   orchestrator with the program, model and effort you chose (`agent-kit config --show`).
 2. **Ask**: describe the outcome you want. Small changes become one trivial task; larger ones get up to
    3 scout rounds, then 1-3 tasks.
 3. **Watch** (optional): `ctrl+b w` jumps to a worker's Herdr workspace (`<run>-worker-N`).
@@ -455,7 +479,9 @@ needs in `worker.writable_dirs` (section 5).
 | `orchestrator.kind/model/effort` | The main session's program, model and effort (set with `agent-kit config`; a Claude model is also written to `.claude/settings.json`) |
 | `scout.model/effort` | The Claude Code research subagent (also written to `.claude/agents/scout.md`) |
 | `worker.kind/model/reasoning_effort` | The workers' program, model and effort. Used exactly, never downgraded |
-| `worker.profile`, `sandbox`, `approval_policy` | Codex profile `worker`, `workspace-write`, `on-request` |
+| `orchestrator.launch_args`, `worker.launch_args` | Optional: the exact command-line arguments for an unverified program (`{model}`, `{effort}`, `{cwd}` are filled in) |
+| `worker.permission_mode` | Optional, Claude Code workers only: replaces `auto` (e.g. `acceptEdits`) |
+| `worker.profile`, `sandbox`, `approval_policy` | Codex workers only: profile `worker`, `workspace-write`, `on-request` |
 | `worker.trust_worktree` | Mark the worker's own worktree as trusted so Codex skips its trust dialog |
 | `worker.writable_dirs` | Extra folders workers may write (build caches). `~`, `/`, `~/.ssh`, `~/.codex`, `~/.config`, ... are rejected |
 | `pool.size` / `pool.slots` | 1-3 worker slots |
@@ -491,11 +517,13 @@ agent-kit update --folder=~/Code/myrepo              # roll it out to each works
 | `scheduler.py` | Scheduler CLI: DAG, leases, state machines, research gate, decisions, git/Herdr wrappers |
 | `models.py` | Model registry: the programs Herdr can launch (Claude Code and Codex verified, the rest unverified), Claude model list, Codex catalog, effort checks, the pick-from table |
 | `kitconfig.py` | `agent-kit config`: choose program, model and effort per role; writes config, Claude settings and the scout file |
+| `kitstart.py` | `agent-kit start`: open Herdr and launch the orchestrator |
+| `WORKER-RULES.md` | Rules every worker reads, whatever its program |
 | `config.json` | Config template (no `project`; `create` fills it in; default models per role) |
 | `prompts/` | Task and repair file templates, review checklist, research packet, readiness gate |
-| `scripts/install.sh` | `agent-kit` itself (`create`, `update`, `config`) |
+| `scripts/install.sh` | `agent-kit` itself (`create`, `update`, `config`, `start`) |
 | `scripts/doctor.sh`, `verify.sh` | Health check, quality gate |
-| `templates/` | `CLAUDE.md`/`AGENTS.md` sections and Claude deny rules |
+| `templates/` | The orchestrator rules (`ORCHESTRATOR.section.md`, written into `CLAUDE.md` and `AGENTS.md`) and Claude deny rules |
 | `tests/test_scheduler.py` | Scheduler, workspace mode and installer tests |
 | `docs/` | Workspace rule; Decision Hub plan (not planned) |
 | `../.claude/agents/scout.md` | The Sonnet scout definition |
@@ -507,7 +535,10 @@ agent-kit update --folder=~/Code/myrepo              # roll it out to each works
 | Symptom | Fix |
 |---|---|
 | `ls` in the workspace shows no `.agent-system` | It is hidden (starts with a dot): use `ls -A` |
-| `not running inside Herdr (HERDR_ENV != 1)` | Start Claude from a Herdr pane, or use `--launch none` and run the printed `codex` command |
+| `not running inside Herdr (HERDR_ENV != 1)` | Start with `agent-kit start`, or use `--launch none` and run the printed worker command |
+| `agent-kit start`: "waiting at a startup prompt" | The program asks something first (e.g. trust this folder): answer it in the Herdr pane |
+| An unverified program fails to start, or ignores the model | Its flags differ from the guess (`--model`): set `launch_args` for that role in `config.json` |
+| `dispatch-ready`: "worker program ... is not installed" | Install that program, or choose another worker model with `agent-kit config` |
 | `... model is not supported when using Codex with a ChatGPT account` | Codex client too old: `codex update`, then `doctor.sh --probe-codex`; or choose another model with `agent-kit config` |
 | `agent-kit config`: "unknown model" | Pick from the table it prints (on a terminal, type the number), or use `<program>/<model>` for an unverified program |
 | Worker: `bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted` | Add the bubblewrap AppArmor profile (GUIDE.md Part 2, step 2) |
@@ -540,8 +571,15 @@ Inside `.agent-system/` (copied into every workspace):
 - **Tested:** the scheduler, workspace mode and installer have an offline test suite (real git in
   temp folders, a fake Herdr, no model calls). The full workflow with live Codex workers has been run
   in in-repo mode on a Java/Gradle project.
-- **Not yet proven live:** a full run with live workers in workspace mode, `finish` against a real hosted
-  remote (tested with a local bare repo), and real CMake/Conan/vcpkg projects (covered by tests only).
+- **Proven live:** `agent-kit start` launching a Claude orchestrator in Herdr.
+- **Not yet proven live:**
+  - a full run with live workers in workspace mode, and Claude Code workers;
+  - a Codex orchestrator;
+  - every unverified program;
+  - `finish` against a real hosted remote (tested with a local bare repo);
+  - real CMake/Conan/vcpkg projects.
+
+  All of these are covered by offline tests only.
 - **Platform:** developed on Linux (Ubuntu). macOS should work but is untested; Windows is not supported.
 - **One active run at a time** per workspace; at most 3 workers and 3 tasks per request.
 - **Using it on code you don't own:** check your team's policy on AI tools and on sending code to

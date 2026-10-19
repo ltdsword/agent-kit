@@ -616,8 +616,8 @@ class Herdr:
     def workspace_close(self, workspace_id: str) -> None:
         self._call("workspace", "close", workspace_id)
 
-    def agent_start(self, name: str, pane: str, agent_args: list[str], timeout_ms: int) -> dict:
-        return self._call("agent", "start", name, "--kind", "codex", "--pane", pane,
+    def agent_start(self, name: str, pane: str, agent_args: list[str], timeout_ms: int, kind: str = "codex") -> dict:
+        return self._call("agent", "start", name, "--kind", kind, "--pane", pane,
                           "--timeout", str(timeout_ms), "--", *agent_args,
                           timeout_s=timeout_ms / 1000 + 30)
 
@@ -715,6 +715,23 @@ class Scheduler:
         if argv and argv[0].startswith(".agent-system/"):
             return [str(self.workspace_root / argv[0]), *argv[1:]]
         return list(argv)
+
+    def worker_kind(self) -> str:
+        return self.cfg["worker"].get("kind", "codex")
+
+    def worker_args(self, worktree: str, run_id: str) -> list[str]:
+        """Arguments for the configured worker program (after `herdr agent start ... --`)."""
+        if self.worker_kind() == "codex" and not self.cfg["worker"].get("launch_args"):
+            return self.codex_args(worktree, run_id)
+        w = self.cfg["worker"]
+        role = {"kind": self.worker_kind(), "model": w["model"], "effort": w.get("reasoning_effort"),
+                "launch_args": w.get("launch_args")}
+        args = M.launch_args(role, cwd=worktree, add_dirs=(str(self.store.run_dir(run_id) / "reports"),),
+                             worker=True)
+        if role["kind"] == "claude" and w.get("permission_mode"):
+            i = args.index("--permission-mode")
+            args[i + 1] = w["permission_mode"]
+        return args
 
     def codex_args(self, worktree: str, run_id: str) -> list[str]:
         w = self.cfg["worker"]
@@ -925,12 +942,12 @@ class Scheduler:
         report = self.store.run_dir(state["run_id"]) / "reports" / f"{tid}.json"
         what = ("Fix the problems listed in the repair file. The original task file is the "
                 f"reference: {self._task_file(t)}" if "repair" in kind else "Implement exactly what the file says.")
-        rules = self.workspace_root / "AGENTS.md"
+        rules = SCRIPT_DIR / "WORKER-RULES.md"
         return "\n".join([
-            f"You are Codex worker {t['worker']} (run {state['run_id']}, task {tid}, {kind}).",
+            f"You are worker {t['worker']} (run {state['run_id']}, task {tid}, {kind}). You are a worker, not "
+            "the orchestrator: ignore any orchestrator instructions in AGENTS.md / CLAUDE.md.",
             f"Read this file completely before doing anything: {self.workspace_root / packet}",
-            *([f"Also read the worker rules (they are not in the repo): {rules}"]
-              if self.workspace_mode and rules.is_file() else []),
+            *([f"Also read the worker rules: {rules}"] if rules.is_file() else []),
             what,
             "",
             "Facts:",
@@ -961,16 +978,16 @@ class Scheduler:
             "The orchestrator captures your diff from the worktree and reviews it.",
         ])
 
-    def _require_codex_worker(self) -> None:
-        kind = self.cfg["worker"].get("kind", "codex")
-        if kind != "codex":
-            raise SchedulerError(f"worker.kind is {kind!r}, but this kit version launches Codex workers only "
-                                 "(other programs arrive in phase 2). Choose a Codex model: agent-kit config "
-                                 "--model-worker=<codex model>")
+    def _require_worker_program(self) -> None:
+        """Refuse before leasing anything if the worker program is not installed."""
+        kind = self.worker_kind()
+        if shutil.which(M.binary(kind)) is None:
+            raise SchedulerError(f"worker program {kind!r} is not installed ({M.binary(kind)} is not on PATH). "
+                                 "Install it, or choose another worker model: agent-kit config --model-worker=...")
 
     def _launch_session(self, state: dict, wid: str, tid: str, text: str) -> None:
-        """Fresh Codex session in a Herdr workspace this run owns (new task => fresh context)."""
-        self._require_codex_worker()
+        """Fresh worker session in a Herdr workspace this run owns (new task => fresh context)."""
+        self._require_worker_program()
         self.herdr.require()
         w, t = state["workers"][wid], state["tasks"][tid]
         if w.get("herdr_workspace") and w.get("herdr_owner_run") == state["run_id"]:
@@ -980,22 +997,21 @@ class Scheduler:
         w.update(herdr_workspace=ws, herdr_pane=pane, herdr_owner_run=state["run_id"])
         self.store.save(state)  # persist created IDs before anything else can fail
         name = self.agent_name(state["run_id"], wid)
-        self.herdr.agent_start(name, pane, self.codex_args(t["worktree"], state["run_id"]),
-                               self.cfg["herdr"]["agent_start_timeout_ms"])
+        self.herdr.agent_start(name, pane, self.worker_args(t["worktree"], state["run_id"]),
+                               self.cfg["herdr"]["agent_start_timeout_ms"], kind=self.worker_kind())
         w.update(agent_name=name, session_task=tid, session_started_at=now())
         self.store.save(state)
         self.herdr.agent_prompt(name, text, self.cfg["herdr"]["prompt_ack_timeout_ms"])
 
     def manual_command(self, state: dict, tid: str, text: str) -> list[str]:
-        self._require_codex_worker()
         t = state["tasks"][tid]
-        return ["codex", *self.codex_args(t["worktree"], state["run_id"]), text]
+        return [M.binary(self.worker_kind()), *self.worker_args(t["worktree"], state["run_id"]), text]
 
     def dispatch_ready(self, run_id: str, launch: str = "herdr", dry_run: bool = False) -> dict:
         if launch not in ("herdr", "none"):
             raise SchedulerError("--launch must be herdr or none")
-        if not dry_run:
-            self._require_codex_worker()
+        if not dry_run and launch == "herdr":
+            self._require_worker_program()
         result = {"dispatched": [], "skipped": {}, "quarantined": [], "errors": []}
         with self.txn(run_id) as state:
             if state["status"] != "RUNNING":
@@ -2062,9 +2078,9 @@ def doctor(workspace_root: Path) -> list[dict]:
                     + (f" ({entry['note']})" if entry.get("note") else ""))
         except M.ModelError as e:
             add(f"{role}-model", False, f"{r['kind']}/{r['model']}: {e} (fix: agent-kit config)")
-    if cfg["worker"].get("kind", "codex") != "codex":
-        add("worker-launch", False, f"worker program {cfg['worker']['kind']} is not launched by this kit version "
-                                    "(Codex only until phase 2): dispatch will refuse", "fail")
+    wkind = cfg["worker"].get("kind", "codex")
+    add("worker-safety", wkind == "codex", f"worker program {wkind}: {M.sandbox_note(wkind)}",
+        "ok" if wkind == "codex" else "warn")
     project = project_root_for(workspace_root, cfg)
     if project != workspace_root.resolve():  # workspace mode: the repo is project.path, never the workspace
         if not project.is_dir():
@@ -2095,13 +2111,24 @@ def doctor(workspace_root: Path) -> list[dict]:
         listed = any(Path(d).expanduser().resolve() == project for d in dirs)
         add("claude-additional-dirs", listed, f".claude/settings.json additionalDirectories has {project}" if listed
             else f"add {project} to .claude/settings.json permissions.additionalDirectories", "warn")
-    for tool, required in (("git", True), ("python3", True), ("herdr", True), ("claude", True),
-                           ("codex", True), ("jq", False)):
+    okind = cfg.get("orchestrator", {}).get("kind", "claude")
+    programs = list(dict.fromkeys([M.binary(okind), M.binary(wkind)]))
+    if okind == "claude" or wkind == "claude":
+        programs = list(dict.fromkeys(programs + ["claude"]))
+    for tool, required in (("git", True), ("python3", True), ("herdr", True),
+                           *((t, True) for t in programs), ("jq", False)):
         add(f"tool:{tool}", shutil.which(tool) is not None, shutil.which(tool) or "not on PATH",
             "fail" if required else "warn")
     add("herdr-env", os.environ.get("HERDR_ENV") == "1",
         "HERDR_ENV=1" if os.environ.get("HERDR_ENV") == "1" else
-        "HERDR_ENV unset: live dispatch unavailable; relaunch Claude inside Herdr", "warn")
+        "HERDR_ENV unset: live dispatch unavailable; start with `agent-kit start`", "warn")
+    if shutil.which("herdr"):
+        p = subprocess.run(["herdr", "integration", "status"], capture_output=True, text=True)
+        for kind in dict.fromkeys([okind, wkind]):
+            line = next((ln for ln in p.stdout.splitlines() if ln.split(":")[0].split(" ")[0] == kind), "")
+            if line:
+                add(f"herdr-integration:{kind}", "not installed" not in line, line.strip() if "not installed" not in
+                    line else f"{kind}: run `herdr integration install {kind}` so Herdr can track its state", "warn")
     scout = workspace_root / cfg["scout"]["agent_file"]
     if scout.exists():
         fm = _frontmatter(scout)
@@ -2111,7 +2138,7 @@ def doctor(workspace_root: Path) -> list[dict]:
         add("scout-agent", ok, f"model={fm.get('model')} effort={fm.get('effort')} tools={sorted(tools)}")
     else:
         add("scout-agent", False, f"missing {scout}")
-    if cfg["worker"].get("kind", "codex") == "codex":
+    if wkind == "codex":
         prof = M.codex_home() / f"{cfg['worker']['profile']}.config.toml"
         if prof.exists():
             try:

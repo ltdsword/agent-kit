@@ -48,7 +48,7 @@ normally. Nothing else is written into the repo.
 └── thrift-demo.workspace/              # ours
     ├── thrift-demo -> ../thrift-demo   # symlink to the repo (relative: survives moving both)
     ├── CLAUDE.md                       # project notes + orchestrator rules (Claude reads it here)
-    ├── AGENTS.md                       # worker rules (workers are pointed to it, see 6.3)
+    ├── AGENTS.md                       # orchestrator rules for programs other than Claude Code
     ├── .claude/
     │   ├── agents/scout.md
     │   └── settings.json               # deny rules + additionalDirectories (the real repo path)
@@ -88,7 +88,8 @@ repo's top folder) and creates the new folder `<repo>.workspace` next to it, wit
   `~/.cache/vcpkg`; Python, CMake and make need none). The detected stack and build/test command
   (e.g. `python3 -m pytest`, CMake + `ctest`, `make && make test`) go into the `CLAUDE.md` notes;
 - `.claude/agents/scout.md` and `.claude/settings.json` (deny rules + `additionalDirectories` = real repo path);
-- `CLAUDE.md` (project notes with TODOs + orchestrator section) and `AGENTS.md` (worker section).
+- `CLAUDE.md` (project notes with TODOs + orchestrator rules) and `AGENTS.md` (the same orchestrator
+  rules, for programs other than Claude Code); worker rules are in `.agent-system/WORKER-RULES.md`.
 - the models for each role (orchestrator, scout, worker): asked on a terminal, or from `--model-*` /
   `--effort-*` options; change them later with `agent-kit config` (README, "Choosing models").
 
@@ -106,9 +107,8 @@ cd ~/Code/myrepo.workspace
 git -C myrepo status --porcelain             # still nothing
 git init -q                                  # optional: local-only history of gen-tasks/ and notes
 
-# 4. Work from the workspace, inside Herdr.
-herdr
-claude                                       # started in myrepo.workspace/; uses the chosen orchestrator model
+# 4. Work from the workspace.
+agent-kit start                              # opens Herdr and launches the orchestrator with its model
 ```
 
 **Updating a workspace to the latest kit**: `agent-kit update [--folder=<repo>]` (or `agent-kit update`
@@ -158,16 +158,21 @@ as an additional directory: `"permissions": {"additionalDirectories": ["<real re
 - `project-own-instructions` (warn): the repo tracks its own `CLAUDE.md`/`AGENTS.md`; fine, just know.
 - `claude-additional-dirs` (warn): `.claude/settings.json` lists the real repo path.
 
-### 6.3 Worker rules without an AGENTS.md in the repo (fallback built)
+### 6.3 Worker rules without an AGENTS.md in the repo (built)
 Worker worktrees are checkouts of the team repo, so they contain only the team's `AGENTS.md` (if
-any), not ours. In workspace mode the worker prompt tells Codex to read `<workspace>/AGENTS.md`;
-the prompt itself also carries the essential cautions. Not used yet: passing the rules with
-`-c developer_instructions="..."` (Codex 0.163 has the key; probe it live before relying on it).
+any), not ours. Every worker prompt points to `.agent-system/WORKER-RULES.md` and also carries the
+essential cautions, whatever the worker program. The workspace's own `AGENTS.md` holds the
+orchestrator rules (for orchestrators other than Claude Code), and tells a worker to ignore them.
 
 ### 6.4 agent-kit create / update (built)
 `scripts/install.sh`, linked as `agent-kit`; see section 4. It finds the kit home from its own path
 (symlinks resolved), so it works from any folder. Without `create`/`update`, `agent-kit <repo>` is
 the legacy in-repo install (kit inside the repo, edits its `.gitignore`): own repos only.
+
+### 6.4b agent-kit start and any program per role (built)
+`agent-kit start` opens Herdr for the workspace and launches the orchestrator with the configured
+program, model and effort (`kitstart.py`). Workers can be any program Herdr supports; only Claude
+Code and Codex are verified (`models.py`, README "Choosing models").
 
 ### 6.5 Tests (built)
 `TestWorkspaceMode` in `tests/test_scheduler.py`: temp layout `repo/` + `repo.workspace/repo -> ../repo`;
