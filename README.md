@@ -21,7 +21,7 @@ You ──request──> Claude Opus 5.5 (orchestrator: plans, reviews, integrat
                    ▼
                  final report + one total diff  (.orchestrator/runs/<run>/final-report.md, final.diff)
                    ▼
-Claude asks you in chat (you get notified via Herdr / Remote Control), you reply:
+Claude asks with clickable choices (you get notified via Herdr / Remote Control), you click:
    1) A merge and push   B merge locally only, no push   C don't merge
    2) if A/B: which branch?   A this branch (<name>)   B other branch (you type it)
                    ▼
@@ -124,7 +124,7 @@ Then type a request in Claude, for example:
 > Add input validation to `registerUser`: reject empty names and malformed emails with a clear
 > error in `RegisterUserResp`, and add unit tests. Use the multi-agent workflow.
 
-When the run is done, Claude gives you the report and total diff and asks in chat whether to merge
+When the run is done, Claude gives you the report and total diff and asks (clickable) whether to merge
 and push, and into which branch (section 6).
 
 ---
@@ -169,7 +169,7 @@ the same). Use that only for repos you own.
 - Results land on `agent/integration-<run>`. Your branches change, and anything is pushed, only after
   you answer the merge decision; merges are fast-forwards and pushes never use force.
 - Dirty worker worktrees are quarantined, never reset or cleaned.
-- Critical decisions belong to you (section 8). Claude asks in chat and stops; the scheduler refuses
+- Critical decisions belong to you (section 8). Claude asks you (clickable choices) and waits; the scheduler refuses
   critical actions until your answer is recorded, and every answer is stored with your exact words,
   so you can audit what Claude acted on. This is a guardrail, not a sandbox: it relies on Claude
   following its rules, and every step is logged.
@@ -259,22 +259,26 @@ Notes:
 3. **Watch** (optional): `ctrl+b w` jumps to a worker's Herdr workspace (`<run>-worker-N`).
    `ctrl+b q` detaches; agents keep running. Claude acts only while its turn is active: when you come
    back, ask it to "resume run r1".
-4. **Decide**: when Claude needs you, it asks in chat and stops; Herdr (and Remote Control, if you use
-   it) notifies you. Reply with the decision id and your choice, e.g. `D3 A`, from the terminal or your
-   phone (section 8).
+4. **Decide**: only important decisions reach you (section 8). Claude asks with clickable choices and
+   waits; Herdr (and Remote Control, if you use it) notifies you. Click an option, or type in "Other",
+   from the terminal or your phone.
 5. **Review and merge** when the run is DONE. Claude runs `report` and gives you a summary plus two files:
    `.orchestrator/runs/<run>/final-report.md` (tasks, commits, files, gate result, risks, decisions) and
-   `final.diff` (everything the run changed, as one diff). Then Claude asks, one question at a time:
+   `final.diff` (everything the run changed, as one diff). Then Claude asks two clickable questions:
 
    ```text
-   Claude: D3 - merge run r1?  A merge and push / B merge locally only / C don't merge.
-           I recommend B. Reply with D3 A, B or C.
-   You:    D3 B
-   Claude: What branch do you choose to merge?  A this branch (main) / B other branch (type its name)
-   You:    A
+   D3  Merge run r1?
+       ( ) B: Merge locally only, no push (Recommended)
+       ( ) A: Merge and push
+       ( ) C: Don't merge
+       ( ) Other: ____
+   D3  What branch do you choose to merge?        (only for A or B)
+       ( ) This branch (main)
+       ( ) New branch feature/r1
+       ( ) Other: type a branch name
    ```
 
-   Claude records your replies word for word (`decision record ... --quote`) and runs `finish apply`:
+   Claude records your answers word for word (`decision record ... --quote`) and runs `finish apply`:
    - **Merge into a branch checked out in your folder** (usually "this branch"): your folder must have no
      uncommitted changes (commit or stash first); your files update to the result.
    - **Other branch**: a new name is created at the result, an existing one is fast-forwarded; your
@@ -366,6 +370,7 @@ Most of these are run by Claude as orchestrator. The ones marked **you** are mea
 | `S decision ask --run R --kind KIND [--task T] --title ".." --question ".." --option A=".." --option B=".." [--recommend A]` | Claude | Open a decision for you. Kinds: `blocker`, `repair`, `scope_exception`, `abandon`, `worker_approval`, `question` |
 | `S decision record --run R --id D<n> --choice K --quote "<your reply>" [--followup K [--value TEXT]] [--note ..]` | Claude | Record the answer you gave in chat, with your exact words (`--followup`/`--value` for the second question, e.g. the branch) |
 | `S decision wait --run R --id D<n> [--timeout SEC]` | Claude | Block until a decision is answered (rarely needed: Claude simply stops and waits for your reply) |
+| `S decision routine --run R --kind KIND [--task T] --action ".." --reason ".."` | Claude | Record a routine call Claude made itself (e.g. approving a worker's in-worktree command) |
 | `S decision list [--run R] [--all]` | anyone | Show pending (or all) decisions |
 | `S decision cancel --run R --id D<n> --reason ".."` | Claude | Withdraw a decision that is no longer needed |
 
@@ -380,23 +385,28 @@ pushed to, or not merged). One run is active at a time.
 
 ## 8. Who decides what
 
-**You decide (critical)**. Claude opens a decision, asks you in chat, and stops until you reply:
+**You decide (critical)**. Claude opens a decision and asks you with clickable choices (plus "Other"
+to type), and waits for your answer. Only these reach you:
 
 - unblocking a BLOCKED task, or a 2nd+ repair of the same task;
 - accepting changes outside a task's owned paths; giving up a task (FAIL) or a run;
 - any change to requirements, scope, acceptance criteria, public APIs/schemas, dependencies,
   security-sensitive behavior, data or migrations, or anything irreversible;
-- **worker approval prompts** (Herdr shows the worker as `blocked`): Claude shows you what is asked,
-  with a recommendation; if you approve, it types the matching key into the worker's prompt;
+- **worker approval prompts that step outside the worker's worktree or sandbox** (writing elsewhere,
+  network, installs, push, deleting, or anything the task forbids): if you approve, Claude types the
+  matching key into the worker's prompt;
 - a final-gate failure or integration conflict whose fix is not clear-cut;
 - **merging and pushing the result** (`finish ask`): always yours, whatever `decisions.require_user_for` says.
 
-**Claude decides (routine)**, with a recorded reason: the first repair of a task with clear evidence,
+**Claude decides (routine)**, with a recorded reason (`decision routine`): approving a worker's command
+inside its worktree that the task allows (build, test, read-only), the first repair of a task with clear evidence,
 minor fixes, re-collecting after a report-format error, relaunching a lost session, correcting its own
 plan steps without changing goal, acceptance or owned paths.
 
-To avoid approval prompts in the first place, list the build cache folders your stack needs in
-`worker.writable_dirs` (section 5).
+Workers are told to ask only about real blockers (code or logic problems) and about stepping outside
+their worktree or sandbox; every task file lists what the worker may and must not edit and run
+("Boundaries"). To avoid approval prompts in the first place, list the build cache folders your stack
+needs in `worker.writable_dirs` (section 5).
 
 ---
 
@@ -463,7 +473,7 @@ agent-kit update --folder=~/Code/myrepo              # roll it out to each works
 | Worker: `bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted` | Add the bubblewrap AppArmor profile (GUIDE.md Part 2, step 2) |
 | Worker's build fails on a lock file in `~/.gradle` (or another cache) | Add that cache folder to `worker.writable_dirs` |
 | Report says `committed: false`, `index.lock: Read-only file system` | Expected: the sandbox keeps `.git` read-only. Review, then `commit-task` |
-| A worker sits `blocked` | It wants an approval: Claude asks you in chat; reply with your choice |
+| A worker sits `blocked` | It wants an approval. Inside its worktree and allowed by the task: Claude approves it. Outside the worktree/sandbox: Claude asks you |
 | `collect` says `pending` / `ambiguous` | No report yet / report disagrees with git: inspect `worktrees/worker-N` |
 | `doctor`: `project-clean-of-kit` FAIL | AI tooling files show in the repo's `git status`: move them to the workspace |
 | `agent-kit create`: "inside a Git repository, not its top folder" | Run it from the repo's top folder, or pass `--folder=<repo>` |

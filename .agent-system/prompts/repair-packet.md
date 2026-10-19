@@ -14,6 +14,9 @@ Max 2 major repairs per task. Name each problem exactly and say how to fix it; n
 ## Fix
 1. In `<path>`, <exact change>.
 
+## Boundaries
+- Same as the original task file's Boundaries, except: <changes, or "none">.
+
 ## Do not
 - Rewrite earlier work or touch files not listed in Fix.
 

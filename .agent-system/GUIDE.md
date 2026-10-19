@@ -141,7 +141,7 @@ What happens next, and where you come in:
 | 8. Integrate | scheduler | Accepted commits are cherry-picked onto `agent/integration-<run>`; `./gradlew test` after each |
 | 9. Final gate | scheduler | `verify.sh` (full `./gradlew build` + checks); run is DONE only if it passes |
 | 10. Report | Opus | Summary in chat + `final-report.md` and one total diff `final.diff` |
-| 11. Merge decision | You | In chat: A merge and push / B merge locally / C don't merge, then which branch |
+| 11. Merge decision | You | Click: A merge and push / B merge locally / C don't merge, then which branch |
 | 12. Finish | scheduler | Fast-forward the chosen branch, push if A (never force), clean up worktrees and branches |
 
 Under the hood Opus runs commands like these (you can run them too):
@@ -168,7 +168,7 @@ $S resume --run r1              # after a crash/restart: shows next actions
 
 ```text
 # Limit name length (16/10/26)        <- Opus's plan, written for Luna: decisions already made
-## Goal / Read first / Steps / Files you may change / Do not / Done when / Run these / Notes
+## Goal / Read first / Steps / Boundaries / Do not / Done when / Run these / Notes
 ---
 ## Worker result - attempt 1         <- appended by collect: status, files, tests, risks,
    diffstat + inline diff                 full diff in .orchestrator/runs/<run>/reports/T1.diff
@@ -192,16 +192,17 @@ data change, a worker's approval prompt, an unclear final-gate failure. Routine,
 and writes its reason into the task file: the first repair with clear evidence (failing test,
 review finding, mechanical conflict), minor fixes, relaunching a lost session, fixing its own plan
 steps without changing the goal. For a critical one, Opus opens a decision (question, evidence,
-options, its recommendation), asks you in chat, and stops. Herdr marks the session as waiting, and
-Remote Control (if you use it) notifies your phone. Reply in the chat:
+options, its recommendation) and asks you with clickable choices. Herdr marks the session as waiting,
+and Remote Control (if you use it) notifies your phone. Click an option, or type in "Other":
 
 ```text
-Claude: D2 - T1 is blocked: the spec doesn't say whether to use contract X or Y.
-        A use X / B use Y. I recommend A. Reply with D2 A or B.
-You:    D2 B, use the 2024 contract
+D2  T1 is blocked: the spec doesn't say whether to use contract X or Y.
+    ( ) A: Use X (Recommended)
+    ( ) B: Use Y
+    ( ) Other: B, use the 2024 contract
 ```
 
-Opus records your reply word for word (`decision record --run r1 --id D2 --choice B --quote "..."`) and
+Opus records your answer word for word (`decision record --run r1 --id D2 --choice B --quote "..."`) and
 carries it out. The scheduler refuses critical actions (`task-unblock`, 2nd+ `repair`, `run close`,
 scope exceptions, FAIL, merge/push) without a recorded answer, and routine ones without Opus's reason.
 If your reply is ambiguous, Opus asks again instead of guessing. Every question and answer is
@@ -225,14 +226,9 @@ to two files in `.orchestrator/runs/<run>/`: `final-report.md` (tasks, commits, 
 decisions) and `final.diff` (the whole run as one diff; no need to look at individual worktrees). You
 can also inspect the branch directly: `git -C thrift-demo log --oneline main..agent/integration-r1`.
 
-Then Opus asks you in chat, one question at a time:
-
-```text
-Claude: D3 - merge run r1?  A merge and push / B merge locally only / C don't merge. I recommend B.
-You:    D3 A
-Claude: What branch do you choose to merge?  A this branch (main) / B other branch (type its name)
-You:    B feature/register-validation
-```
+Then Opus asks two clickable questions: "Merge run r1?" (A merge and push / B merge locally only /
+C don't merge), and for A or B, "What branch do you choose to merge?" (this branch, a suggested new
+branch, or type any name in "Other").
 
 Opus then runs `finish apply`. It fast-forwards the chosen branch (a new name is created at the result;
 if the branch moved during the run it is merged in first and the gate runs again), pushes for A (to the

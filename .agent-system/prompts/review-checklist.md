@@ -20,7 +20,7 @@ a "Worker result" section (status, files, tests, diffstat, inline diff when shor
 6. Concurrency / transactions / resource cleanup where relevant.
 7. Security: input validation, injection, secrets, authz; no secret-like files (`scope_secrets`).
 8. Scope: only owned paths (`scope_outside` empty or justified with `--accept-scope`); nothing from
-   the "Do not" list; no undocumented dependency or network change; no generated binaries.
+   the Boundaries and "Do not" lists; no undocumented dependency or network change; no generated binaries.
 9. Maintainability: matches surrounding style; no dead code or duplicated abstractions.
 
 ### Verdicts

@@ -508,7 +508,7 @@ class TestTaskFiles(Base):
         text = p1.read_text()
         self.assertTrue(text.startswith("# Register validation! (16/10/26)"))
         self.assertNotIn("guidance", text)
-        for section in ("## Steps", "## Do not", "## Run these", "## Files you may change"):
+        for section in ("## Steps", "## Boundaries", "**You must not run:**", "## Do not", "## Run these"):
             self.assertIn(section, text)
         r1 = self.s.new_task_file("", repair_of="gen-tasks/register-validation-16-10-26.md")
         r2 = self.s.new_task_file("", repair_of="gen-tasks/register-validation-16-10-26.md")
@@ -726,6 +726,20 @@ class TestDecisions(Base):
         with mock.patch.object(S, "load_config", return_value=self.cfg), mock.patch("sys.stderr"):
             with self.assertRaises(SystemExit):  # --quote is required on the command line
                 S.main(argv[:-4])
+
+    def test_routine_worker_approval_is_recorded_with_reason(self):
+        self.s.create_run("r1", [self.task("T1", trivial=True)])
+        out = self.s.decision_routine("r1", "worker_approval", "approved ./gradlew test for worker-1",
+                                      "inside its worktree; allowed by the task's Boundaries", "T1")
+        d = self.s.store.load("r1")["decisions"][out["decision"]]
+        self.assertEqual((d["status"], d["answer"]["by"]), ("DECIDED_BY_OPUS", "opus"))
+        self.assertIn("approved ./gradlew test", (self.repo / "packets" / "T1.md").read_text())
+        with self.assertRaisesRegex(S.SchedulerError, "always the user's"):
+            self.s.decision_routine("r1", "finish", "merge", "looks fine")
+        with self.assertRaisesRegex(S.SchedulerError, "critical here"):
+            self.s.decision_routine("r1", "abandon", "close run", "tired", "T1")
+        with self.assertRaisesRegex(S.SchedulerError, "give the reason"):
+            self.s.decision_routine("r1", "worker_approval", "approved ls", " ", "T1")
 
     def test_gate_can_be_relaxed_in_config(self):
         self.cfg["decisions"]["require_user_for"] = ["abandon"]

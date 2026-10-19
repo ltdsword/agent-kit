@@ -13,7 +13,7 @@ User request -> Claude Opus 5.5 (orchestrator: plan, review, integrate)
                  -> wait -> collect (diff captured + appended to the task file) -> Opus review
                  (verdict + report appended) -> sequential cherry-pick onto agent/integration-<run>
                  -> post-merge check -> verify.sh full gate -> report (final-report.md + final.diff)
-                 -> Opus asks in chat (`finish ask`): merge+push / merge / don't; which branch
+                 -> Opus asks you (clickable, `finish ask`): merge+push / merge / don't; which branch
                  -> finish apply: fast-forward, push if chosen (never force), cleanup
 ```
 
@@ -65,7 +65,8 @@ Prefix every command with `python3 .agent-system/scheduler.py`. Add `--json` bef
 | `relaunch --run ID --task T` | Restart a lost session for a RUNNING task (same worktree) |
 | `decision ask --run ID --kind K [--task T] --title .. --question .. --option A=.. --option B=.. [--recommend A]` | Opus asks the user (kinds: blocker, repair, scope_exception, abandon, worker_approval, question) |
 | `decision wait --run ID --id D1` / `decision list [--all]` / `decision cancel` | Wait for / list / withdraw decisions |
-| `decision record --run ID --id D<n> --choice K --quote "<user's reply>" [--followup K --value V]` | Record the user's chat answer with their exact words |
+| `decision record --run ID --id D<n> --choice K --quote "<user's reply>" [--followup K --value V]` | Record the user's answer (clicked or typed) with their exact words |
+| `decision routine --run ID --kind K [--task T] --action ".." --reason ".."` | Record a routine call Opus made itself, e.g. approving a worker's in-worktree command |
 | `wait --run ID [--task T] [--timeout 540]` | Block until a worker writes its report or shows an approval prompt; exit 3 on timeout |
 | `collect --run ID --task T` | Validate the report against git (`pending` / `ambiguous` / `REVIEW`); save `reports/T.diff` (commits + uncommitted + new files); append "Worker result" to the task file |
 | `commit-task --run ID --task T -m MSG` | Audited orchestrator commit of an uncommitted worker diff or Opus minor fix |
@@ -102,7 +103,7 @@ user decision of the right kind for that task: `task-unblock` (blocker), `run cl
 `decisions.routine_repairs` repairs (default 1) are routine: `repair ... --reason "<evidence>"`.
 Configure in `config.json` -> `decisions`. Policy-level critical items (requirement/scope/API/
 dependency/security/data changes, worker approval prompts, merge/push) are in `CLAUDE.md`. The user
-answers in chat; Opus records only the user's reply, verbatim (`decision record --quote`), and every
+clicks an answer (or types one); Opus records only the user's answer, verbatim (`decision record --quote`), and every
 answer is logged with those words in the decision file and the task file. Deny rules in
 `.claude/settings.json` keep Claude from editing state and decision files directly. These are
 guardrails that make every decision auditable, not a sandbox.

@@ -14,7 +14,8 @@ How to operate (details: `.agent-system/GUIDE.md`, `.agent-system/README.md`):
    evidence yourself before high-stakes decisions.
 3. When READY: for each task run `scheduler.py task new --name "<task name>"`; it creates
    `gen-tasks/<task-name>-<dd-mm-yy>.md`. Fill it as a concrete plan: every decision made, numbered
-   steps naming file + symbol + exact change, files to read, "Do not" list, exact commands. Luna
+   steps naming file + symbol + exact change, files to read, Boundaries (may/must not edit, may/must
+   not run, what to do when blocked), exact commands. Luna
    implements well but should not have to reason about design (see the template's guidance).
    Then write tasks.json (`"packet": "gen-tasks/..."`), `run create`, `dispatch-ready`. The worker
    gets a short prompt: read that file, key facts, cautions.
@@ -28,11 +29,13 @@ How to operate (details: `.agent-system/GUIDE.md`, `.agent-system/README.md`):
    <file>`: it writes `.orchestrator/runs/<run>/final-report.md` and one total diff `final.diff`, so the
    user never has to compare worktrees. In chat, give the summary (what changed, tasks/commits, gate
    evidence, risks, your routine calls) and both paths. Then `scheduler.py finish ask --run <run>
-   --recommend A|B|C` and ask in chat, one question at a time: (1) "A merge and push / B merge locally
-   only / C don't merge"; if they pick A or B, (2) "What branch do you choose to merge? A this branch
-   (<name>) / B other branch (type its name)". Record their replies together:
+   --recommend A|B|C` and ask with clickable choices (AskUserQuestion), one question at a time:
+   (1) "Merge run <run>?": Merge and push (A) / Merge locally only, no push (B) / Don't merge (C);
+   if A or B, (2) "What branch do you choose to merge?": This branch (<name>) -> `--followup A`, or a
+   suggested new branch `feature/<run>` -> `--followup B --value feature/<run>`; a name typed in "Other"
+   -> `--followup B --value <typed name>`. Record both answers together:
    `decision record --run <run> --id D<n> --choice <A|B|C> [--followup <A|B> [--value <branch>]]
-   --quote "<their replies, verbatim>"`, then `scheduler.py finish apply --run <run> --decision D<n>` and
+   --quote "<the selected labels / typed text, verbatim>"`, then `scheduler.py finish apply --run <run> --decision D<n>` and
    report its result (merged into, pushed to, cleanup). If apply refuses (uncommitted changes in the
    user's folder, conflict, failed gate, no remote), tell the user exactly why; the decision stays
    usable when nothing changed. Never merge, push or deploy any other way.
@@ -45,28 +48,35 @@ Critical (the user decides; never resolve alone):
 - any change to requirements, scope, acceptance criteria, public contracts/APIs/schemas,
   dependencies, security-sensitive behavior, data or migrations, or anything irreversible;
 - merging or pushing the result (`finish ask`; always the user's call);
-- a worker approval prompt (Herdr `blocked`): ask the user; never approve it on your own;
+- a worker approval prompt that steps outside the worker's worktree or sandbox (writing elsewhere,
+  network, installs, push, deleting, anything the task's Boundaries forbid);
 - a final-gate failure or integration conflict whose cause or fix is not clear-cut;
 - when you are unsure whether something is critical: treat it as critical.
 
-Routine (you decide, with a recorded reason): the first repair of a task with clear evidence
+Routine (you decide, with a recorded reason): a worker approval prompt for a command inside its
+worktree that the task's Boundaries allow (build, test, read-only): read it with `herdr agent read
+<agent> --source visible`, approve once with `herdr agent send-keys`, then `scheduler.py decision
+routine --run <run> --kind worker_approval --task <T> --action "approved <command>" --reason "<why>"`;
+the first repair of a task with clear evidence
 (failing test, review finding, mechanical merge conflict, post-merge failure caused by the task)
 via `repair ... --reason "<evidence>"`; MINOR_FIX; re-collect after a report-format error;
 `relaunch` of a lost session; correcting your own plan steps without changing goal, acceptance,
 or owned paths. The scheduler records each routine call in the task file; list them in your report.
 
-For a critical decision (the user answers in chat; they get notified through Herdr / Remote Control):
+Only critical decisions go to the user; decide routine ones yourself (above). For a critical one
+(the user clicks an answer; Herdr / Remote Control notify them):
 1. `scheduler.py decision ask --run <run> --kind blocker|repair|scope_exception|abandon|worker_approval|question
    [--task T] --title "..." --question "<what happened, evidence, consequence of each option>"
    --option A="..." --option B="..." --recommend A`.
-2. Ask the user in chat, short enough to answer from a phone: the decision id, what happened (2-3
-   lines), the options with keys, and your recommendation, ending with e.g. "Reply with D3 A, B or C".
-   Then end your turn (send a push notification first if that tool is available). Do not continue
-   work that depends on the answer.
-3. When the user replies: if the reply clearly picks one option of that decision, record it with
-   `scheduler.py decision record --run <run> --id D<n> --choice <KEY> --quote "<their reply, verbatim>"`
-   (add `--note` for extra instructions in the reply). If it is ambiguous, or could mean a different
-   decision, ask again; never guess.
+2. Ask with clickable choices (the AskUserQuestion tool): header `D<n>`, the question = what happened
+   in 2-3 phone-sized lines, one option per decision option with the label "<KEY>: <label>" and a
+   one-line consequence as its description, your recommended option first with "(Recommended)". The
+   user can also type in "Other". Send a push notification first if that tool is available. Without
+   AskUserQuestion, ask the same in plain chat ("Reply with D3 A, B or C") and end your turn. Do not
+   continue work that depends on the answer.
+3. Record the answer with `scheduler.py decision record --run <run> --id D<n> --choice <KEY> --quote
+   "<the selected label, or their typed text, verbatim>"` (put extra instructions from typed text in
+   `--note`). If typed text is ambiguous or doesn't map to one option, ask again; never guess.
 4. Carry out exactly the chosen option, passing the id to the command that acts: `repair|task-unblock|
    run close|commit-task --allow-outside|mark-reviewed --accept-scope|--verdict FAIL|finish apply ...
    --decision D<n>`. For `worker_approval`: send the matching key to the worker's prompt with

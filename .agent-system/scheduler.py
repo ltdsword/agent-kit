@@ -938,7 +938,11 @@ class Scheduler:
             "  reformat, or add anything that is not asked. Keep deliberation short.",
             "- If a step does not match the code, or anything is unclear, stop and write the report with",
             '  status "blocked" and the exact reason. Do not guess.',
+            "- Stay inside the file's Boundaries: edit only what it allows, run only what it allows.",
             "- No network, no new dependencies, no push/merge/rebase, no other agents.",
+            "- Don't ask about trivial things: run every edit, build, test and read-only command the file",
+            "  allows inside your worktree. Ask only for a code/logic blocker (report status \"blocked\") or",
+            "  to go outside your worktree/sandbox (approval prompt). Never work around a block.",
             "- `git commit` is usually blocked by the sandbox. Then leave the changes uncommitted and",
             "  report committed=false, commits=[]. Never try to bypass the sandbox.",
             "",
@@ -1740,6 +1744,18 @@ class Scheduler:
                 return {"decision": did, "status": "PENDING", "result": "timeout"}
             sleep(interval_s)
 
+    def decision_routine(self, run_id: str, kind: str, action: str, reason: str, task: str | None = None) -> dict:
+        """Record a routine call Opus made itself (e.g. approving a worker's in-worktree command)."""
+        if kind in ALWAYS_USER_KINDS:
+            raise SchedulerError(f"{kind} is always the user's decision")
+        with self.txn(run_id) as state:
+            if task and task not in state["tasks"]:
+                raise SchedulerError(f"unknown task {task}")
+            if self._is_critical(state, kind, task) and kind != "worker_approval":
+                raise SchedulerError(f"{kind} is critical here: ask the user (decision ask), don't record it yourself")
+            did = self._record_opus_decision(state, kind, task, action, reason)
+        return {"decision": did, "status": "DECIDED_BY_OPUS"}
+
     def decision_list(self, run_id: str | None = None, pending_only: bool = True) -> list[dict]:
         runs = [self.store.load(run_id)] if run_id else self.store.list_runs()
         out = []
@@ -2184,6 +2200,13 @@ def build_parser() -> argparse.ArgumentParser:
     dc.add_argument("--run", required=True)
     dc.add_argument("--id", required=True)
     dc.add_argument("--reason", required=True)
+    dr = des.add_parser("routine", help="record a routine call Opus made itself, with its reason")
+    dr.add_argument("--run", required=True)
+    dr.add_argument("--kind", required=True, choices=[k for k in DECISION_KINDS if k not in ALWAYS_USER_KINDS])
+    dr.add_argument("--task")
+    dr.add_argument("--action", dest="action_text", required=True,
+                    help='what was done, e.g. "approved ./gradlew test for worker-1"')
+    dr.add_argument("--reason", required=True)
     dl = des.add_parser("list", help="pending decisions (all runs)")
     dl.add_argument("--run")
     dl.add_argument("--all", action="store_true", help="include answered/cancelled")
@@ -2268,6 +2291,8 @@ def _decision_cli(s: "Scheduler", a) -> dict:
         return s.decision_cancel(a.run, a.id, a.reason)
     if a.action == "list":
         return {"decisions": s.decision_list(a.run, pending_only=not a.all)}
+    if a.action == "routine":
+        return s.decision_routine(a.run, a.kind, a.action_text, a.reason, a.task)
     return s.decision_answer(a.run, a.id, a.choice, a.note, channel="chat", followup=a.followup, value=a.value,
                              quote=a.quote)
 
