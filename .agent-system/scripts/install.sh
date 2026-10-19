@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 # agent-kit: copy the orchestration kit into a project workspace, or update one.
-#   agent-kit create [--folder=<dir>] [--dry-run]
-#   agent-kit update [--folder=<dir>] [--dry-run] [--force-agent]
+#   agent-kit create [--folder=<repo>] [--dry-run]
+#   agent-kit update [--folder=<repo>] [--dry-run] [--force-agent]
 #   agent-kit [--dry-run] [--force-agent] <target-repo>    legacy in-repo mode (kit inside the repo)
-# <dir> is the destination workspace and defaults to the current folder. It must be named
-# <repo>.workspace and sit next to <repo>, which gets linked as <dir>/<repo> -> ../<repo>.
-# create: new workspace (kit, config with project.path, CLAUDE.md/AGENTS.md, .claude/, folders).
+# <repo> is the repo folder (default: the current folder). The workspace is <repo>.workspace next
+# to it, linked back as <repo>.workspace/<repo> -> ../<repo>. A folder already named *.workspace
+# is taken as the workspace itself, so `agent-kit update` also works from inside a workspace.
+# create: make the workspace (kit, config with project.path, CLAUDE.md/AGENTS.md, .claude/, folders).
 # update: refresh the kit files; keeps config.json, project notes and customized scout.md.
 # The kit is copied from this script's kit home (e.g. ~/Code/agent-kit; ~/.local/bin/agent-kit
 # links here). Nothing is ever written into the repo: create/update fail if its git status changes.
@@ -13,7 +14,7 @@ set -euo pipefail
 
 SELF="$(readlink -f "${BASH_SOURCE[0]}")"
 SRC="$(cd "$(dirname "$SELF")/../.." && pwd -P)"   # kit home: holds .agent-system/
-usage() { sed -n '2,11p' "$SELF" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,12p' "$SELF" | sed 's/^# \{0,1\}//'; }
 die() { echo "error: $*" >&2; exit 1; }
 
 CMD=""; DRY=0; FORCE_AGENT=0; FOLDER=""; TARGET=""
@@ -104,20 +105,26 @@ check_repo_unchanged() {  # check_repo_unchanged <repo> <status before>
   [ $DRY -eq 1 ] || [ "$(repo_status "$1")" = "$2" ] || die "the repo's git status changed during install: inspect $1"
 }
 
-cmd_create() {
-  local dest name repo_name repo link before
-  dest="$(realpath -m -- "${FOLDER:-$PWD}")"
-  name="$(basename "$dest")"
-  case "$name" in
-    ?*.workspace) repo_name="${name%.workspace}" ;;
-    *) die "destination must be named <repo>.workspace next to the repo (got '$name')" ;;
+resolve_folder() {  # sets dest (the workspace) and repo_name from --folder or the current folder
+  local f
+  f="$(realpath -m -- "${FOLDER:-$PWD}")"
+  case "$(basename "$f")" in
+    ?*.workspace) dest="$f"; repo_name="$(basename "$f" .workspace)" ;;  # given the workspace itself
+    *) repo_name="$(basename "$f")"; dest="$f.workspace" ;;              # given the repo
   esac
   [ "$dest" != "$SRC" ] || die "destination is the kit home itself"
+}
+
+cmd_create() {
+  local dest repo_name repo link before
+  resolve_folder
   [ ! -e "$dest/.agent-system" ] || die "$dest already has .agent-system: use 'agent-kit update'"
   repo="$(dirname "$dest")/$repo_name"
   git -C "$repo" rev-parse --verify HEAD >/dev/null 2>&1 \
-    || die "$repo is not a Git repository with at least one commit (the repo must sit next to $name)"
+    || die "$repo is not a Git repository with at least one commit"
   repo="$(cd "$repo" && pwd -P)"
+  [ "$(git -C "$repo" rev-parse --show-toplevel)" = "$repo" ] \
+    || die "$repo is inside a Git repository, not its top folder: pass the repo's top folder"
   link="$dest/$repo_name"
   if [ -L "$link" ]; then
     [ "$(readlink -f "$link")" = "$repo" ] || die "$link is a symlink to somewhere else"
@@ -189,10 +196,9 @@ PY
 }
 
 cmd_update() {
-  local dest repo="" before=""
-  dest="$(realpath -m -- "${FOLDER:-$PWD}")"
-  [ -f "$dest/.agent-system/config.json" ] || die "$dest has no .agent-system/config.json: use 'agent-kit create'"
-  [ "$dest" != "$SRC" ] || die "destination is the kit home itself"
+  local dest repo_name repo="" before=""
+  resolve_folder
+  [ -f "$dest/.agent-system/config.json" ] || die "$dest has no kit (.agent-system/config.json): use 'agent-kit create'"
   repo="$(python3 - "$dest" <<'PY'
 import json, os, sys
 dest = sys.argv[1]

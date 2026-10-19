@@ -73,11 +73,11 @@ cd ~/Code && git clone <team-url> myrepo
 git -C myrepo status --porcelain             # must print nothing
 
 # 1. Create the workspace: everything in one command.
-agent-kit create --folder=myrepo.workspace   # from ~/Code; or: mkdir myrepo.workspace && cd it && agent-kit create
+agent-kit create --folder=myrepo            # from ~/Code; or from inside the repo: cd myrepo && agent-kit create
 ```
 
-`agent-kit create [--folder=<dir>]` (`<dir>` defaults to the current folder; it must be named
-`<repo>.workspace` and sit next to `<repo>`) creates:
+`agent-kit create [--folder=<repo>]` names the repo (default: the current folder, which must be the
+repo's top folder) and creates the new folder `<repo>.workspace` next to it, with:
 - the symlink `myrepo -> ../myrepo`, and `gen-tasks/`, `worktrees/`, `notes/`, a local `.gitignore`;
 - `.agent-system/` copied from the kit home, with `config.json` set to `project.path: myrepo`,
   `worktree_root: worktrees`, and `worker.writable_dirs` from the repo's build files (Gradle `~/.gradle`,
@@ -85,7 +85,7 @@ agent-kit create --folder=myrepo.workspace   # from ~/Code; or: mkdir myrepo.wor
 - `.claude/agents/scout.md` and `.claude/settings.json` (deny rules + `additionalDirectories` = real repo path);
 - `CLAUDE.md` (project notes with TODOs + orchestrator section) and `AGENTS.md` (worker section).
 
-It refuses an existing workspace (use `update`), a folder not named `<repo>.workspace`, or a missing
+It refuses an existing workspace (use `update`), a folder that is not a repo's top folder, or a missing
 repo, writes nothing into the repo, and fails if the repo's `git status` changes. `--dry-run` prints
 the plan.
 
@@ -104,7 +104,8 @@ herdr
 claude --model claude-opus-5-5               # started in myrepo.workspace/
 ```
 
-**Updating a workspace to the latest kit**: `agent-kit update [--folder=<dir>]` refreshes the kit
+**Updating a workspace to the latest kit**: `agent-kit update [--folder=<repo>]` (or `agent-kit update`
+inside the workspace: a folder named `*.workspace` is taken as the workspace itself) refreshes the kit
 files (scheduler, prompts, scripts, docs, tests, templates, the marked sections of `CLAUDE.md` and
 `AGENTS.md`) and keeps `config.json`, your project notes and a customized `scout.md`
 (`--force-agent` replaces it). It reports template keys missing from your `config.json`.
@@ -165,6 +166,6 @@ the legacy in-repo install (kit inside the repo, edits its `.gitignore`): own re
 `TestWorkspaceMode` in `tests/test_scheduler.py`: temp layout `repo/` + `repo.workspace/repo -> ../repo`;
 full dispatch -> collect -> integrate -> verify -> cleanup with `git -C repo status --porcelain` empty
 throughout, state/task files/worktrees under the workspace, the workspace not a git repo; refusal of
-a bad `project.path`; doctor checks. `TestInstall`: `agent-kit create` from the parent folder and
-from inside the destination, refusals, `update` keeping config and notes, stack detection, dry run,
+a bad `project.path`; doctor checks. `TestInstall`: `agent-kit create --folder=<repo>` from the parent
+folder, from inside the repo, and from a `*.workspace` folder; refusals (no repo, repo subfolder), `update` keeping config and notes, stack detection, dry run,
 legacy in-repo mode.

@@ -243,12 +243,12 @@ The kit's home is `~/Code/agent-kit`; the `agent-kit` command copies it.
 
 ```bash
 cd ~/Code
-agent-kit create --folder=other-project.workspace   # links other-project, copies the kit, writes config
+agent-kit create --folder=other-project   # creates other-project.workspace: link, kit copy, config
 cd other-project.workspace
 .agent-system/scripts/doctor.sh                     # then fill in the TODOs at the top of CLAUDE.md
 ```
 
-Later, `agent-kit update` (inside the workspace, or `--folder=...`) brings it to the latest kit and
+Later, `agent-kit update` (inside the workspace, or `agent-kit update --folder=other-project`) brings it to the latest kit and
 keeps its `config.json` and notes. Details: `docs/WORKSPACE-SETUP.md` section 4.
 
 **Your own repos only: in-repo mode** (the kit is committed into the repo and its `.gitignore` is edited):

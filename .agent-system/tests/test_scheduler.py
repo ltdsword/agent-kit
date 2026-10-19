@@ -878,26 +878,35 @@ class TestInstall(Base):
         self.assertEqual(self.repo_status(), "")
 
     def test_create_from_parent_with_folder(self):
-        self.kit("create", "--folder=repo.workspace")
+        self.kit("create", "--folder=repo")  # names the repo; repo.workspace does not exist yet
         self.assert_workspace()
 
-    def test_create_in_current_folder(self):
+    def test_create_inside_repo_without_folder(self):
+        self.kit("create", cwd=self.repo)
+        self.assert_workspace()
+
+    def test_create_given_workspace_name(self):
         self.ws.mkdir()
-        self.kit("create", cwd=self.ws)
+        self.kit("create", cwd=self.ws)  # a *.workspace folder is taken as the workspace itself
         self.assert_workspace()
 
     def test_create_refusals(self):
         other = Path(self.tmp.name) / "repo-tools"
         other.mkdir()
-        self.assertIn("<repo>.workspace", self.kit("create", cwd=other, ok=False).stderr)
-        self.assertIn("not a Git repository", self.kit("create", "--folder=nope.workspace", ok=False).stderr)
-        self.kit("create", "--folder", "repo.workspace")
-        self.assertIn("agent-kit update", self.kit("create", "--folder=repo.workspace", ok=False).stderr)
+        self.assertIn("not a Git repository", self.kit("create", cwd=other, ok=False).stderr)
+        self.assertIn("not a Git repository", self.kit("create", "--folder=nope", ok=False).stderr)
+        (self.repo / "sub").mkdir()
+        self.assertIn("top folder", self.kit("create", cwd=self.repo / "sub", ok=False).stderr)
+        self.assertFalse((self.repo / "sub.workspace").exists())
+        (self.repo / "sub").rmdir()
+        self.kit("create", "--folder", "repo")
+        self.assertIn("agent-kit update", self.kit("create", "--folder=repo", ok=False).stderr)
         self.assertIn("agent-kit create", self.kit("update", "--folder=" + str(other), ok=False).stderr)
+        self.assertFalse((Path(self.tmp.name) / "repo-tools.workspace").exists())
         self.assertEqual(self.repo_status(), "")
 
     def test_update_keeps_config_and_notes(self):
-        self.kit("create", "--folder=repo.workspace")
+        self.kit("create", "--folder=repo")
         cfg_path = self.ws / ".agent-system" / "config.json"
         cfg = json.loads(cfg_path.read_text())
         cfg["gate"]["verify_cmd"] = ["make", "check"]
@@ -905,7 +914,9 @@ class TestInstall(Base):
         claude = self.ws / "CLAUDE.md"
         claude.write_text(claude.read_text().replace("- Stack: TODO", "- Stack: Java 21"))
         (self.ws / ".agent-system" / "scheduler.py").write_text("# stale\n")
-        self.kit("update", cwd=self.ws)
+        self.kit("update", cwd=self.ws)  # from inside the workspace
+        self.assert_workspace()
+        self.kit("update", "--folder=repo")  # from the parent, naming the repo
         self.assert_workspace()
         self.assertEqual(json.loads(cfg_path.read_text())["gate"]["verify_cmd"], ["make", "check"])
         self.assertIn("- Stack: Java 21", claude.read_text())
@@ -914,13 +925,13 @@ class TestInstall(Base):
         (self.repo / "build.gradle").write_text("plugins { id 'java' }\n")
         sh(self.repo, "git", "add", "-A")
         sh(self.repo, "git", "commit", "-q", "-m", "gradle")
-        self.kit("create", "--folder=repo.workspace")
+        self.kit("create", "--folder=repo")
         cfg = json.loads((self.ws / ".agent-system" / "config.json").read_text())
         self.assertEqual(cfg["worker"]["writable_dirs"], ["~/.gradle"])
         self.assertIn("`./gradlew build`", (self.ws / "CLAUDE.md").read_text())
 
     def test_dry_run_writes_nothing(self):
-        out = self.kit("create", "--folder=repo.workspace", "--dry-run").stdout
+        out = self.kit("create", "--folder=repo", "--dry-run").stdout
         self.assertIn("[dry-run]", out)
         self.assertFalse(self.ws.exists())
 

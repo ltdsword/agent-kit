@@ -28,7 +28,7 @@ User request -> Claude Opus 5.5 (orchestrator: plan, review, integrate)
 | `prompts/architecture-readiness.md` | Planning gate checklist (a)-(e) |
 | `scripts/doctor.sh` | Tooling/model/integration report (`--probe-codex` for a live model check) |
 | `scripts/verify.sh` | Stack-detecting quality gate (`--quick` for post-merge smoke) |
-| `scripts/install.sh` | `agent-kit create/update [--folder=<dir>]`: copy the kit into a `<repo>.workspace` or refresh it (`docs/WORKSPACE-SETUP.md` section 4). `agent-kit <repo>`: legacy in-repo install |
+| `scripts/install.sh` | `agent-kit create/update [--folder=<repo>]`: create `<repo>.workspace` next to the repo with the kit, or refresh it (`docs/WORKSPACE-SETUP.md` section 4). `agent-kit <repo>`: legacy in-repo install |
 | `scripts/decide` | **You** answer pending decisions (refuses to run inside Claude) |
 | `docs/WORKSPACE-SETUP.md` | Rule for work projects: tooling in `<repo>.workspace/`, repo via symlink (workspace mode) |
 | `docs/DECISION-HUB-PLAN.md` | Plan: web dashboard + remote decisions (not built yet) |
