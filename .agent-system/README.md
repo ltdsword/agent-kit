@@ -4,8 +4,8 @@ Reference for the files and commands in this directory. For a step-by-step walkt
 (Herdr basics, first task, adopting results, reusing in another repo) read **[GUIDE.md](GUIDE.md)**.
 
 ```text
-User request -> Claude Opus 5.5 (orchestrator: plan, review, integrate)
-                 |- scout subagent: Claude Sonnet 5.5, effort medium, read-only (max 3 rounds/request)
+User request -> orchestrator: Claude Code, configured model (default Opus 5.5): plan, review, integrate
+                 |- scout subagent: configured Claude model (default Sonnet 5.5, effort medium), read-only (max 3 rounds/request)
                  v
             1..3 task DAG -> scheduler.py (leases, states, durable JSON) -> Codex workers
                  worker-1 / worker-2 / worker-3: the configured worker model (default gpt-6-luna @ xhigh), one Herdr workspace + git worktree each
@@ -21,7 +21,9 @@ User request -> Claude Opus 5.5 (orchestrator: plan, review, integrate)
 
 | Path | Purpose |
 |---|---|
-| `config.json` | Pool size 3, task cap 3, parallel 3, max 2 major repairs, 3 scout rounds, worker model/effort, gate commands |
+| `config.json` | Program/model/effort per role (orchestrator, scout, worker; set with `agent-kit config`), pool size 3, task cap 3, parallel 3, max 2 major repairs, 3 scout rounds, gate commands |
+| `models.py` | Model registry: Herdr agent programs (Claude Code and Codex verified, others unverified), Claude list, Codex catalog, effort checks, pick-from table |
+| `kitconfig.py` | `agent-kit config`: choose program/model/effort per role (flags, or interactive on a terminal) |
 | `scheduler.py` | Stdlib CLI: DAG validation, readiness, leases, state machine, research gate, git/Herdr wrappers |
 | `prompts/task-packet.md` | Template + authoring guidance for a worker task file (`task new` copies it) |
 | `prompts/repair-packet.md` | Template for a repair file to the same worker (`task new --repair-of`) |
@@ -30,10 +32,10 @@ User request -> Claude Opus 5.5 (orchestrator: plan, review, integrate)
 | `prompts/architecture-readiness.md` | Planning gate checklist (a)-(e) |
 | `scripts/doctor.sh` | Tooling/model/integration report (`--probe-codex` for a live model check) |
 | `scripts/verify.sh` | Stack-detecting quality gate (`--quick` for post-merge smoke) |
-| `scripts/install.sh` | `agent-kit create/update [--folder=<repo>]`: create `<repo>.workspace` next to the repo with the kit, or refresh it (`docs/WORKSPACE-SETUP.md` section 4). `agent-kit <repo>`: legacy in-repo install |
+| `scripts/install.sh` | `agent-kit create/update/config [--folder=<repo>]`: create `<repo>.workspace` next to the repo with the kit, or refresh it (`docs/WORKSPACE-SETUP.md` section 4). `agent-kit <repo>`: legacy in-repo install |
 | `docs/WORKSPACE-SETUP.md` | Rule for work projects: tooling in `<repo>.workspace/`, repo via symlink (workspace mode) |
-| `docs/DECISION-HUB-PLAN.md` | Plan: web dashboard + remote decisions (not built yet) |
-| `templates/claude-settings.json` | Deny rules: Claude can't answer decisions or edit decision state |
+| `docs/DECISION-HUB-PLAN.md` | Web dashboard + remote decisions: not planned for now (Remote Control covers it for Claude users); kept for a later version |
+| `templates/claude-settings.json` | Deny rules: Claude can't edit run state or decision files directly |
 | `templates/*.section.md` | Marker blocks merged into CLAUDE.md / AGENTS.md |
 | `tests/test_scheduler.py` | Offline tests (real git in temp dirs, fake Herdr, no model calls) |
 | `../.claude/agents/scout.md` | Sonnet scout definition |

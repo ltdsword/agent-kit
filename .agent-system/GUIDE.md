@@ -8,8 +8,8 @@ you mostly use part 4. Command reference: [README.md](README.md).
 | Role | Model | Job |
 |---|---|---|
 | You | - | Ask for a feature, answer decisions, approve the merge and push |
-| Orchestrator | Claude Opus 5.5 (your Claude session) | Plans, writes task specs, reviews, integrates |
-| Scout | Claude Sonnet 5.5, read-only | Reads the codebase and reports evidence to Opus |
+| Orchestrator | Claude Code, the model you choose (default Opus 5.5) | Plans, writes task specs, reviews, integrates |
+| Scout | Claude Code subagent, the model you choose (default Sonnet 5.5), read-only | Reads the codebase and reports evidence to Opus |
 | Workers 1-3 | Codex, the model you choose (default `gpt-6-luna` at `xhigh`) | Write the code, each in its own git worktree |
 | Herdr | - | Runs and shows all of these terminals; keeps them alive if you detach |
 | `scheduler.py` | - | Tracks who works on what, enforces the rules |
@@ -112,7 +112,7 @@ The workflow only dispatches live workers when Claude runs **inside** Herdr (it 
 cd ~/Code/thrift-demo.workspace    # workspace: kit + state; the repo is the symlink thrift-demo/
 herdr                         # opens/attaches the session
 # in the Herdr pane:
-claude --model claude-opus-5-5
+claude                        # starts with the orchestrator model you chose (agent-kit config --show)
 ```
 
 Inside Claude, check it: `!echo $HERDR_ENV` should print `1`. If Claude was already running before the
@@ -252,7 +252,8 @@ The kit's home is `~/Code/agent-kit`; the `agent-kit` command copies it.
 
 ```bash
 cd ~/Code
-agent-kit create --folder=other-project   # creates other-project.workspace: link, kit copy, config
+agent-kit create --folder=other-project   # creates other-project.workspace: link, kit copy, config;
+                                          # asks which models to use (agent-kit config changes them later)
 cd other-project.workspace
 .agent-system/scripts/doctor.sh                     # then fill in the TODOs at the top of CLAUDE.md
 ```

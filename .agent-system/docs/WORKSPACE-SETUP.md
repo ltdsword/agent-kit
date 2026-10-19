@@ -89,6 +89,8 @@ repo's top folder) and creates the new folder `<repo>.workspace` next to it, wit
   (e.g. `python3 -m pytest`, CMake + `ctest`, `make && make test`) go into the `CLAUDE.md` notes;
 - `.claude/agents/scout.md` and `.claude/settings.json` (deny rules + `additionalDirectories` = real repo path);
 - `CLAUDE.md` (project notes with TODOs + orchestrator section) and `AGENTS.md` (worker section).
+- the models for each role (orchestrator, scout, worker): asked on a terminal, or from `--model-*` /
+  `--effort-*` options; change them later with `agent-kit config` (README, "Choosing models").
 
 It refuses an existing workspace (use `update`), a folder that is not a repo's top folder, or a missing
 repo, writes nothing into the repo, and fails if the repo's `git status` changes. `--dry-run` prints
@@ -106,7 +108,7 @@ git init -q                                  # optional: local-only history of g
 
 # 4. Work from the workspace, inside Herdr.
 herdr
-claude --model claude-opus-5-5               # started in myrepo.workspace/
+claude                                       # started in myrepo.workspace/; uses the chosen orchestrator model
 ```
 
 **Updating a workspace to the latest kit**: `agent-kit update [--folder=<repo>]` (or `agent-kit update`

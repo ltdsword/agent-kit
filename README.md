@@ -9,8 +9,8 @@ into which branch; the kit then does it. All AI tooling lives in a separate **wo
 to the repo, so the repo only ever sees the code changes you approve.
 
 ```text
-You ──request──> Claude Opus 5.5 (orchestrator: plans, reviews, integrates)
-                   ├─ scout: Claude Sonnet 5.5, read-only (max 3 research rounds per request)
+You ──request──> orchestrator: Claude Code, model you choose (default Opus 5.5): plans, reviews, integrates
+                   ├─ scout: Claude Code subagent (default Sonnet 5.5), read-only (max 3 research rounds per request)
                    ▼
                  1-3 tasks ──> scheduler.py (leases, state machine, durable JSON)
                    ├─ worker-1 ┐
@@ -31,8 +31,8 @@ Claude asks with clickable choices (you get notified via Herdr / Remote Control)
 | Role | Who | Job |
 |---|---|---|
 | You | - | Ask for a change, make the critical decisions, approve the merge and push |
-| Orchestrator | Claude Opus 5.5 (your Claude session) | Plans tasks, writes task files, reviews, integrates |
-| Scout | Claude Sonnet 5.5, read-only | Reads the codebase and reports evidence |
+| Orchestrator | Claude Code, the model you choose (default Opus 5.5) | Plans tasks, writes task files, reviews, integrates |
+| Scout | Claude Code subagent, the model you choose (default Sonnet 5.5), read-only | Reads the codebase and reports evidence |
 | Workers 1-3 | Codex, any model you choose (default `gpt-6-luna`, `xhigh`) | Write the code, each in its own git worktree |
 | Herdr | terminal multiplexer | Runs all agents; keeps them alive when you detach |
 | `scheduler.py` | Python stdlib CLI | Tracks who works on what and enforces the rules |
@@ -105,7 +105,7 @@ python3 -m unittest discover -s ~/Code/agent-kit/.agent-system/tests            
 ```bash
 # 1. Create the workspace next to the repo (writes nothing into the repo).
 cd ~/Code
-agent-kit create --folder=myrepo             # creates ~/Code/myrepo.workspace
+agent-kit create --folder=myrepo             # creates ~/Code/myrepo.workspace; asks which models to use
 
 # 2. Finish the project notes and check.
 cd myrepo.workspace
@@ -114,7 +114,7 @@ $EDITOR CLAUDE.md                            # fill in the remaining TODOs at th
 
 # 3. Start working, inside Herdr.
 herdr
-claude --model claude-opus-5-5
+claude                                       # uses the orchestrator model you chose (agent-kit config --show)
 ```
 
 Then type a request in Claude, for example:
@@ -200,6 +200,10 @@ agent-kit --help
 | `--folder=<repo>` (or `--folder <repo>`) | The repo folder, relative or absolute. Default: the current folder. A `*.workspace` folder is accepted as the workspace itself |
 | `--dry-run` | Print what would happen; change nothing |
 | `--force-agent` | Replace a customized `.claude/agents/scout.md` with the kit's version |
+| `--model-orchestrator=M`, `--model-scout=M`, `--model-worker=M` | (`create`, `config`) Model per role: an ID or alias, or `<program>/<model>` for an unverified program |
+| `--effort-orchestrator=E`, `--effort-scout=E`, `--effort-worker=E` | (`create`, `config`) Effort per role; must be one the model supports |
+| `--show`, `--list` | (`config`) Show the workspace's roles / every known model with its efforts |
+| `--no-input` | (`create`, `config`) Never prompt; fail on an unknown model instead of asking |
 
 **`create`** makes `<repo>.workspace/` with:
 
@@ -282,7 +286,8 @@ Notes:
 
 ## 6. Daily workflow
 
-1. **Start**: `cd ~/Code/myrepo.workspace && herdr`, then `claude --model claude-opus-5-5` in a pane.
+1. **Start**: `cd ~/Code/myrepo.workspace && herdr`, then `claude` in a pane (it starts with the orchestrator
+   model you chose; add `--effort <level>` if you set one).
    Inside Claude, `!echo $HERDR_ENV` must print `1`.
 2. **Ask**: describe the outcome you want. Small changes become one trivial task; larger ones get up to
    3 scout rounds, then 1-3 tasks.
@@ -484,9 +489,11 @@ agent-kit update --folder=~/Code/myrepo              # roll it out to each works
 | Path (inside `.agent-system/`) | Purpose |
 |---|---|
 | `scheduler.py` | Scheduler CLI: DAG, leases, state machines, research gate, decisions, git/Herdr wrappers |
-| `config.json` | Config template (no `project`; `create` fills it in) |
+| `models.py` | Model registry: the programs Herdr can launch (Claude Code and Codex verified, the rest unverified), Claude model list, Codex catalog, effort checks, the pick-from table |
+| `kitconfig.py` | `agent-kit config`: choose program, model and effort per role; writes config, Claude settings and the scout file |
+| `config.json` | Config template (no `project`; `create` fills it in; default models per role) |
 | `prompts/` | Task and repair file templates, review checklist, research packet, readiness gate |
-| `scripts/install.sh` | `agent-kit` itself |
+| `scripts/install.sh` | `agent-kit` itself (`create`, `update`, `config`) |
 | `scripts/doctor.sh`, `verify.sh` | Health check, quality gate |
 | `templates/` | `CLAUDE.md`/`AGENTS.md` sections and Claude deny rules |
 | `tests/test_scheduler.py` | Scheduler, workspace mode and installer tests |
