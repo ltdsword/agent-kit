@@ -8,7 +8,7 @@ User request -> Claude Opus 5.5 (orchestrator: plan, review, integrate)
                  |- scout subagent: Claude Sonnet 5.5, effort medium, read-only (max 3 rounds/request)
                  v
             1..3 task DAG -> scheduler.py (leases, states, durable JSON) -> Codex workers
-                 worker-1 / worker-2 / worker-3: gpt-6-luna @ xhigh, one Herdr workspace + git worktree each
+                 worker-1 / worker-2 / worker-3: the configured worker model (default gpt-6-luna @ xhigh), one Herdr workspace + git worktree each
                  task plan per worker: gen-tasks/<task-name>-<dd-mm-yy>.md (written by Opus)
                  -> wait -> collect (diff captured + appended to the task file) -> Opus review
                  (verdict + report appended) -> sequential cherry-pick onto agent/integration-<run>
@@ -132,8 +132,8 @@ written atomically under an exclusive file lock (`.orchestrator/scheduler.lock`)
 
 ## Cost notes
 
-Every worker task and repair runs `gpt-6-luna` at `xhigh` by policy (no automatic downgrade);
-`xhigh` raises latency and metered usage. Three parallel workers = three concurrent sessions. Keep
+Every worker task and repair runs the configured worker model and effort (`agent-kit config`; no
+automatic downgrade); higher efforts raise latency and metered usage. Three parallel workers = three concurrent sessions. Keep
 small requests to one trivial task. Scout rounds are capped at 3 per request.
 
 ## Troubleshooting
@@ -141,7 +141,7 @@ small requests to one trivial task. Scout rounds are capped at 3 per request.
 | Symptom | Fix |
 |---|---|
 | `not running inside Herdr (HERDR_ENV != 1)` | Start Claude from a Herdr pane, or use `--launch none` and run the printed `codex` command yourself |
-| `'gpt-6-luna' model is not supported when using Codex with a ChatGPT account` | Client too old: `codex update` (0.163.0 works), check `codex login status`, then `scripts/doctor.sh --probe-codex`. Do not change the worker model |
+| `'<model>' model is not supported when using Codex with a ChatGPT account` | Client too old: `codex update` (0.163.0 works), check `codex login status`, then `scripts/doctor.sh --probe-codex`; or choose another model with `agent-kit config` |
 | worker reports `bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted` | Ubuntu's `apparmor_restrict_unprivileged_userns=1` blocks Codex's sandbox. Add the bwrap AppArmor profile from GUIDE.md Part 2 step 2, test with `codex sandbox -- sh -c 'echo ok'`; never weaken the worker sandbox |
 | report has `committed: false`, `index.lock: Read-only file system` | Expected: Codex's `workspace-write` keeps `.git` read-only. Review the diff, then `commit-task` (audited `Orchestrator-Commit` trailer) |
 | worker's `./gradlew` fails: lock file / read-only `~/.gradle` | Add the cache dir to `worker.writable_dirs` (default has `~/.gradle`) |

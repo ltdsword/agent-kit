@@ -10,7 +10,7 @@ you mostly use part 4. Command reference: [README.md](README.md).
 | You | - | Ask for a feature, answer decisions, approve the merge and push |
 | Orchestrator | Claude Opus 5.5 (your Claude session) | Plans, writes task specs, reviews, integrates |
 | Scout | Claude Sonnet 5.5, read-only | Reads the codebase and reports evidence to Opus |
-| Workers 1-3 | Codex `gpt-6-luna` at `xhigh` | Write the code, each in its own git worktree |
+| Workers 1-3 | Codex, the model you choose (default `gpt-6-luna` at `xhigh`) | Write the code, each in its own git worktree |
 | Herdr | - | Runs and shows all of these terminals; keeps them alive if you detach |
 | `scheduler.py` | - | Tracks who works on what, enforces the rules |
 
@@ -68,12 +68,12 @@ Worker agents are named `<slot>-<run>`, e.g. `worker-1-r1`. Their workspaces are
 claude/codex integrations, git repo with a baseline commit.
 
 1. **Codex client 0.163.0 or newer, logged in.** Older clients (e.g. 0.154.0) reject the worker model
-   with *"The 'gpt-6-luna' model is not supported when using Codex with a ChatGPT account."* even on
+   with *"The '<model>' model is not supported when using Codex with a ChatGPT account."* even on
    an account that has access. Fix with `codex update`, then confirm:
    ```bash
-   .agent-system/scripts/doctor.sh --probe-codex     # expect: PASS: gpt-6-luna/xhigh request completed
+   .agent-system/scripts/doctor.sh --probe-codex     # expect: PASS: <worker model>/<effort> request completed
    ```
-   Do not switch the worker model to something else; the kit validates gpt-6-luna + xhigh on purpose.
+   Choose the models for each role with `agent-kit config` (README, "Choosing models").
 2. **Codex's sandbox must be able to start.** Run `codex sandbox -- sh -c 'echo sandbox-ok'`.
    On Ubuntu 24.04+ it fails with `bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted`
    because `kernel.apparmor_restrict_unprivileged_userns=1` blocks user namespaces. Fix it by
@@ -286,7 +286,7 @@ which is created from a commit. (In workspace mode the worker prompt points to t
 | Problem | What to do |
 |---|---|
 | Opus says "not running inside Herdr" | Quit Claude, start it from a Herdr pane (Part 3) |
-| gpt-6-luna not supported with ChatGPT account | Old client: `codex update` (Part 2, step 1) |
+| Model not supported with ChatGPT account | Old client: `codex update` (Part 2, step 1), or choose another model with `agent-kit config` |
 | Worker says `bwrap: ... RTM_NEWADDR: Operation not permitted` | Ubuntu's user-namespace restriction blocks Codex's sandbox: add the AppArmor profile (Part 2, step 2). Never switch workers to `danger-full-access` |
 | Worker's `./gradlew test` fails on a lock file in `~/.gradle` | Gradle's cache must be writable: keep `"writable_dirs": ["~/.gradle"]` in `config.json` (other stacks: README, Safety) |
 | Worker report says `git add` failed: `index.lock: Read-only file system` | Normal: the sandbox keeps `.git` read-only. The worker leaves changes uncommitted (`committed: false`), `collect` shows `needs_orchestrator_commit`, and Opus runs `commit-task` |

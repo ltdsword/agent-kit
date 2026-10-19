@@ -14,6 +14,8 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import scheduler as S  # noqa: E402
+import models as M  # noqa: E402
+import kitconfig as K  # noqa: E402
 
 REAL_CONFIG = json.loads((Path(__file__).resolve().parents[1] / "config.json").read_text())
 PY_OK = [sys.executable, "-c", "raise SystemExit(0)"]
@@ -65,6 +67,15 @@ class Base(unittest.TestCase):
         env = {"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.invalid",
                "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@example.invalid",
                "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"}
+        codex = Path(self.tmp.name) / "codex-home"
+        codex.mkdir()
+        (codex / "models_cache.json").write_text(json.dumps({"models": [
+            {"slug": "gpt-6-luna", "display_name": "GPT-6 Luna", "visibility": "list", "default_reasoning_level": "medium",
+             "supported_reasoning_levels": [{"effort": e} for e in ("low", "medium", "high", "xhigh", "max")]},
+            {"slug": "gpt-x-sol", "display_name": "GPT-X Sol", "visibility": "list", "default_reasoning_level": "high",
+             "supported_reasoning_levels": [{"effort": e} for e in ("low", "high", "ultra")]},
+            {"slug": "gpt-hidden", "visibility": "hide", "supported_reasoning_levels": ["low"]}]}))
+        env["CODEX_HOME"] = str(codex)
         patcher = mock.patch.dict(os.environ, env)
         patcher.start()
         self.addCleanup(patcher.stop)
@@ -175,10 +186,17 @@ class TestConfig(Base):
         for slot, v in S.resolve_worker_settings(REAL_CONFIG).items():
             self.assertEqual((v["model"], v["reasoning_effort"]), ("gpt-6-luna", "xhigh"), slot)
 
-    def test_downgrade_and_fallback_rejected(self):
+    def test_any_model_allowed_but_no_silent_fallback(self):
+        ok = copy.deepcopy(REAL_CONFIG)
+        ok["worker"].update(model="gpt-6-sol", reasoning_effort="high")
+        ok["orchestrator"] = {"kind": "codex", "model": "gpt-6-sol", "effort": "xhigh"}
+        self.assertEqual(S.validate_config(ok), [])
         bad = copy.deepcopy(REAL_CONFIG)
-        bad["worker"]["reasoning_effort"] = "high"
-        self.assertTrue(any("xhigh" in e for e in S.validate_config(bad)))
+        bad["worker"]["kind"] = "notaprogram"
+        self.assertTrue(any("worker.kind" in e for e in S.validate_config(bad)))
+        bad = copy.deepcopy(REAL_CONFIG)
+        bad["worker"]["model"] = " "
+        self.assertTrue(any("worker.model must be set" in e for e in S.validate_config(bad)))
         bad = copy.deepcopy(REAL_CONFIG)
         bad["worker"]["fallback_model"] = "gpt-6.1-sol"
         self.assertTrue(any("fallback" in e for e in S.validate_config(bad)))
@@ -1022,6 +1040,64 @@ class TestFinish(WorkspaceBase):
         self.assertIn("not merged", self.s.store.load("r1")["finish"]["result"])
 
 
+class TestModels(Base):
+    def test_resolve_aliases_catalog_and_unverified(self):
+        self.assertEqual(M.resolve("opus")["model"], "claude-opus-5-5")
+        self.assertEqual(M.resolve("claude-sonnet-5-5")["kind"], "claude")
+        x = M.resolve("gpt-x-sol")
+        self.assertEqual((x["kind"], x["efforts"], x["verified"]), ("codex", ["low", "high", "ultra"], True))
+        self.assertEqual(M.resolve("gpt-hidden")["kind"], "codex")  # hidden models work when typed exactly
+        g = M.resolve("grok/grok-4")
+        self.assertEqual((g["kind"], g["model"], g["verified"]), ("grok", "grok-4", False))
+        self.assertIn("UNVERIFIED", g["note"])
+        self.assertIn("not in this kit's Claude list", M.resolve("claude-opus-9")["note"])
+
+    def test_unknown_model_shows_table(self):
+        with self.assertRaises(M.ModelError) as cm:
+            M.resolve("gpt-7")
+        for needle in ("gpt-x-sol", "claude-opus-5-5", "Unverified programs", "grok", "opencode"):
+            self.assertIn(needle, cm.exception.table)
+        self.assertNotIn("gpt-hidden", cm.exception.table)
+        with self.assertRaises(M.ModelError):
+            M.resolve("codex/not-a-model")
+
+    def test_effort(self):
+        x = M.resolve("gpt-x-sol")
+        self.assertEqual(M.check_effort(x, None), "high")
+        self.assertEqual(M.check_effort(x, "ultra"), "ultra")
+        with self.assertRaisesRegex(M.ModelError, "low, high, ultra"):
+            M.check_effort(x, "xhigh")
+        self.assertEqual(M.check_effort(M.resolve("grok/grok-4"), "whatever"), "whatever")
+
+    def test_non_codex_worker_refused_at_dispatch(self):
+        self.cfg["worker"].update(kind="grok", model="grok-4")
+        self.s = self.new_scheduler()
+        self.s.create_run("r1", [self.task("T1", trivial=True)])
+        with self.assertRaisesRegex(S.SchedulerError, "Codex workers only"):
+            self.s.dispatch_ready("r1", launch="herdr")
+        self.assertEqual(self.s.store.load("r1")["tasks"]["T1"]["status"], "READY")  # nothing leased
+
+    def test_interactive_picker(self):
+        ws = Path(self.tmp.name) / "ws"
+        (ws / ".agent-system").mkdir(parents=True)
+        (ws / ".claude" / "agents").mkdir(parents=True)
+        (ws / ".claude" / "agents" / "scout.md").write_text("---\nname: scout\nmodel: x\neffort: low\n---\nbody\n")
+        (ws / ".agent-system" / "config.json").write_text(json.dumps(self.cfg))
+        rows = M.numbered()
+        n = lambda model: str(next(i for i, r in enumerate(rows, 1) if r["model"] == model))
+        keys = [n("claude-fable-5-1"), "",        # orchestrator: Fable, default effort
+                "", "",                           # scout: keep, keep
+                n("gpt-x-sol"), "3"]              # worker: gpt-x-sol, effort #3 = ultra
+        with mock.patch.object(K.sys.stdin, "isatty", return_value=True), \
+                mock.patch("builtins.input", side_effect=keys), mock.patch("builtins.print"):
+            self.assertEqual(K.main(["--workspace", str(ws)]), 0)
+        cfg = json.loads((ws / ".agent-system" / "config.json").read_text())
+        self.assertEqual(cfg["orchestrator"]["model"], "claude-fable-5-1")
+        self.assertEqual((cfg["worker"]["model"], cfg["worker"]["reasoning_effort"]), ("gpt-x-sol", "ultra"))
+        self.assertEqual(json.loads((ws / ".claude" / "settings.json").read_text())["model"], "claude-fable-5-1")
+        self.assertIn("model: claude-sonnet-5-5", (ws / ".claude" / "agents" / "scout.md").read_text())
+
+
 class TestInstall(Base):
     """scripts/install.sh (agent-kit) run for real against temp repos."""
     INSTALL = Path(__file__).resolve().parents[1] / "scripts" / "install.sh"
@@ -1186,6 +1262,33 @@ class TestInstall(Base):
         rc, out = self.verify(self.make_repo("mk", {"Makefile": "all:\n\t@exit 3\n"}))
         self.assertEqual(rc, 0, out)  # no C/C++ sources: the Makefile is not run
         self.assertNotIn("----- make", out)
+
+    def test_config_command_and_create_flags(self):
+        self.kit("create", "--folder=repo", "--model-worker=gpt-x-sol", "--effort-worker=low")
+        cfg_path = self.ws / ".agent-system" / "config.json"
+        self.assertEqual(json.loads(cfg_path.read_text())["worker"]["model"], "gpt-x-sol")
+        settings = self.ws / ".claude" / "settings.json"
+        self.assertEqual(json.loads(settings.read_text())["model"], "claude-opus-5-5")
+        out = self.kit("config", "--model-orchestrator=sonnet", "--effort-orchestrator=max", cwd=self.ws).stdout
+        self.assertIn("claude --model claude-sonnet-5-5 --effort max", out)
+        self.assertEqual(json.loads(settings.read_text())["model"], "claude-sonnet-5-5")
+        bad = self.kit("config", "--model-worker=gpt-7", cwd=self.ws, ok=False)
+        self.assertEqual(bad.returncode, 2)
+        self.assertIn("unknown model 'gpt-7'", bad.stderr)
+        self.assertIn("gpt-x-sol", bad.stderr)  # the table to choose from
+        self.assertIn("does not support effort", self.kit("config", "--effort-worker=xhigh", cwd=self.ws, ok=False).stderr)
+        self.assertIn("Claude Code subagent", self.kit("config", "--model-scout=gpt-x-sol", cwd=self.ws, ok=False).stderr)
+        out = self.kit("config", "--folder=repo", "--model-worker=grok/grok-4").stdout
+        self.assertIn("UNVERIFIED", out)
+        self.assertIn("Codex workers only until phase 2", out)
+        self.kit("config", "--model-scout=haiku", cwd=self.ws)
+        self.kit("update", cwd=self.ws)  # keeps the chosen scout model in the refreshed scout.md
+        scout = (self.ws / ".claude" / "agents" / "scout.md").read_text()
+        self.assertIn("model: claude-haiku-5-5", scout)
+        self.assertIn("effort: medium", scout)  # changing only the model keeps a supported effort
+        self.assertNotIn("kept existing", self.kit("update", cwd=self.ws).stdout)
+        self.assertIn("worker        grok", self.kit("config", "--show", cwd=self.ws).stdout)
+        self.assertEqual(self.repo_status(), "")
 
     def test_dry_run_writes_nothing(self):
         out = self.kit("create", "--folder=repo", "--dry-run").stdout

@@ -3,7 +3,8 @@
 
 When this session runs Claude Opus 5.5 and the user submits a coding request, you are the
 **orchestrator**: you decide what to build, plan a 1..3 task DAG, review, integrate, and report.
-Avoid bulk coding yourself; Codex workers (`gpt-6-luna`, `xhigh`) implement.
+Avoid bulk coding yourself; workers implement (program, model and effort: `.agent-system/config.json`,
+changed only by the user with `agent-kit config`).
 
 How to operate (details: `.agent-system/GUIDE.md`, `.agent-system/README.md`):
 1. Small, local change? Do it directly or as one `"trivial": true` task. Otherwise continue.

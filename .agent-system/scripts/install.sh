@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
 # agent-kit: copy the orchestration kit into a project workspace, or update one.
-#   agent-kit create [--folder=<repo>] [--dry-run]
+#   agent-kit create [--folder=<repo>] [--dry-run] [model options]
 #   agent-kit update [--folder=<repo>] [--dry-run] [--force-agent]
+#   agent-kit config [--folder=<repo>] [model options] [--show] [--list]
+#   model options: --model-orchestrator=M --effort-orchestrator=E --model-scout=M --effort-scout=E
+#                  --model-worker=M --effort-worker=E  (M: model or alias, or <program>/<model>)
 #   agent-kit [--dry-run] [--force-agent] <target-repo>    legacy in-repo mode (kit inside the repo)
 # <repo> is the repo folder (default: the current folder). The workspace is <repo>.workspace next
 # to it, linked back as <repo>.workspace/<repo> -> ../<repo>. A folder already named *.workspace
@@ -14,12 +17,15 @@ set -euo pipefail
 
 SELF="$(readlink -f "${BASH_SOURCE[0]}")"
 SRC="$(cd "$(dirname "$SELF")/../.." && pwd -P)"   # kit home: holds .agent-system/
-usage() { sed -n '2,12p' "$SELF" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,15p' "$SELF" | sed 's/^# \{0,1\}//'; }
 die() { echo "error: $*" >&2; exit 1; }
 
-CMD=""; DRY=0; FORCE_AGENT=0; FOLDER=""; TARGET=""
+CMD=""; DRY=0; FORCE_AGENT=0; FOLDER=""; TARGET=""; MODEL_ARGS=()
 while [ $# -gt 0 ]; do
   case "$1" in
+    --model-*=*|--effort-*=*) MODEL_ARGS+=("$1") ;;
+    --model-*|--effort-*) [ $# -ge 2 ] || die "$1 needs a value"; MODEL_ARGS+=("$1=$2"); shift ;;
+    --show|--list|--no-input) MODEL_ARGS+=("$1") ;;
     --folder=*) FOLDER="${1#--folder=}"; [ -n "$FOLDER" ] || die "--folder needs a value" ;;
     --folder) [ $# -ge 2 ] || die "--folder needs a value"; FOLDER="$2"; shift ;;
     --dry-run) DRY=1 ;;
@@ -27,7 +33,7 @@ while [ $# -gt 0 ]; do
     -h|--help) usage; exit 0 ;;
     -*) echo "unknown option: $1" >&2; usage >&2; exit 2 ;;
     *)
-      if [ -z "$CMD$TARGET" ] && { [ "$1" = create ] || [ "$1" = update ]; }; then CMD="$1"
+      if [ -z "$CMD$TARGET" ] && { [ "$1" = create ] || [ "$1" = update ] || [ "$1" = config ]; }; then CMD="$1"
       elif [ -z "$CMD$TARGET" ]; then TARGET="$1"
       else echo "unexpected argument: $1" >&2; exit 2
       fi ;;
@@ -35,14 +41,16 @@ while [ $# -gt 0 ]; do
   shift
 done
 [ -n "$CMD$TARGET" ] || { usage >&2; exit 2; }
-[ -z "$FOLDER" ] || [ -n "$CMD" ] || die "--folder only applies to create/update"
+[ -z "$FOLDER" ] || [ -n "$CMD" ] || die "--folder only applies to create/update/config"
+[ ${#MODEL_ARGS[@]} -eq 0 ] || [ "$CMD" = create ] || [ "$CMD" = config ] \
+  || die "model options only apply to create and config"
 
 do_() { if [ $DRY -eq 1 ]; then echo "[dry-run] $*"; else "$@"; fi; }
 repo_status() { git -C "$1" status --porcelain --untracked-files=all; }
 
 copy_kit() {  # copy_kit <dest>: kit code, docs, prompts, scripts, tests, templates (never config.json)
   do_ mkdir -p "$1/.agent-system" "$1/.claude/agents"
-  for item in scheduler.py README.md GUIDE.md docs prompts scripts tests templates; do
+  for item in scheduler.py models.py kitconfig.py README.md GUIDE.md docs prompts scripts tests templates; do
     [ -e "$SRC/.agent-system/$item" ] || continue
     do_ rm -rf "$1/.agent-system/$item"
     do_ cp -r "$SRC/.agent-system/$item" "$1/.agent-system/$item"
@@ -50,9 +58,18 @@ copy_kit() {  # copy_kit <dest>: kit code, docs, prompts, scripts, tests, templa
   [ $DRY -eq 1 ] || find "$1/.agent-system" -name __pycache__ -type d -prune -exec rm -rf {} + 2>/dev/null || true
 }
 
+same_but_model() {  # same_but_model <a> <b>: equal apart from model:/effort: lines (set by agent-kit config)
+  cmp -s <(grep -vE '^(model|effort):' "$1") <(grep -vE '^(model|effort):' "$2")
+}
+
+kitconfig() {  # kitconfig <workspace> [args]: choose / apply models (agent-kit config)
+  local ws="$1"; shift
+  PYTHONDONTWRITEBYTECODE=1 python3 "$SRC/.agent-system/kitconfig.py" --workspace "$ws" "$@"
+}
+
 install_agent() {  # install_agent <dest>
   local agent="$1/.claude/agents/scout.md"
-  if [ -f "$agent" ] && ! cmp -s "$agent" "$SRC/.claude/agents/scout.md" && [ $FORCE_AGENT -eq 0 ]; then
+  if [ -f "$agent" ] && ! same_but_model "$agent" "$SRC/.claude/agents/scout.md" && [ $FORCE_AGENT -eq 0 ]; then
     echo "kept existing .claude/agents/scout.md (differs; use --force-agent to replace)"
   else
     do_ cp "$SRC/.claude/agents/scout.md" "$agent"
@@ -206,15 +223,21 @@ PY
   merge_settings "$dest/.claude/settings.json" "$repo"
   merge_section "$dest/CLAUDE.md" "$SRC/.agent-system/templates/CLAUDE.section.md" orchestrator
   merge_section "$dest/AGENTS.md" "$SRC/.agent-system/templates/AGENTS.section.md" worker
+  if [ $DRY -eq 1 ]; then
+    echo "[dry-run] choose models (asked on a terminal, or from --model-* options)"
+  else
+    echo; echo "== models (change later with: agent-kit config)"
+    kitconfig "$dest" "${MODEL_ARGS[@]}" || die "model choice failed; fix it with: agent-kit config --folder=$dest"
+  fi
   check_repo_unchanged "$repo" "$before"
-  [ $DRY -eq 1 ] || python3 "$dest/.agent-system/scheduler.py" --workspace-root "$dest" pool show >/dev/null \
+  [ $DRY -eq 1 ] || PYTHONDONTWRITEBYTECODE=1 python3 "$dest/.agent-system/scheduler.py" --workspace-root "$dest" pool show >/dev/null \
     || die "the new workspace does not load: check $dest/.agent-system/config.json"
 
   echo
   echo "done. Next, in $dest:"
   echo "  1. fill in the TODOs at the top of CLAUDE.md; check gate commands and writable_dirs in .agent-system/config.json"
   echo "  2. .agent-system/scripts/doctor.sh"
-  echo "  3. start Herdr there and run: claude --model claude-opus-5-5"
+  echo "  3. start Herdr there and launch the orchestrator as shown above (\`agent-kit start\` arrives in phase 3)"
 }
 
 cmd_update() {
@@ -246,6 +269,7 @@ new, cur = (json.load(open(p)) for p in sys.argv[1:])
 missing = [k for k in new if k not in cur and k != "project"]
 print("kept .agent-system/config.json" + (f"; the kit template has new keys: {missing}" if missing else ""))
 PY
+  [ $DRY -eq 1 ] || kitconfig "$dest" --no-input >/dev/null  # re-apply chosen models to Claude files
   [ -z "$repo" ] || check_repo_unchanged "$repo" "$before"
   echo "done. Run .agent-system/scripts/doctor.sh in $dest"
 }
@@ -285,8 +309,16 @@ PY
   echo "commit the kit, then open the repo in Herdr and start Claude"
 }
 
+cmd_config() {
+  local dest repo_name
+  resolve_folder
+  [ -f "$dest/.agent-system/config.json" ] || die "$dest has no kit (.agent-system/config.json): use 'agent-kit create'"
+  kitconfig "$dest" "${MODEL_ARGS[@]}"
+}
+
 case "$CMD" in
   create) cmd_create ;;
   update) cmd_update ;;
+  config) cmd_config ;;
   *) cmd_legacy ;;
 esac

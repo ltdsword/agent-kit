@@ -5,7 +5,7 @@ Template for one Codex worker task. Create a copy with:
 which writes gen-tasks/<task-name>-<dd-mm-yy>.md without this block. Fill every section, then put
 the file's path in tasks.json as "packet".
 
-How to write for Codex gpt-6-luna (strong at implementation, weak at open-ended reasoning):
+How to write for the worker model (assume it is strong at implementation, weak at open-ended reasoning):
 - Make every decision yourself. The worker executes; it should never have to choose a design.
 - One step = one concrete edit: file, symbol, what changes. Give exact signatures, names, error
   messages and constants. Show a short code shape when the structure matters.

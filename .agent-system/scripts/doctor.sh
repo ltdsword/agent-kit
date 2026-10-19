@@ -2,8 +2,8 @@
 # Tooling / model / integration compatibility report for the orchestration scaffold.
 # Read-only: prints versions and runs `scheduler.py doctor`. Never installs or logs in.
 #   doctor.sh [--probe-codex]
-#   --probe-codex : one tiny live `codex exec` with the exact worker model/effort (read-only
-#                   sandbox, empty temp dir) to prove the account can use gpt-6-luna + xhigh.
+#   --probe-codex : one tiny live `codex exec` with the configured worker model/effort (read-only
+#                   sandbox, empty temp dir) to prove the account can use them (Codex workers only).
 set -uo pipefail
 PROBE=0
 [ "${1:-}" = "--probe-codex" ] && PROBE=1
@@ -48,22 +48,28 @@ if command -v codex >/dev/null && [ "$(uname -s)" = "Linux" ]; then
   fi
 fi
 
-if [ $PROBE -eq 1 ]; then
-  echo "== codex live probe (gpt-6-luna / xhigh)"
+read -r WKIND WMODEL WEFFORT < <(cd "$ROOT" && python3 -c 'import json
+w = json.load(open(".agent-system/config.json"))["worker"]
+print(w.get("kind", "codex"), w["model"], w.get("reasoning_effort") or "medium")' 2>/dev/null || echo "codex ? ?")
+
+if [ $PROBE -eq 1 ] && [ "$WKIND" != codex ]; then
+  echo "== codex live probe skipped: the worker program is $WKIND"
+elif [ $PROBE -eq 1 ]; then
+  echo "== codex live probe ($WMODEL / $WEFFORT)"
   TMPD="$(mktemp -d)"
-  out="$(cd "$TMPD" && timeout 240 codex exec --profile worker -m gpt-6-luna -c 'model_reasoning_effort="xhigh"' \
+  out="$(cd "$TMPD" && timeout 240 codex exec --profile worker -m "$WMODEL" -c "model_reasoning_effort=\"$WEFFORT\"" \
         -s read-only --skip-git-repo-check --json "Reply with exactly: OK" </dev/null 2>/dev/null)"
   rm -rf "$TMPD"
   if printf '%s' "$out" | grep -q '"type":"turn.completed"'; then
-    echo "   PASS: gpt-6-luna/xhigh request completed"
+    echo "   PASS: $WMODEL/$WEFFORT request completed"
   else
     # The error message is itself JSON inside the event; unwrap it when jq is available.
     msg="$(printf '%s\n' "$out" | jq -r 'select(.type=="turn.failed" or .type=="error")
            | (.error.message // .message) | (fromjson? | .error.message) // .' 2>/dev/null | tail -1)"
     echo "   FAIL: ${msg:-no completed turn (timeout or auth)}"
-    echo "   remedy: update the client first (\`codex update\`; older clients reject gpt-6-luna with a"
-    echo "           'not supported ... ChatGPT account' error), then check \`codex login status\`."
-    echo "           Do not change the worker model."
+    echo "   remedy: update the client first (\`codex update\`; older clients reject newer models with a"
+    echo "           'not supported ... ChatGPT account' error), check \`codex login status\`, or pick"
+    echo "           another model with \`agent-kit config --model-worker=...\`."
   fi
 fi
 

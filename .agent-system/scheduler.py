@@ -26,6 +26,9 @@ import time
 import tomllib
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import models as M  # noqa: E402  (model registry, same folder)
+
 SCHEMA_VERSION = 1
 SCRIPT_DIR = Path(__file__).resolve().parent
 DEFAULT_WORKSPACE_ROOT = SCRIPT_DIR.parent  # holds .agent-system/: config, state, task files
@@ -145,10 +148,13 @@ def validate_config(cfg: dict) -> list[str]:
             errors.append("limits.max_scout_rounds is fixed at 3 by policy")
         if limits["max_major_repairs"] < 0:
             errors.append("limits.max_major_repairs must be >= 0")
-        if worker["model"] != "gpt-6-luna":
-            errors.append(f"worker.model must be gpt-6-luna (got {worker['model']!r})")
-        if worker["reasoning_effort"] != "xhigh":
-            errors.append(f"worker.reasoning_effort must be xhigh (got {worker['reasoning_effort']!r})")
+        if worker.get("kind", "codex") not in M.KINDS:
+            errors.append(f"worker.kind {worker.get('kind')!r} is not a program Herdr can launch: {M.KINDS}")
+        if not str(worker.get("model") or "").strip():
+            errors.append("worker.model must be set (choose one with `agent-kit config`)")
+        orch = cfg.get("orchestrator", {})
+        if orch.get("kind", "claude") not in M.KINDS:
+            errors.append(f"orchestrator.kind {orch.get('kind')!r} is not a program Herdr can launch")
         if worker["sandbox"] == "danger-full-access":
             errors.append("worker.sandbox must not be danger-full-access")
         bad = set(cfg.get("decisions", {}).get("require_user_for", GATED_KINDS)) - set(GATED_KINDS)
@@ -955,8 +961,16 @@ class Scheduler:
             "The orchestrator captures your diff from the worktree and reviews it.",
         ])
 
+    def _require_codex_worker(self) -> None:
+        kind = self.cfg["worker"].get("kind", "codex")
+        if kind != "codex":
+            raise SchedulerError(f"worker.kind is {kind!r}, but this kit version launches Codex workers only "
+                                 "(other programs arrive in phase 2). Choose a Codex model: agent-kit config "
+                                 "--model-worker=<codex model>")
+
     def _launch_session(self, state: dict, wid: str, tid: str, text: str) -> None:
         """Fresh Codex session in a Herdr workspace this run owns (new task => fresh context)."""
+        self._require_codex_worker()
         self.herdr.require()
         w, t = state["workers"][wid], state["tasks"][tid]
         if w.get("herdr_workspace") and w.get("herdr_owner_run") == state["run_id"]:
@@ -973,12 +987,15 @@ class Scheduler:
         self.herdr.agent_prompt(name, text, self.cfg["herdr"]["prompt_ack_timeout_ms"])
 
     def manual_command(self, state: dict, tid: str, text: str) -> list[str]:
+        self._require_codex_worker()
         t = state["tasks"][tid]
         return ["codex", *self.codex_args(t["worktree"], state["run_id"]), text]
 
     def dispatch_ready(self, run_id: str, launch: str = "herdr", dry_run: bool = False) -> dict:
         if launch not in ("herdr", "none"):
             raise SchedulerError("--launch must be herdr or none")
+        if not dry_run:
+            self._require_codex_worker()
         result = {"dispatched": [], "skipped": {}, "quarantined": [], "errors": []}
         with self.txn(run_id) as state:
             if state["status"] != "RUNNING":
@@ -2032,9 +2049,22 @@ def doctor(workspace_root: Path) -> list[dict]:
     except SchedulerError as e:
         add("config", False, str(e))
         return checks
-    resolved = resolve_worker_settings(cfg)
-    bad = {s: v for s, v in resolved.items() if (v["model"], v["reasoning_effort"]) != ("gpt-6-luna", "xhigh")}
-    add("worker-resolution", not bad, f"all {len(resolved)} slots -> gpt-6-luna / xhigh" if not bad else str(bad))
+    for role, r in (("orchestrator", {**{"kind": "claude"}, **cfg.get("orchestrator", {})}),
+                    ("worker", {"kind": cfg["worker"].get("kind", "codex"), "model": cfg["worker"]["model"],
+                                "effort": cfg["worker"].get("reasoning_effort")})):
+        try:
+            entry = M.resolve(r["model"], r["kind"])
+            M.check_effort(entry, r.get("effort"))
+            if not entry["verified"]:
+                add(f"{role}-model", False, f"{r['kind']}/{r['model']}: {r['kind']} is UNVERIFIED with this kit", "warn")
+            else:
+                add(f"{role}-model", True, f"{r['kind']}/{r['model']} effort={r.get('effort') or '-'}"
+                    + (f" ({entry['note']})" if entry.get("note") else ""))
+        except M.ModelError as e:
+            add(f"{role}-model", False, f"{r['kind']}/{r['model']}: {e} (fix: agent-kit config)")
+    if cfg["worker"].get("kind", "codex") != "codex":
+        add("worker-launch", False, f"worker program {cfg['worker']['kind']} is not launched by this kit version "
+                                    "(Codex only until phase 2): dispatch will refuse", "fail")
     project = project_root_for(workspace_root, cfg)
     if project != workspace_root.resolve():  # workspace mode: the repo is project.path, never the workspace
         if not project.is_dir():
@@ -2081,31 +2111,21 @@ def doctor(workspace_root: Path) -> list[dict]:
         add("scout-agent", ok, f"model={fm.get('model')} effort={fm.get('effort')} tools={sorted(tools)}")
     else:
         add("scout-agent", False, f"missing {scout}")
-    codex_home = Path(os.environ.get("CODEX_HOME", Path.home() / ".codex"))
-    prof = codex_home / f"{cfg['worker']['profile']}.config.toml"
-    if prof.exists():
-        try:
-            data = tomllib.loads(prof.read_text())
-            ok = data.get("model") == "gpt-6-luna" and data.get("model_reasoning_effort") == "xhigh" \
-                and data.get("sandbox_mode") != "danger-full-access"
-            add("codex-profile", ok, f"{prof}: model={data.get('model')} effort={data.get('model_reasoning_effort')} "
-                                     f"sandbox={data.get('sandbox_mode')}")
-        except tomllib.TOMLDecodeError as e:
-            add("codex-profile", False, f"{prof}: {e}")
-    else:
-        add("codex-profile", False, f"{prof} missing (workers still pass -m/-c explicitly)", "warn")
-    cache = codex_home / "models_cache.json"
-    try:
-        models = json.loads(cache.read_text()).get("models", [])
-        luna = next((m for m in models if m.get("slug") == "gpt-6-luna"), None)
-        efforts = [e.get("effort", e) if isinstance(e, dict) else e
-                   for e in (luna or {}).get("supported_reasoning_levels", [])]
-        add("codex-model-catalog", bool(luna) and "xhigh" in efforts,
-            f"gpt-6-luna listed, efforts={efforts}" if luna else "gpt-6-luna not in cached catalog", "warn")
-        if any(m.get("slug") == "gpt-6.1-luna" for m in models):
-            add("gpt-6.1-luna-discovered", False, "gpt-6.1-luna now listed: validate before migrating workers", "warn")
-    except (OSError, json.JSONDecodeError):
-        add("codex-model-catalog", False, f"cannot read {cache}", "warn")
+    if cfg["worker"].get("kind", "codex") == "codex":
+        prof = M.codex_home() / f"{cfg['worker']['profile']}.config.toml"
+        if prof.exists():
+            try:
+                data = tomllib.loads(prof.read_text())
+                ok = data.get("sandbox_mode") != "danger-full-access"
+                add("codex-profile", ok, f"{prof}: sandbox={data.get('sandbox_mode')} (model and effort come from "
+                                         "config.json: workers get -m and model_reasoning_effort explicitly)")
+            except tomllib.TOMLDecodeError as e:
+                add("codex-profile", False, f"{prof}: {e}")
+        else:
+            add("codex-profile", False, f"{prof} missing (workers still pass -m/-c explicitly)", "warn")
+        if not M.codex_models():
+            add("codex-model-catalog", False, f"cannot read {M.codex_home() / 'models_cache.json'}: run Codex once",
+                "warn")
     return checks
 
 

@@ -14,7 +14,7 @@ You ──request──> Claude Opus 5.5 (orchestrator: plans, reviews, integrat
                    ▼
                  1-3 tasks ──> scheduler.py (leases, state machine, durable JSON)
                    ├─ worker-1 ┐
-                   ├─ worker-2 ├─ Codex gpt-6-luna @ xhigh, one Herdr pane + git worktree each
+                   ├─ worker-2 ├─ your chosen worker model (default Codex gpt-6-luna @ xhigh), one Herdr pane + git worktree each
                    └─ worker-3 ┘
                    ▼
                  review ─> cherry-pick onto agent/integration-<run> ─> quality gate
@@ -33,7 +33,7 @@ Claude asks with clickable choices (you get notified via Herdr / Remote Control)
 | You | - | Ask for a change, make the critical decisions, approve the merge and push |
 | Orchestrator | Claude Opus 5.5 (your Claude session) | Plans tasks, writes task files, reviews, integrates |
 | Scout | Claude Sonnet 5.5, read-only | Reads the codebase and reports evidence |
-| Workers 1-3 | Codex `gpt-6-luna`, `xhigh` | Write the code, each in its own git worktree |
+| Workers 1-3 | Codex, any model you choose (default `gpt-6-luna`, `xhigh`) | Write the code, each in its own git worktree |
 | Herdr | terminal multiplexer | Runs all agents; keeps them alive when you detach |
 | `scheduler.py` | Python stdlib CLI | Tracks who works on what and enforces the rules |
 
@@ -61,22 +61,20 @@ Claude asks with clickable choices (you get notified via Herdr / Remote Control)
 | Tool | Why | Check |
 |---|---|---|
 | Linux or macOS, `bash`, `git`, `python3` 3.11+ | scheduler and scripts (Python stdlib only, no pip installs) | `python3 --version` |
-| Claude Code with access to Opus 5.5 (Sonnet 5.5 for the scout) | orchestrator and scout | `claude --version` |
-| Codex CLI 0.163.0+, logged in, with access to `gpt-6-luna` | workers (older clients reject `gpt-6-luna`) | `codex --version`, `codex login status` |
+| Claude Code, logged in (any Claude model) | orchestrator and scout | `claude --version` |
+| Codex CLI 0.163.0+, logged in (any Codex model) | workers | `codex --version`, `codex login status` |
 | Herdr 0.9+ (terminal workspace manager for AI coding agents), with its Claude and Codex integrations | runs and shows the agents; live dispatch needs `HERDR_ENV=1` | `herdr status` |
 | `jq` (optional) | nicer error messages in `doctor.sh --probe-codex` | |
 
-**Model policy.** The scheduler accepts only `gpt-6-luna` at `xhigh` for workers and validates it
-(`validate_config()` in `scheduler.py`, plus `doctor`); there is deliberately no fallback setting.
-If you do not have that model, you have to change both checks in `scheduler.py` yourself. Every
-worker task runs at `xhigh`, which costs more and is slower than lower efforts.
+**Models.** You choose the program, model and effort for each role with `agent-kit config` (section 4):
+Claude Code and Codex are verified; every other program Herdr can launch is listed as **unverified**.
+Workers always use exactly the configured model and effort; there is deliberately no automatic
+fallback. Higher efforts cost more and are slower.
 
-**Codex worker profile.** Workers run with `codex --profile worker`. Create
-`~/.codex/worker.config.toml`:
+**Codex worker profile.** Codex workers run with `codex --profile worker` (the model and effort are
+passed explicitly from `config.json`). Create `~/.codex/worker.config.toml`:
 
 ```toml
-model = "gpt-6-luna"
-model_reasoning_effort = "xhigh"
 sandbox_mode = "workspace-write"
 approval_policy = "on-request"
 ```
@@ -192,6 +190,9 @@ agent-kit --help
 | `agent-kit create` | Same, run from inside the repo (the current folder is the repo; it must be the repo's top folder) |
 | `agent-kit update --folder=myrepo` | Bring `myrepo.workspace` up to the latest kit |
 | `agent-kit update` | Same, run from inside the workspace (a folder named `*.workspace` is taken as the workspace itself) or from inside the repo |
+| `agent-kit config --model-worker=gpt-6-sol --effort-worker=high` | Change a workspace's models (orchestrator, scout, worker); see "Choosing models" below |
+| `agent-kit config` | On a terminal: asks for each role (program → model → effort), picking from a numbered table |
+| `agent-kit config --show` / `--list` | Show the workspace's current roles / every known model |
 | `agent-kit <target-repo>` | Legacy: install the kit **inside** a repo you own (also edits its `.gitignore`) |
 
 | Flag | Meaning |
@@ -218,6 +219,35 @@ files and state, and a customized `scout.md`. It reports keys in the kit's confi
 `config.json` lacks.
 
 ---
+
+### Choosing models
+
+Each workspace has three roles. `agent-kit create` asks for them on a terminal (or takes the same
+`--model-*` / `--effort-*` options as `config`); change them any time with `agent-kit config`.
+
+| Role | What it does | Programs | Default |
+|---|---|---|---|
+| orchestrator | The main session: plans, reviews, integrates, asks you | Claude Code (verified); Codex and others recorded, launched by `agent-kit start` in a later version | `claude-opus-5-5`, `high` |
+| scout | Read-only research subagent | Claude Code only | `claude-sonnet-5-5`, `medium` |
+| worker | Implements the tasks | Codex (verified). Other programs are recorded but not launched yet | `gpt-6-luna`, `xhigh` |
+
+```bash
+agent-kit config --model-orchestrator=opus --effort-orchestrator=high
+agent-kit config --model-worker=gpt-6-sol --effort-worker=high
+agent-kit config --model-worker=grok/grok-4      # unverified program: <program>/<model>
+agent-kit config --list                          # every known model with its efforts
+```
+
+- **A model name is enough:** the program is worked out from it (Claude aliases `fable`, `opus`,
+  `sonnet`, `haiku` work too).
+- **Codex models and their efforts** come from Codex's own catalog (`~/.codex/models_cache.json`).
+- **Claude models** come from a list shipped with the kit; other `claude-*` names are accepted with a note.
+- **Unknown name or unsupported effort:** prints a numbered table to choose from; on a terminal you
+  type the number.
+- **Unverified programs** (agy, amp, cline, copilot, cursor, devin, droid, gemini, grok, hermes,
+  kilo, kimi, kiro, letta, maki, mastracode, muse, omp, opencode, pi, qodercli, qwen, i.e. every
+  agent Herdr supports apart from Claude Code and Codex) are typed as `<program>/<model>`. They are
+  not tested with this kit, their model names are not checked, and `doctor` warns about them.
 
 ## 5. Language detection
 
@@ -307,7 +337,7 @@ Most of these are run by Claude as orchestrator. The ones marked **you** are mea
 
 | Command | Who | What it does |
 |---|---|---|
-| `.agent-system/scripts/doctor.sh [--probe-codex]` | you | Tool versions, Herdr and Codex status, sandbox check, then `scheduler.py doctor`. `--probe-codex` makes one tiny live gpt-6-luna request |
+| `.agent-system/scripts/doctor.sh [--probe-codex]` | you | Tool versions, Herdr and Codex status, sandbox check, then `scheduler.py doctor`. `--probe-codex` makes one tiny live request with the configured Codex worker model |
 | `.agent-system/scripts/verify.sh [--quick] [--dir PATH]` | you / scheduler | Quality gate for the stacks in section 5. `--quick` = post-merge smoke test |
 
 ### Setup and inspection
@@ -417,7 +447,9 @@ needs in `worker.writable_dirs` (section 5).
 | Key | Meaning |
 |---|---|
 | `project.path` | The repo, relative to the workspace (e.g. `"myrepo"`). Absent = in-repo mode |
-| `worker.model` / `worker.reasoning_effort` | Fixed at `gpt-6-luna` / `xhigh` by policy (validated; no fallback) |
+| `orchestrator.kind/model/effort` | The main session's program, model and effort (set with `agent-kit config`; a Claude model is also written to `.claude/settings.json`) |
+| `scout.model/effort` | The Claude Code research subagent (also written to `.claude/agents/scout.md`) |
+| `worker.kind/model/reasoning_effort` | The workers' program, model and effort. Used exactly, never downgraded |
 | `worker.profile`, `sandbox`, `approval_policy` | Codex profile `worker`, `workspace-write`, `on-request` |
 | `worker.trust_worktree` | Mark the worker's own worktree as trusted so Codex skips its trust dialog |
 | `worker.writable_dirs` | Extra folders workers may write (build caches). `~`, `/`, `~/.ssh`, `~/.codex`, `~/.config`, ... are rejected |
@@ -469,7 +501,8 @@ agent-kit update --folder=~/Code/myrepo              # roll it out to each works
 |---|---|
 | `ls` in the workspace shows no `.agent-system` | It is hidden (starts with a dot): use `ls -A` |
 | `not running inside Herdr (HERDR_ENV != 1)` | Start Claude from a Herdr pane, or use `--launch none` and run the printed `codex` command |
-| `gpt-6-luna ... not supported when using Codex with a ChatGPT account` | Codex client too old: `codex update`, then `doctor.sh --probe-codex`. Don't change the worker model |
+| `... model is not supported when using Codex with a ChatGPT account` | Codex client too old: `codex update`, then `doctor.sh --probe-codex`; or choose another model with `agent-kit config` |
+| `agent-kit config`: "unknown model" | Pick from the table it prints (on a terminal, type the number), or use `<program>/<model>` for an unverified program |
 | Worker: `bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted` | Add the bubblewrap AppArmor profile (GUIDE.md Part 2, step 2) |
 | Worker's build fails on a lock file in `~/.gradle` (or another cache) | Add that cache folder to `worker.writable_dirs` |
 | Report says `committed: false`, `index.lock: Read-only file system` | Expected: the sandbox keeps `.git` read-only. Review, then `commit-task` |
