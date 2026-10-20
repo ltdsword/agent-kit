@@ -1505,6 +1505,27 @@ class TestInstall(Base):
         self.assertEqual(sh(self.repo, "git", "rev-list", "--count", "HEAD"), before)
         self.assertIn("only applies to create", self.kit("update", "--init-git", ok=False).stderr)
 
+    def test_version(self):
+        out = self.kit("--version").stdout
+        self.assertRegex(out, r"^agent-kit \S+ \(Git checkout: ")
+        kit_v = out.split()[1]
+        self.kit("create", "--folder=repo")
+        self.assertEqual((self.ws / ".agent-system" / "VERSION").read_text().strip(), kit_v)
+        self.assertIn("(up to date)", self.kit("--version", "--folder=repo").stdout)
+        (self.ws / ".agent-system" / "VERSION").write_text("0.0.1\n")
+        out = self.kit("-V", cwd=self.ws).stdout
+        self.assertIn("workspace " + str(self.ws.resolve()) + ": 0.0.1", out)
+        self.assertIn("agent-kit update", out)
+        self.kit("update", "--folder=repo")
+        self.assertIn("(up to date)", self.kit("--version", cwd=self.ws).stdout)
+        pkg = Path(self.tmp.name) / "pkg"  # an installed package: no .git, VERSION written at build time
+        pkg.mkdir()
+        sh(self.KIT, "cp", "-r", str(self.KIT / ".agent-system"), str(self.KIT / ".claude"), str(pkg))
+        (pkg / ".agent-system" / "VERSION").write_text("9.9.9\n")
+        p = subprocess.run(["bash", str(pkg / ".agent-system" / "scripts" / "install.sh"), "--version"],
+                           cwd=self.tmp.name, capture_output=True, text=True, stdin=subprocess.DEVNULL)
+        self.assertTrue(p.stdout.startswith("agent-kit 9.9.9 (package: "), p.stdout + p.stderr)
+
     def test_create_refusals(self):
         other = Path(self.tmp.name) / "repo-tools"
         other.mkdir()

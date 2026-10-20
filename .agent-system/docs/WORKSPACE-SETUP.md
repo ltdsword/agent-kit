@@ -171,6 +171,8 @@ orchestrator rules (for orchestrators other than Claude Code), and tells a worke
 `scripts/install.sh`, linked as `agent-kit`; see section 4. It finds the kit home from its own path
 (symlinks resolved), so it works from any folder. Without `create`/`update`, `agent-kit <repo>` is
 the legacy in-repo install (kit inside the repo, edits its `.gitignore`): own repos only.
+`agent-kit --version` shows the kit's version (the package's `VERSION`, or `git describe` in a Git
+checkout) and the version a workspace was last created/updated with (its `.agent-system/VERSION`).
 
 ### 6.4b agent-kit start and any program per role (built)
 `agent-kit start` opens Herdr for the workspace and launches the orchestrator with the configured

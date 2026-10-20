@@ -10,6 +10,7 @@
 #                  --model-worker=M --effort-worker=E  (M: model or alias, or <program>/<model>)
 #                  --num-worker=N  (parallel workers, 1..10; default 3)
 #   agent-kit [--dry-run] [--force-agent] [--init-git] <target-repo>   legacy: kit inside the repo
+#   agent-kit --version [--folder=<repo>]   the kit's version (and the version a workspace was updated to)
 # <repo> is the repo folder (default: the current folder). The workspace is <repo>.workspace next
 # to it, linked back as <repo>.workspace/<repo> -> ../<repo>. A folder already named *.workspace
 # is taken as the workspace itself, so `agent-kit update` also works from inside a workspace.
@@ -22,10 +23,10 @@ set -euo pipefail
 
 SELF="$(readlink -f "${BASH_SOURCE[0]}")"
 SRC="$(cd "$(dirname "$SELF")/../.." && pwd -P)"   # kit home: holds .agent-system/
-usage() { sed -n '2,20p' "$SELF" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,21p' "$SELF" | sed 's/^# \{0,1\}//'; }
 die() { echo "error: $*" >&2; exit 1; }
 
-CMD=""; DRY=0; FORCE_AGENT=0; FOLDER=""; TARGET=""; MODEL_ARGS=(); NO_ATTACH=0; FORCE=0; SESSION=""; INIT_GIT=0
+CMD=""; DRY=0; FORCE_AGENT=0; FOLDER=""; TARGET=""; MODEL_ARGS=(); NO_ATTACH=0; FORCE=0; SESSION=""; INIT_GIT=0; SHOW_VERSION=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --model-*=*|--effort-*=*|--num-worker=*) MODEL_ARGS+=("$1") ;;
@@ -41,6 +42,7 @@ while [ $# -gt 0 ]; do
     --force-agent) FORCE_AGENT=1 ;;
     --init-git) INIT_GIT=1 ;;
     -h|--help) usage; exit 0 ;;
+    --version|-V) SHOW_VERSION=1 ;;
     -*) echo "unknown option: $1" >&2; usage >&2; exit 2 ;;
     *)
       if [ -z "$CMD$TARGET" ] && { [ "$1" = create ] || [ "$1" = update ] || [ "$1" = config ] || [ "$1" = start ] || [ "$1" = continue ]; }; then CMD="$1"
@@ -50,14 +52,42 @@ while [ $# -gt 0 ]; do
   esac
   shift
 done
-[ -n "$CMD$TARGET" ] || { usage >&2; exit 2; }
-[ -z "$FOLDER" ] || [ -n "$CMD" ] || die "--folder only applies to create/update/config/start/continue"
+[ $SHOW_VERSION -eq 1 ] || [ -n "$CMD$TARGET" ] || { usage >&2; exit 2; }
+[ -z "$FOLDER" ] || [ -n "$CMD" ] || [ $SHOW_VERSION -eq 1 ] || die "--folder only applies to create/update/config/start/continue"
 [ ${#MODEL_ARGS[@]} -eq 0 ] || [ "$CMD" = create ] || [ "$CMD" = config ] \
   || die "model options only apply to create and config"
 [ $INIT_GIT -eq 0 ] || [ "$CMD" = create ] || [ -n "$TARGET" ] || die "--init-git only applies to create"
 
 do_() { if [ $DRY -eq 1 ]; then echo "[dry-run] $*"; else "$@"; fi; }
 repo_status() { git -C "$1" status --porcelain --untracked-files=all; }
+
+kit_version() {  # the kit home's version: VERSION (written into the apt package), else git describe
+  if [ "$(git -C "$SRC" rev-parse --show-toplevel 2>/dev/null)" = "$SRC" ]; then
+    git -C "$SRC" describe --tags --match 'v[0-9]*' --always --dirty 2>/dev/null | sed 's/^v//'
+  elif [ -f "$SRC/.agent-system/VERSION" ]; then
+    head -n1 "$SRC/.agent-system/VERSION"
+  else
+    echo unknown
+  fi
+}
+
+cmd_version() {  # agent-kit --version [--folder=<repo>]
+  local v from dest repo_name wv
+  v="$(kit_version)"
+  if [ "$(git -C "$SRC" rev-parse --show-toplevel 2>/dev/null)" = "$SRC" ]; then from="Git checkout"
+  elif [ -f "$SRC/.agent-system/VERSION" ]; then from="package"
+  else from="copy"; fi
+  echo "agent-kit $v ($from: $SRC)"
+  resolve_folder
+  [ -d "$dest/.agent-system" ] || return 0
+  if [ -f "$dest/.agent-system/VERSION" ]; then
+    wv="$(head -n1 "$dest/.agent-system/VERSION")"
+    if [ "$wv" = "$v" ]; then echo "workspace $dest: $wv (up to date)"
+    else echo "workspace $dest: $wv (the kit is $v: run 'agent-kit update' to bring it up to date)"; fi
+  else
+    echo "workspace $dest: unknown (made before versions were recorded: run 'agent-kit update')"
+  fi
+}
 
 copy_kit() {  # copy_kit <dest>: kit code, docs, prompts, scripts, tests, templates (never config.json)
   do_ mkdir -p "$1/.agent-system" "$1/.claude/agents"
@@ -67,6 +97,7 @@ copy_kit() {  # copy_kit <dest>: kit code, docs, prompts, scripts, tests, templa
     do_ cp -r "$SRC/.agent-system/$item" "$1/.agent-system/$item"
   done
   [ $DRY -eq 1 ] || find "$1/.agent-system" -name __pycache__ -type d -prune -exec rm -rf {} + 2>/dev/null || true
+  [ $DRY -eq 1 ] || kit_version > "$1/.agent-system/VERSION"  # which kit version this copy is
 }
 
 same_but_model() {  # same_but_model <a> <b>: equal apart from model:/effort: lines (set by agent-kit config)
@@ -409,6 +440,7 @@ cmd_start() {
   PYTHONDONTWRITEBYTECODE=1 exec python3 "$dest/.agent-system/kitstart.py" --workspace "$dest" ${args[@]+"${args[@]}"}
 }
 
+if [ $SHOW_VERSION -eq 1 ]; then cmd_version; exit 0; fi
 case "$CMD" in
   create) cmd_create ;;
   start|continue) cmd_start ;;

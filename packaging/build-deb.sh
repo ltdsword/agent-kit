@@ -28,6 +28,7 @@ pkg="$stage/agent-kit"
 mkdir -p "$pkg/DEBIAN" "$pkg/usr/bin" "$pkg/usr/share/agent-kit" "$pkg/usr/share/doc/agent-kit"
 git -C "$ROOT" archive HEAD .agent-system .claude/agents/scout.md README.md LICENSE \
   | tar -x -C "$pkg/usr/share/agent-kit"
+echo "$VERSION" > "$pkg/usr/share/agent-kit/.agent-system/VERSION"   # agent-kit --version
 ln -s ../share/agent-kit/.agent-system/scripts/install.sh "$pkg/usr/bin/agent-kit"
 cp "$ROOT/LICENSE" "$pkg/usr/share/doc/agent-kit/copyright"
 chmod -R u+rwX,go+rX,go-w "$pkg"   # 644/755 whatever the umask

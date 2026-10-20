@@ -36,7 +36,7 @@ User request -> orchestrator: configured program + model (default Claude Code, O
 | `prompts/architecture-readiness.md` | Planning gate checklist (a)-(e) |
 | `scripts/doctor.sh` | Tooling/model/integration report (`--probe-codex` for a live model check) |
 | `scripts/verify.sh` | Stack-detecting quality gate (`--quick` for post-merge smoke) |
-| `scripts/install.sh` | `agent-kit create/update/config/start [--folder=<repo>]`: create `<repo>.workspace` next to the repo with the kit, or refresh it (`docs/WORKSPACE-SETUP.md` section 4). `agent-kit <repo>`: legacy in-repo install |
+| `scripts/install.sh` | `agent-kit create/update/config/start [--folder=<repo>]`: create `<repo>.workspace` next to the repo with the kit, or refresh it (`docs/WORKSPACE-SETUP.md` section 4). `agent-kit <repo>`: legacy in-repo install. `agent-kit --version`: kit version (and the workspace's, in `.agent-system/VERSION`) |
 | `docs/WORKSPACE-SETUP.md` | Rule for work projects: tooling in `<repo>.workspace/`, repo via symlink (workspace mode) |
 | `docs/DECISION-HUB-PLAN.md` | Web dashboard + remote decisions: not planned for now (Remote Control covers it for Claude users); kept for a later version |
 | `templates/claude-settings.json` | Deny rules: Claude can't edit run state or decision files directly |

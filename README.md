@@ -113,7 +113,8 @@ agent-kit --help
 ```
 
 The kit is installed in `/usr/share/agent-kit`. `sudo apt upgrade` brings new versions; then run
-`agent-kit update` in each workspace to copy the new kit into it.
+`agent-kit update` in each workspace to copy the new kit into it. `agent-kit --version` shows the
+installed version (and, inside a workspace, whether it is behind).
 
 On Ubuntu 24.04+, Codex's sandbox also needs the AppArmor step under "Linux sandbox" above.
 
@@ -319,6 +320,7 @@ the same). Use that only for repos you own.
 agent-kit create [--folder=<repo>] [--dry-run] [--init-git]
 agent-kit update [--folder=<repo>] [--dry-run] [--force-agent]
 agent-kit [--dry-run] [--force-agent] [--init-git] <target-repo>      # legacy in-repo mode
+agent-kit --version [--folder=<repo>]
 agent-kit --help
 ```
 
@@ -335,6 +337,7 @@ agent-kit --help
 | `agent-kit start` | Open the workspace in Herdr and launch the orchestrator with its program, model and effort (from a normal terminal: starts Herdr if needed, then attaches) |
 | `agent-kit continue [--session=ID] [--force]` | Restart the orchestrator with the current config in the workspace's last active chat (inside or outside Herdr) |
 | `agent-kit <target-repo>` | Legacy: install the kit **inside** a repo you own (also edits its `.gitignore`) |
+| `agent-kit --version` (or `-V`) | Show the kit's version and where it comes from; inside a workspace (or with `--folder=<repo>`) also the version that workspace was last created/updated with, and whether it needs `agent-kit update` |
 
 | Flag | Meaning |
 |---|---|
@@ -718,6 +721,11 @@ repository to GitHub Pages (`https://ltdsword.github.io/agent-kit`):
 git push                                   # the release commit must be on main first
 git tag v0.2.0 && git push origin v0.2.0   # tests, builds, creates the GitHub release, publishes apt
 ```
+
+The tag is the version: the package gets `0.2.0` (written to `.agent-system/VERSION` in the package),
+and `agent-kit --version` shows it. From a Git checkout, `--version` shows `git describe` instead:
+`0.2.0` on the tag, `0.2.0-3-gc7afc20` three commits after it, `-dirty` with uncommitted changes.
+Each workspace records the version it was created or last updated with in `.agent-system/VERSION`.
 
 The tag run (job `release`) tests, builds the `.deb` and creates the GitHub release, then starts the
 workflow again on `main` (job `pages`), which signs and deploys the repository with every released
