@@ -88,7 +88,7 @@ Test with `codex sandbox -- sh -c 'echo ok'`.
 Clone the kit anywhere (the examples below use `~/Code`) and put `agent-kit` on your PATH:
 
 ```bash
-git clone <this-repo-url> ~/Code/agent-kit
+git clone git@github.com:ltdsword/agent-kit.git ~/Code/agent-kit
 mkdir -p ~/.local/bin
 ln -s ~/Code/agent-kit/.agent-system/scripts/install.sh ~/.local/bin/agent-kit   # ~/.local/bin must be on PATH
 agent-kit --help
