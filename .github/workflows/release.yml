@@ -1,7 +1,9 @@
-# Release: on a version tag (git tag v0.2.0 && git push origin v0.2.0) test, build the .deb,
-# attach it to a GitHub release, and publish the signed apt repository (every released version)
-# to GitHub Pages. Run it by hand (Actions -> release -> Run workflow) to republish the repository
-# without a new release.
+# Release: on a version tag (git tag v0.2.0 && git push origin v0.2.0) test, build the .deb and
+# attach it to a GitHub release; then start this workflow again on main to publish the signed apt
+# repository (every released version) to GitHub Pages. Pages only accepts deploys from main (the
+# github-pages environment's default rule), so the deploy never runs on the tag itself.
+# Run it by hand (Actions -> release -> Run workflow, on main) to republish the repository without
+# a new release.
 # Needs: Settings -> Pages -> Source "GitHub Actions"; secret APT_SIGNING_KEY (armored private key,
 # gpg --armor --export-secret-keys); optional secret APT_SIGNING_PASSPHRASE.
 name: release
@@ -13,19 +15,18 @@ on:
 
 permissions:
   contents: write
+  actions: write
   pages: write
   id-token: write
 
 concurrency:
-  group: release
+  group: release-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
   release:
+    if: github.ref_type == 'tag'
     runs-on: ubuntu-latest
-    environment:
-      name: github-pages
-      url: ${{ steps.deploy.outputs.page_url }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -38,14 +39,26 @@ jobs:
           python3 -m unittest discover -s .agent-system/tests -q
 
       - name: Build the .deb
-        if: github.ref_type == 'tag'
         run: packaging/build-deb.sh "${GITHUB_REF_NAME#v}" dist
 
       - name: Publish the GitHub release
-        if: github.ref_type == 'tag'
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh release create "$GITHUB_REF_NAME" dist/*.deb --title "$GITHUB_REF_NAME" --generate-notes
+
+      - name: Publish the apt repository (runs this workflow on main)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run release.yml --ref "${{ github.event.repository.default_branch }}"
+
+  pages:
+    if: github.ref_type == 'branch'
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
 
       - name: Collect every released .deb
         env:

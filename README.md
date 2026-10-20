@@ -601,16 +601,32 @@ agent-kit update --folder=~/Code/myrepo              # roll it out to each works
 
 `packaging/build-deb.sh` builds `agent-kit_<version>_all.deb` from the last commit (`git archive`, so
 uncommitted and untracked files never ship); `packaging/build-apt-repo.sh` turns the released `.deb`
-files into a signed apt repository; `.github/workflows/release.yml` does both on a version tag and
-publishes the repository to GitHub Pages (`https://ltdsword.github.io/agent-kit`):
+files into a signed apt repository; `.github/workflows/release.yml` runs both and publishes the
+repository to GitHub Pages (`https://ltdsword.github.io/agent-kit`):
 
 ```bash
+git push                                   # the release commit must be on main first
 git tag v0.2.0 && git push origin v0.2.0   # tests, builds, creates the GitHub release, publishes apt
 ```
+
+The tag run (job `release`) tests, builds the `.deb` and creates the GitHub release, then starts the
+workflow again on `main` (job `pages`), which signs and deploys the repository with every released
+version. The deploy runs on `main` because GitHub Pages only accepts deploys from the default branch
+(the `github-pages` environment's default rule); a deploy started from the tag fails with "Tag ... is
+not allowed to deploy to github-pages due to environment protection rules". To republish the
+repository without a new release: Actions → release → Run workflow (on `main`).
 
 One-time setup: Settings → Pages → Source "GitHub Actions", and a repository secret
 `APT_SIGNING_KEY` holding the signing key (`gpg --armor --export-secret-keys <key-id>`; optional
 secret `APT_SIGNING_PASSPHRASE`). Keep the same key forever: users trust it once in `setup.sh`.
+Free GitHub Pages needs a public repository.
+
+| Release problem | Fix |
+|---|---|
+| "not allowed to deploy to github-pages due to environment protection rules" | The deploy ran on a tag (an older workflow). Use the current workflow, or add a `v*` tag rule in Settings → Environments → github-pages |
+| `secret APT_SIGNING_KEY is not set` | Add the secret (above), then Actions → release → Run workflow on `main` |
+| `gh release create` fails: release already exists | The tag was released before; tag a new version, or delete that release first |
+| Pages job fails at `configure-pages` | Settings → Pages → Source is not "GitHub Actions", or the repository is private on a free plan |
 
 ---
 
