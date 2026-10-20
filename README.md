@@ -694,6 +694,7 @@ Free GitHub Pages needs a public repository.
 | Release problem | Fix |
 |---|---|
 | "not allowed to deploy to github-pages due to environment protection rules" | The deploy ran on a tag (an older workflow). Use the current workflow, or add a `v*` tag rule in Settings → Environments → github-pages |
+| Step "Test" fails | Run the tests locally (`python3 -m unittest discover -s .agent-system/tests`); they must not depend on your machine (the runner has no `claude`, `codex` or `herdr`: the tests put stub programs on PATH). Fix, commit, push, and tag a new version |
 | `secret APT_SIGNING_KEY is not set` | Add the secret (above), then Actions → release → Run workflow on `main` |
 | `gh release create` fails: release already exists | The tag was released before; tag a new version, or delete that release first |
 | Pages job fails at `configure-pages` | Settings → Pages → Source is not "GitHub Actions", or the repository is private on a free plan |

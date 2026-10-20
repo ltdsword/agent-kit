@@ -29,6 +29,25 @@ def sh(cwd, *args):
     return subprocess.run(list(args), cwd=cwd, check=True, capture_output=True, text=True).stdout.strip()
 
 
+_PATH = os.environ.get("PATH", "")
+_STUBS = tempfile.TemporaryDirectory()
+
+
+def setUpModule():
+    """Dispatch refuses a worker program that is not on PATH: give the default programs stub
+    executables, so the tests pass on machines without them (CI)."""
+    for prog in ("codex", "claude"):
+        stub = Path(_STUBS.name) / prog
+        stub.write_text("#!/bin/sh\nexit 0\n")
+        stub.chmod(0o755)
+    os.environ["PATH"] = f"{_STUBS.name}{os.pathsep}{_PATH}"
+
+
+def tearDownModule():
+    os.environ["PATH"] = _PATH
+    _STUBS.cleanup()
+
+
 class FakeHerdr(S.Herdr):
     def __init__(self):
         super().__init__(binary="herdr-fake")
