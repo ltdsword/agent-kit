@@ -17,7 +17,7 @@ You ──request──> orchestrator: any program + model you choose (default C
                    ├─ worker-2 ├─ any program + model you choose (default Codex gpt-6-luna @ xhigh), one Herdr pane + git worktree each
                    └─ worker-3 ┘
                    ▼
-                 review ─> cherry-pick onto agent/integration-<run> ─> quality gate
+                 review ─(errors + proposed fix ─> same worker, max 2 fix rounds)─> cherry-pick onto agent/integration-<run> ─> quality gate
                    ▼
                  final report + one total diff  (.orchestrator/runs/<run>/final-report.md, final.diff)
                    ▼
@@ -117,7 +117,25 @@ agent-kit start                              # opens Herdr and launches the orch
 
 `agent-kit start` works from a normal terminal (it starts Herdr if needed and attaches you) or inside
 Herdr (it opens the project in a new Herdr workspace). Running it again switches to the running
-orchestrator instead of starting a second one. Then type a request, for example:
+orchestrator instead of starting a second one.
+
+**Continuing the last chat:** `agent-kit continue` restarts the orchestrator with the current config
+(after `agent-kit config`) in the **last active chat** of this workspace, so the conversation carries on
+with the new model and effort. It works from anywhere: inside Herdr, or from a plain terminal when Herdr
+isn't running (it starts Herdr, then resumes the chat there).
+- **Where the chat id is kept:** `.orchestrator/orchestrator.json` in the workspace. It is updated every
+  time a chat in the workspace is active: a Claude Code hook (`.agent-system/scripts/record-session.py`,
+  installed in `.claude/settings.json`) records the chat id whenever a session starts, resumes, is
+  cleared, or gets a prompt. `agent-kit start`, `config` and `continue` record it too (for Codex they ask Herdr).
+- **A running orchestrator** is closed first, but only while it is idle (`--force` interrupts a busy
+  one). `--session=<id>` resumes a different chat.
+- **Resuming** works for Claude Code (`claude --resume <id>`) and Codex (`codex resume <id>`); other
+  programs start a new chat.
+- Claude Code finds a chat by the folder it was started in. A chat started in another folder (e.g. a
+  plain `claude` run from your home folder that later moved into the workspace) may not be found;
+  `continue` warns about it.
+
+Then type a request, for example:
 
 > Add input validation to `registerUser`: reject empty names and malformed emails with a clear
 > error in `RegisterUserResp`, and add unit tests. Use the multi-agent workflow.
@@ -145,7 +163,7 @@ and push, and into which branch (section 6).
     ├── .agent-system/                # copy of the kit; config.json has "project": {"path": "myrepo"}
     ├── gen-tasks/                    # one task file per worker task (plan, result, review, outcome)
     ├── .orchestrator/                # runtime state, reports, diffs, decisions, logs
-    ├── worktrees/                    # worker-1..3 and integration-<run> (git worktrees of the repo)
+    ├── worktrees/                    # worker-1..N and integration-<run> (git worktrees of the repo)
     ├── notes/                        # your own notes
     └── .gitignore                    # in case you `git init` the workspace (local only)
 ```
@@ -209,6 +227,7 @@ agent-kit --help
 | `agent-kit config` | On a terminal: asks for each role (program → model → effort), picking from a numbered table |
 | `agent-kit config --show` / `--list` | Show the workspace's current roles / every known model |
 | `agent-kit start` | Open the workspace in Herdr and launch the orchestrator with its program, model and effort (from a normal terminal: starts Herdr if needed, then attaches) |
+| `agent-kit continue [--session=ID] [--force]` | Restart the orchestrator with the current config in the workspace's last active chat (inside or outside Herdr) |
 | `agent-kit <target-repo>` | Legacy: install the kit **inside** a repo you own (also edits its `.gitignore`) |
 
 | Flag | Meaning |
@@ -218,6 +237,7 @@ agent-kit --help
 | `--force-agent` | Replace a customized `.claude/agents/scout.md` with the kit's version |
 | `--model-orchestrator=M`, `--model-scout=M`, `--model-worker=M` | (`create`, `config`) Model per role: an ID or alias, or `<program>/<model>` for an unverified program |
 | `--effort-orchestrator=E`, `--effort-scout=E`, `--effort-worker=E` | (`create`, `config`) Effort per role; must be one the model supports |
+| `--num-worker=N` | (`create`, `config`) Number of parallel workers, 1..10 (default 3); a request may then have up to N tasks |
 | `--show`, `--list` | (`config`) Show the workspace's roles / every known model with its efforts |
 | `--no-input` | (`create`, `config`) Never prompt; fail on an unknown model instead of asking |
 | `--no-attach` | (`start`) Don't attach to Herdr afterwards |
@@ -264,7 +284,23 @@ agent-kit config --model-orchestrator=opus --effort-orchestrator=high
 agent-kit config --model-worker=gpt-6-sol --effort-worker=high
 agent-kit config --model-worker=grok/grok-4      # unverified program: <program>/<model>
 agent-kit config --list                          # every known model with its efforts
+agent-kit config --num-worker=5                  # 5 parallel workers (1..10), up to 5 tasks per request
 ```
+
+More workers finish big requests sooner, but each one is another worker session and another task for
+the orchestrator to review, so usage grows with it. The orchestrator still plans as few tasks as the
+request needs.
+
+**When a change takes effect** (Herdr never needs a restart):
+
+| What you changed | Takes effect | What to do |
+|---|---|---|
+| Worker model / effort / program | The next worker session the scheduler starts (new task, `relaunch`, `repair --relaunch`) | Nothing. Workers already running keep their model; a fix round sent into a running session too |
+| `--num-worker` | The next run (`run create` saves the worker slots in the run) | Nothing. In a run already going, a lower number caps how many run at once; a higher one waits for the next run |
+| Orchestrator model / effort | A new orchestrator session (Claude Code reads `.claude/settings.json` at start) | `agent-kit continue` (same chat, new model), or `/model <model>` in the running session |
+| Scout model | A new orchestrator session (agent files are read at start) | `agent-kit continue` |
+| Kit rules (`agent-kit update`: `CLAUDE.md`, `AGENTS.md`) | A new orchestrator session | `agent-kit continue`, or tell the running one to re-read `CLAUDE.md` |
+| Gate commands, decision rules, limits in `config.json` | The next scheduler command | Nothing |
 
 - **A model name is enough:** the program is worked out from it (Claude aliases `fable`, `opus`,
   `sonnet`, `haiku` work too).
@@ -409,12 +445,18 @@ Most of these are run by Claude as orchestrator. The ones marked **you** are mea
 
 ### Review and repair
 
+The review loop: Claude reviews each task (and the merge). On an error it writes the errors and a
+proposed fix, sends them to the worker that did the task, and reviews the fix: at most 2 fix rounds per
+task. The errors and fixes are copied into the task file in `gen-tasks/`, so you can see every problem.
+After round 2 there is no further review round: the task is merged, and anything still wrong is listed
+as a known issue in the final report before you answer the merge question.
+
 | Command | What it does |
 |---|---|
 | `S collect --run R --task T` | Check the worker report against git; save the diff to `.orchestrator/runs/R/reports/T.diff` and append it to the task file |
 | `S commit-task --run R --task T -m "msg" [--allow-outside --decision D<n>]` | Audited commit of an uncommitted worker diff or a minor fix (the sandbox keeps `.git` read-only) |
-| `S mark-reviewed --run R --task T --verdict PASS\|MINOR_FIX\|MAJOR_FIX\|BLOCKED\|FAIL --report FILE [--notes ..] [--accept-scope --decision D<n>]` | Record the verdict; the report is appended to the task file |
-| `S repair --run R --task T --packet FILE (--reason "evidence" \| --decision D<n>) [--relaunch]` | Send a repair to the same worker. First repair: routine (reason). Later ones: your decision |
+| `S mark-reviewed --run R --task T --verdict PASS\|MINOR_FIX\|MAJOR_FIX\|BLOCKED\|FAIL --report FILE [--notes ..] [--known-issues ..] [--accept-scope --decision D<n>]` | Record the verdict; the report is appended to the task file. After the 2nd fix round: PASS with `--known-issues` (no further review round) |
+| `S repair --run R --task T --packet FILE (--reason "evidence" \| --decision D<n>) [--relaunch]` | Fix round: errors + proposed fix to the same worker, copied into the task file. Max 2 rounds, both Claude's call (reason) |
 | `S task-unblock --run R --task T --decision D<n> [--reset-repairs] [--note ..]` | BLOCKED -> PENDING after re-scoping (needs your decision) |
 | `S worker-release --run R --worker worker-N` | Return an inspected, clean BLOCKED/BROKEN slot to IDLE |
 
@@ -443,7 +485,7 @@ Most of these are run by Claude as orchestrator. The ones marked **you** are mea
 
 ### Task states
 
-Tasks: `PENDING -> READY -> RUNNING -> REVIEW -> PASSED -> MERGED`, plus `FIX_REQUIRED` (repair loop),
+Tasks: `PENDING -> READY -> RUNNING -> REVIEW -> PASSED -> MERGED`, plus `FIX_REQUIRED` (review loop: max 2 fix rounds per task),
 `BLOCKED`, `FAILED`. Workers: `IDLE`, `BUSY`, `BLOCKED` (quarantined dirty worktree), `BROKEN`.
 Runs: `RUNNING`, `DONE`, `BLOCKED`, `FAILED`; a DONE run then records its `finish` outcome (merged into,
 pushed to, or not merged). One run is active at a time.
@@ -455,7 +497,7 @@ pushed to, or not merged). One run is active at a time.
 **You decide (critical)**. Claude opens a decision and asks you with clickable choices (plus "Other"
 to type), and waits for your answer. Only these reach you:
 
-- unblocking a BLOCKED task, or a 2nd+ repair of the same task;
+- unblocking a BLOCKED task (including one that still fails to merge after its 2 fix rounds);
 - accepting changes outside a task's owned paths; giving up a task (FAIL) or a run;
 - any change to requirements, scope, acceptance criteria, public APIs/schemas, dependencies,
   security-sensitive behavior, data or migrations, or anything irreversible;
@@ -466,7 +508,7 @@ to type), and waits for your answer. Only these reach you:
 - **merging and pushing the result** (`finish ask`): always yours, whatever `decisions.require_user_for` says.
 
 **Claude decides (routine)**, with a recorded reason (`decision routine`): approving a worker's command
-inside its worktree that the task allows (build, test, read-only), the first repair of a task with clear evidence,
+inside its worktree that the task allows (build, test, read-only), fix rounds 1 and 2 of a task with clear evidence (errors + proposed fix sent to the same worker),
 minor fixes, re-collecting after a report-format error, relaunching a lost session, correcting its own
 plan steps without changing goal, acceptance or owned paths.
 
@@ -496,9 +538,9 @@ needs in `worker.writable_dirs` (section 5).
 | `worker.writable_dirs` | Extra folders workers may write (build caches). `~`, `/`, `~/.ssh`, `~/.codex`, `~/.config`, ... are rejected |
 | `pool.size` / `pool.slots` | 1-3 worker slots |
 | `pool.worktree_root` | Where worktrees go: `worktrees` (workspace mode) or `../{repo_name}.agent-worktrees` (in-repo) |
-| `limits` | Max 3 tasks per request, parallelism, `max_major_repairs` (2), scout rounds (fixed at 3) |
+| `limits` | Max 3 tasks per request, parallelism, `max_major_repairs` (2 fix rounds per task), scout rounds (fixed at 3) |
 | `decisions.require_user_for` | Decision kinds that need you: `blocker`, `repair`, `scope_exception`, `abandon` |
-| `decisions.routine_repairs` | How many repairs per task Claude may send on its own (default 1) |
+| `decisions.routine_repairs` | How many fix rounds per task Claude may send on its own (default 2, i.e. all of them) |
 | `tasks.dir`, `tasks.inline_diff_max_lines` | Task file folder (`gen-tasks`) and how much diff is inlined into it |
 | `herdr.*_timeout_ms` | Agent start and prompt acknowledgement timeouts |
 | `gate.post_merge_check`, `gate.verify_cmd`, `gate.timeout_seconds` | Commands for the post-merge check and the final gate |
@@ -527,7 +569,7 @@ agent-kit update --folder=~/Code/myrepo              # roll it out to each works
 | `scheduler.py` | Scheduler CLI: DAG, leases, state machines, research gate, decisions, git/Herdr wrappers |
 | `models.py` | Model registry: the programs Herdr can launch (Claude Code and Codex verified, the rest unverified), Claude model list, Codex catalog, effort checks, the pick-from table |
 | `kitconfig.py` | `agent-kit config`: choose program, model and effort per role; writes config, Claude settings and the scout file |
-| `kitstart.py` | `agent-kit start`: open Herdr and launch the orchestrator |
+| `kitstart.py` | `agent-kit start` / `continue`: open Herdr and launch (or resume) the orchestrator |
 | `WORKER-RULES.md` | Rules every worker reads, whatever its program |
 | `config.json` | Config template (no `project`; `create` fills it in; default models per role) |
 | `prompts/` | Task and repair file templates, review checklist, research packet, readiness gate |
@@ -593,7 +635,7 @@ Inside `.agent-system/` (copied into every workspace):
 
   All of these are covered by offline tests only.
 - **Platform:** developed on Linux (Ubuntu). macOS should work but is untested; Windows is not supported.
-- **One active run at a time** per workspace; at most 3 workers and 3 tasks per request.
+- **One active run at a time** per workspace; at most 10 workers (`--num-worker`, default 3) and as many tasks per request.
 - **Using it on code you don't own:** check your team's policy on AI tools and on sending code to
   model providers before you start (`docs/WORKSPACE-SETUP.md`, rule 7).
 

@@ -27,9 +27,9 @@
     "max_scout_rounds": 3
   },
   "decisions": {
-    "_comment": "Critical kinds: the user decides (--decision <id>, answered in chat and recorded with decision record --quote). The first routine_repairs repairs of a task are routine: Opus decides with --reason, recorded in the task file. A kind removed from require_user_for becomes routine.",
+    "_comment": "Critical kinds: the user decides (--decision <id>, answered in chat and recorded with decision record --quote). The first routine_repairs fix rounds of a task are routine (default 2 = every fix round; limits.max_major_repairs caps the rounds): Opus decides with --reason, recorded in the task file. A kind removed from require_user_for becomes routine.",
     "require_user_for": ["blocker", "repair", "scope_exception", "abandon"],
-    "routine_repairs": 1
+    "routine_repairs": 2
   },
   "tasks": {
     "dir": "gen-tasks",

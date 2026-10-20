@@ -7,7 +7,7 @@ If you were started by `scheduler.py` as a **worker**, this section is not for y
 `.agent-system/WORKER-RULES.md` and your task file instead.
 
 When the user submits a coding request in this workspace, you are the **orchestrator** (whatever
-program and model run this session): you decide what to build, plan a 1..3 task DAG, review,
+program and model run this session): you decide what to build, plan a task DAG (at most `limits.max_tasks_per_request` tasks, set with `agent-kit config --num-worker`; as few as the request needs), review,
 integrate, and report. Avoid bulk coding yourself; workers implement (program, model and effort:
 `.agent-system/config.json`, changed only by the user with `agent-kit config`).
 
@@ -31,8 +31,14 @@ How to operate (details: `.agent-system/GUIDE.md`, `.agent-system/README.md`):
    diff to `.orchestrator/runs/<run>/reports/<T>.diff` and appends a "Worker result" section (with
    the diff) to the task file. Review per `prompts/review-checklist.md`, write the review report to
    a file, then `commit-task` if uncommitted and `mark-reviewed --verdict ... --report <file>`: the
-   verdict and report are appended to the end of the task file. Then `repair` (same worker, max 2;
-   repair file via `task new --repair-of`) or `integrate` -> `verify`.
+   verdict and report are appended to the end of the task file. Then `integrate` -> `verify`.
+   **Review loop, max 2 fix rounds per task** (review finding, failing test, merge conflict or a
+   post-merge failure caused by the task): `task new --repair-of <task file>`, fill in "Errors found"
+   (exact location + evidence) and "Proposed fix", then `repair ... --reason "<evidence>"`: the SAME
+   worker fixes it, and the errors and fix are copied into the task file so the user sees them. Then
+   `wait` -> `collect` -> review again. After round 2 there is no further review round: accept with
+   `mark-reviewed --verdict PASS --known-issues "<what is still wrong>"` (listed in the final report)
+   and continue to merge; if it cannot merge (conflict or failing check), it is BLOCKED: ask the user.
 5. Finish (run DONE): write a short summary to a file, then `scheduler.py report --run <run> --summary
    <file>`: it writes `.orchestrator/runs/<run>/final-report.md` and one total diff `final.diff`, so the
    user never has to compare worktrees. In chat, give the summary (what changed, tasks/commits, gate
@@ -51,7 +57,7 @@ How to operate (details: `.agent-system/GUIDE.md`, `.agent-system/README.md`):
 **Problems: the user holds the critical decisions; you handle the routine ones.**
 
 Critical (the user decides; never resolve alone):
-- a task is BLOCKED (unblocking it), or a 2nd+ repair of the same task;
+- a task is BLOCKED (unblocking it), including one that still fails to merge after its 2 fix rounds;
 - accepting changes outside owned paths; giving up a task (FAIL) or a run (`run close`);
 - any change to requirements, scope, acceptance criteria, public contracts/APIs/schemas,
   dependencies, security-sensitive behavior, data or migrations, or anything irreversible;
@@ -65,9 +71,9 @@ Routine (you decide, with a recorded reason): a worker approval prompt for a com
 worktree that the task's Boundaries allow (build, test, read-only): read it with `herdr agent read
 <agent> --source visible`, approve once with `herdr agent send-keys`, then `scheduler.py decision
 routine --run <run> --kind worker_approval --task <T> --action "approved <command>" --reason "<why>"`;
-the first repair of a task with clear evidence
+fix rounds 1 and 2 of a task with clear evidence
 (failing test, review finding, mechanical merge conflict, post-merge failure caused by the task)
-via `repair ... --reason "<evidence>"`; MINOR_FIX; re-collect after a report-format error;
+via `repair ... --reason "<evidence>"`, unless the fix changes requirements, scope or contracts; MINOR_FIX; re-collect after a report-format error;
 `relaunch` of a lost session; correcting your own plan steps without changing goal, acceptance,
 or owned paths. The scheduler records each routine call in the task file; list them in your report.
 

@@ -28,7 +28,8 @@ a "Worker result" section (status, files, tests, diffstat, inline diff when shor
 |---|---|---|
 | PASS | everything above holds, tests actually pass | `commit-task` (if uncommitted) -> `mark-reviewed PASS` -> `integrate` |
 | MINOR_FIX | obvious, local, low-risk; Opus fixes in the task worktree | edit -> `commit-task` -> re-review -> PASS |
-| MAJOR_FIX | logic / API / security / test failure | `task new --repair-of <task file>` -> fill -> `repair` (same worker): 1st repair `--reason "<evidence>"` (routine), later repairs need the user's `--decision` |
+| MAJOR_FIX | logic / API / security / test failure (fix rounds left) | `task new --repair-of <task file>` -> fill "Errors found" + "Proposed fix" -> `repair --reason "<evidence>"` (same worker, routine; copied into the task file) -> `wait` -> `collect` -> review again. Max 2 fix rounds |
+| PASS + known issues | round 2 is used up and problems remain | `mark-reviewed --verdict PASS --known-issues "<what is still wrong>"`: no further review round; listed in the final report, the user decides the merge |
 | BLOCKED | missing credential / dependency / ambiguous requirement | critical: ask the user (`decision ask --kind blocker`), then `task-unblock --decision` |
 | FAIL | unrecoverable | critical: ask the user (`decision ask --kind abandon`), then `--decision` |
 

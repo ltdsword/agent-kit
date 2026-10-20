@@ -55,7 +55,7 @@ normally. Nothing else is written into the repo.
     ├── .agent-system/                  # the kit; config.json has "project": {"path": "thrift-demo"}
     ├── gen-tasks/                      # task files (plan, worker result, review, outcome)
     ├── .orchestrator/                  # runtime state, reports, diffs, decisions
-    ├── worktrees/                      # worker-1..3, integration-<run> (git worktrees of the repo)
+    ├── worktrees/                      # worker-1..N, integration-<run> (git worktrees of the repo)
     └── notes/                          # anything else you want to keep
 ```
 
@@ -87,7 +87,7 @@ repo's top folder) and creates the new folder `<repo>.workspace` next to it, wit
   Maven `~/.m2`, npm `~/.npm`, Go `~/go/pkg/mod`, Cargo `~/.cargo`, Conan `~/.conan2`, vcpkg
   `~/.cache/vcpkg`; Python, CMake and make need none). The detected stack and build/test command
   (e.g. `python3 -m pytest`, CMake + `ctest`, `make && make test`) go into the `CLAUDE.md` notes;
-- `.claude/agents/scout.md` and `.claude/settings.json` (deny rules + `additionalDirectories` = real repo path);
+- `.claude/agents/scout.md` and `.claude/settings.json` (deny rules, the chat-id hooks, `additionalDirectories` = real repo path);
 - `CLAUDE.md` (project notes with TODOs + orchestrator rules) and `AGENTS.md` (the same orchestrator
   rules, for programs other than Claude Code); worker rules are in `.agent-system/WORKER-RULES.md`.
 - the models for each role (orchestrator, scout, worker): asked on a terminal, or from `--model-*` /
@@ -171,7 +171,9 @@ the legacy in-repo install (kit inside the repo, edits its `.gitignore`): own re
 
 ### 6.4b agent-kit start and any program per role (built)
 `agent-kit start` opens Herdr for the workspace and launches the orchestrator with the configured
-program, model and effort (`kitstart.py`). Workers can be any program Herdr supports; only Claude
+program, model and effort (`kitstart.py`). `agent-kit continue` restarts it with the current config in
+the last active chat (id in `.orchestrator/orchestrator.json`, kept current by the `record-session.py`
+hook in `.claude/settings.json`). Workers can be any program Herdr supports; only Claude
 Code and Codex are verified (`models.py`, README "Choosing models").
 
 ### 6.5 Tests (built)

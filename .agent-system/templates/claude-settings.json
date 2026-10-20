@@ -4,5 +4,13 @@
       "Edit(.orchestrator/**/state.json)",
       "Edit(.orchestrator/**/decisions/**)"
     ]
+  },
+  "hooks": {
+    "SessionStart": [
+      {"hooks": [{"type": "command", "command": "python3 \"$CLAUDE_PROJECT_DIR/.agent-system/scripts/record-session.py\""}]}
+    ],
+    "UserPromptSubmit": [
+      {"hooks": [{"type": "command", "command": "python3 \"$CLAUDE_PROJECT_DIR/.agent-system/scripts/record-session.py\""}]}
+    ]
   }
 }

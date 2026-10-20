@@ -7,11 +7,13 @@ also written to .claude/settings.json and the scout's to .claude/agents/scout.md
 
     kitconfig.py --workspace DIR [--model-orchestrator M] [--effort-orchestrator E]
                  [--model-scout M] [--effort-scout E] [--model-worker M] [--effort-worker E]
-                 [--list] [--show] [--no-input]
+                 [--num-worker N] [--list] [--show] [--no-input]
 
 A model is an ID or alias (the program is worked out from it) or <program>/<model> for an
 unverified program. Unknown names print a table to choose from (picked by number on a terminal).
-With no model flags on a terminal, every role is asked interactively. Python stdlib only.
+--num-worker N sets how many workers run in parallel (pool slots worker-1..N, max_parallel and
+max_tasks_per_request = N; 1..MAX_WORKERS). With no flags on a terminal, everything is asked
+interactively. Python stdlib only.
 """
 from __future__ import annotations
 
@@ -23,6 +25,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import models as M  # noqa: E402
+import kitstart as KS  # noqa: E402
+from scheduler import MAX_WORKERS  # noqa: E402
 
 ROLES = ("orchestrator", "scout", "worker")
 
@@ -42,6 +46,28 @@ def set_role(cfg: dict, role: str, kind: str, model: str, effort: str | None) ->
         cfg["worker"].update(kind=kind, model=model, reasoning_effort=effort)
     else:
         cfg.setdefault(role, {}).update(kind=kind, model=model, effort=effort)
+
+
+def num_workers(cfg: dict) -> int:
+    return cfg["pool"]["size"]
+
+
+def set_num_workers(cfg: dict, n: int) -> None:
+    """N worker slots; N may run at once and a request may have up to N tasks."""
+    if not 1 <= n <= MAX_WORKERS:
+        raise M.ModelError(f"--num-worker must be 1..{MAX_WORKERS}, got {n}")
+    cfg["pool"].update(size=n, slots=[f"worker-{i}" for i in range(1, n + 1)])
+    cfg["limits"].update(max_parallel=n, max_tasks_per_request=n)
+
+
+def pick_num_workers(current: int) -> int:
+    while True:
+        raw = input(f"\nnumber of workers (1..{MAX_WORKERS}) [Enter = keep {current}]: ").strip()
+        if not raw:
+            return current
+        if raw.isdigit() and 1 <= int(raw) <= MAX_WORKERS:
+            return int(raw)
+        print(f"  enter a number from 1 to {MAX_WORKERS}")
 
 
 def write_side_files(ws: Path, cfg: dict) -> list[str]:
@@ -139,6 +165,8 @@ def describe(cfg: dict) -> str:
         r = get_role(cfg, role)
         status = "verified" if M.is_verified(r["kind"]) else "UNVERIFIED"
         lines.append(f"{role:13} {r['kind']:9} {r['model']:22} {str(r['effort'] or '-'):8} {status}")
+    lines.append(f"workers: {num_workers(cfg)} (run in parallel; up to {cfg['limits']['max_tasks_per_request']} "
+                 "tasks per request)")
     return "\n".join(lines)
 
 
@@ -159,12 +187,13 @@ def notes(cfg: dict) -> list[str]:
 
 # ---------------------------------------------------------------- main
 
-def main(argv=None) -> int:
+def main(argv=None, herdr=None) -> int:
     ap = argparse.ArgumentParser(prog="agent-kit config", description=__doc__.split("\n\n")[0])
     ap.add_argument("--workspace", type=Path, required=True)
     for role in ROLES:
         ap.add_argument(f"--model-{role}")
         ap.add_argument(f"--effort-{role}")
+    ap.add_argument("--num-worker", type=int, help=f"number of parallel workers (1..{MAX_WORKERS})")
     ap.add_argument("--list", action="store_true", help="show every known model and exit")
     ap.add_argument("--show", action="store_true", help="show the current roles and exit")
     ap.add_argument("--no-input", action="store_true", help="never prompt (fail on unknown names)")
@@ -185,8 +214,10 @@ def main(argv=None) -> int:
 
     interactive = sys.stdin.isatty() and not a.no_input
     given = {r: (getattr(a, f"model_{r}"), getattr(a, f"effort_{r}")) for r in ROLES}
-    ask_all = interactive and not any(m or e for m, e in given.values())
+    ask_all = interactive and not any(m or e for m, e in given.values()) and a.num_worker is None
     try:
+        if a.num_worker is not None:
+            set_num_workers(cfg, a.num_worker)
         for role in ROLES:
             model, effort = given[role]
             cur = get_role(cfg, role)
@@ -207,6 +238,8 @@ def main(argv=None) -> int:
             if entry.get("note"):
                 print(f"note: {entry['note']}")
             set_role(cfg, role, entry["kind"], entry["model"], effort)
+        if ask_all:
+            set_num_workers(cfg, pick_num_workers(num_workers(cfg)))
     except M.ModelError as e:
         print(f"error: {e}\n\n{e.table}" if e.table else f"error: {e}", file=sys.stderr)
         return 2
@@ -218,6 +251,10 @@ def main(argv=None) -> int:
     print(describe(cfg))
     for line in write_side_files(a.workspace, cfg) + notes(cfg):
         print(f"- {line}")
+    sid = KS.remember_session(a.workspace, cfg, herdr)
+    if sid:
+        print(f"- saved the running orchestrator's chat id {sid}: `agent-kit continue` restarts it there "
+              "with these settings")
     return 0
 
 

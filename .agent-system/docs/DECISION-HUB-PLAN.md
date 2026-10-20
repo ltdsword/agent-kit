@@ -191,7 +191,7 @@ The UI must make a decision answerable in about 30 seconds without opening code:
 ## 5. Problems and blockers: escalation policy
 
 Already enforced locally (2026-10-16), and the hub only adds a channel. **Only critical
-decisions reach you.** Routine ones (first repair with clear evidence, minor fixes, relaunches,
+decisions reach you.** Routine ones (both fix rounds with clear evidence, minor fixes, relaunches,
 plan-step corrections) are Opus's call, recorded as `DECIDED_BY_OPUS` with a reason. The hub shows
 them in the activity feed for audit, but they never wait for you. The split is described in
 `templates/ORCHESTRATOR.section.md` and configured by `decisions.require_user_for` +
@@ -202,7 +202,7 @@ them in the activity feed for audit, but they never wait for you. The split is d
    sees a Herdr agent `blocked`. `resume`/`status` list each one as an open problem.
 2. **Escalation** (Opus, by rule in `CLAUDE.md`): open a decision of the right kind with options
    and a recommendation. Never resolve it alone.
-3. **Hold** (scheduler, enforced): critical actions (`task-unblock`, 2nd+ `repair`, `run close`,
+3. **Hold** (scheduler, enforced): critical actions (`task-unblock`, `run close`,
    `commit-task --allow-outside`, `mark-reviewed --accept-scope|FAIL`) refuse to run without an
    answered, unused decision of the matching kind for that task. Routine ones need Opus's reason.
 4. **Answer** (you): `scripts/decide` in a terminal today. Later also the web app.
@@ -211,7 +211,7 @@ them in the activity feed for audit, but they never wait for you. The split is d
    `.orchestrator/runs/<run>/decisions/D<n>.md`, and logged in state events.
 
 Configurable per project: `config.json` -> `decisions.require_user_for` (critical kinds; default
-all four) and `decisions.routine_repairs` (default 1; 0 sends every repair to you).
+all four) and `decisions.routine_repairs` (default 2; 0 sends every fix round to you).
 
 The hub shows problems even before Opus opens a decision (from snapshots), so a stalled run is
 visible ("T2 BLOCKED for 14 min, no decision opened").

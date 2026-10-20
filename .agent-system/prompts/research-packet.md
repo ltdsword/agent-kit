@@ -33,7 +33,7 @@ EXISTING TESTS AND CHECKS
 RISKS / CONFLICTS / OPEN QUESTIONS
 - missing evidence stated plainly, never hidden
 CANDIDATE TASK DAG
-- 1..3 tasks with dependency rationale (suggestions only)
+- 1..N tasks (N = limits.max_tasks_per_request) with dependency rationale (suggestions only)
 TARGETED FOLLOW-UP QUERIES
 - specific files / functions / questions for Opus or the next round
 ```

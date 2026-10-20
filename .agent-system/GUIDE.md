@@ -75,7 +75,8 @@ Steps 1-2 below apply to Codex.
    ```bash
    .agent-system/scripts/doctor.sh --probe-codex     # expect: PASS: <worker model>/<effort> request completed
    ```
-   Choose the models for each role with `agent-kit config` (README, "Choosing models").
+   Choose the models for each role with `agent-kit config` (README, "Choosing models"), and the number of
+   parallel workers with `agent-kit config --num-worker=N` (1..10, default 3).
 2. **Codex's sandbox must be able to start.** Run `codex sandbox -- sh -c 'echo sandbox-ok'`.
    On Ubuntu 24.04+ it fails with `bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted`
    because `kernel.apparmor_restrict_unprivileged_userns=1` blocks user namespaces. Fix it by
@@ -126,6 +127,11 @@ agent-kit start                    # opens Herdr (starts it if needed) and launc
   and the notes in `CLAUDE.md`.
 - If the program asks something at startup (e.g. "trust this folder"), answer it in the pane.
 
+**After changing models: `agent-kit continue`.** It closes the running orchestrator (only if idle;
+`--force` otherwise) and reopens the workspace's last active chat with the new settings, from inside
+or outside Herdr. The chat id lives in `.orchestrator/orchestrator.json`; a Claude Code hook updates it
+whenever a chat in the workspace starts or gets a prompt. See README, "Continuing the last chat".
+
 **Doing it by hand instead:** run `herdr`, then start the program in a pane, e.g. plain `claude`
 (it uses the model from `.claude/settings.json`). If Claude was already running before the scout
 agent existed, restart it once so `.claude/agents/scout.md` loads.
@@ -149,7 +155,7 @@ What happens next, and where you come in:
 | 4. Plan | Opus | 1-3 tasks with dependencies; one plan file per task in `gen-tasks/<task-name>-<dd-mm-yy>.md` (open them to see exactly what each worker is told) |
 | 5. Dispatch | scheduler | New Herdr workspaces `<run>-worker-N` appear with the worker program running. Each worker gets a short prompt: read your task file, `WORKER-RULES.md`, key facts, cautions |
 | 6. Work | Workers | Watch with `ctrl+b w` or `herdr agent read ...`. A `blocked` worker is waiting on an approval: the orchestrator approves routine ones and asks you about the rest |
-| 7. Review | Opus | `wait` -> `collect` captures the worker's diff and appends it to the task file -> Opus reviews and appends its verdict + report -> PASS / minor fix / repair (same worker, max 2) |
+| 7. Review | Opus | `wait` -> `collect` captures the worker's diff and appends it to the task file -> Opus reviews and appends its verdict + report -> PASS / minor fix / fix round: errors + proposed fix go to the same worker and into the task file, then review again (max 2 rounds, then merge) |
 | 8. Integrate | scheduler | Accepted commits are cherry-picked onto `agent/integration-<run>`; `./gradlew test` after each |
 | 9. Final gate | scheduler | `verify.sh` (full `./gradlew build` + checks); run is DONE only if it passes |
 | 10. Report | Opus | Summary in chat + `final-report.md` and one total diff `final.diff` |
@@ -184,24 +190,35 @@ $S resume --run r1              # after a crash/restart: shows next actions
 ---
 ## Worker result - attempt 1         <- appended by collect: status, files, tests, risks,
    diffstat + inline diff                 full diff in .orchestrator/runs/<run>/reports/T1.diff
-## Review - attempt 1: PASS          <- appended by mark-reviewed: verdict + Opus's report
+## Review round 1: MAJOR_FIX        <- appended by mark-reviewed: verdict + Opus's report
+## Fix round 1/2: errors and proposed fix, sent to worker-1   <- appended by repair
+## Worker result - attempt 2         <- the same worker's fix
+## Review round 2: PASS              <- (after round 2 there is no further review: PASS + known issues)
 ## Integration: merged               <- appended by integrate
 ## Final gate: PASS                  <- appended by verify
 ```
 
 Workers can't `git commit` (the sandbox keeps `.git` read-only), so their changes stay in the worktree.
 The diff is captured straight from git, not from what the worker claims. After review, Opus commits
-it with an audited `Orchestrator-Commit` trailer. A repair adds `<task file>-repairN.md` and appends
-another Worker result / Review pair to the same task file.
+it with an audited `Orchestrator-Commit` trailer.
+
+**The review loop (max 2 fix rounds per task).** When Opus finds an error (in review, or when the task
+breaks the build or conflicts at integration), it writes the errors and a proposed fix in
+`<task file>-repairN.md` and sends it to the worker that did the task (same session, branch and
+worktree). The errors and the fix are also copied into the task file, so you can read every problem
+there. The worker fixes, Opus collects and reviews again. Both rounds are Opus's call (with the
+evidence recorded). After round 2 there is no further review round: Opus accepts the task and lists
+anything still wrong as **known issues** in the task file and the final report, and you decide at the
+merge question. Only a task that still cannot merge (conflict, failing check) stops and asks you.
 
 The `gen-tasks/` files are not git-ignored. Commit them with the feature if you want the history,
 or delete them.
 
 **When something goes wrong: you decide the critical things, Opus the routine ones.**
-Critical, so Opus asks you: unblocking a blocked task, a 2nd+ repair of the same task, changes
+Critical, so Opus asks you: unblocking a blocked task (e.g. still failing to merge after 2 fix rounds), changes
 outside the planned files, giving up a task or run, any requirement/scope/API/dependency/security/
 data change, a worker's approval prompt, an unclear final-gate failure. Routine, so Opus decides
-and writes its reason into the task file: the first repair with clear evidence (failing test,
+and writes its reason into the task file: fix rounds 1 and 2 with clear evidence (failing test,
 review finding, mechanical conflict), minor fixes, relaunching a lost session, fixing its own plan
 steps without changing the goal. For a critical one, Opus opens a decision (question, evidence,
 options, its recommendation) and asks you with clickable choices. Herdr marks the session as waiting,
@@ -215,19 +232,20 @@ D2  T1 is blocked: the spec doesn't say whether to use contract X or Y.
 ```
 
 Opus records your answer word for word (`decision record --run r1 --id D2 --choice B --quote "..."`) and
-carries it out. The scheduler refuses critical actions (`task-unblock`, 2nd+ `repair`, `run close`,
+carries it out. The scheduler refuses critical actions (`task-unblock`, `run close`,
 scope exceptions, FAIL, merge/push) without a recorded answer, and routine ones without Opus's reason.
 If your reply is ambiguous, Opus asks again instead of guessing. Every question and answer is
 appended to the task file and saved in `.orchestrator/runs/<run>/decisions/`. Tune it in
 `config.json` -> `decisions`: `require_user_for` (critical kinds) and `routine_repairs` (how many
-repairs per task Opus may start alone; default 1, set 0 to approve every repair).
+fix rounds per task Opus may start alone; default 2, set 0 to approve every round). The number of
+rounds is `limits.max_major_repairs` (2).
 
 **While it runs:** you can detach (`ctrl+b q`); workers keep going. Note that Opus only acts while its
 Claude turn is active. When you come back, ask Opus to "resume run r1": it runs `resume`, collects
 finished reports, and continues.
 
 **Small requests:** say "just do it directly" or let Opus choose a single trivial task; there is no need
-for three workers and a DAG for a one-line change.
+for several workers and a DAG for a one-line change.
 
 ---
 

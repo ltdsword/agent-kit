@@ -4,8 +4,11 @@
 #   agent-kit update [--folder=<repo>] [--dry-run] [--force-agent]
 #   agent-kit config [--folder=<repo>] [model options] [--show] [--list]
 #   agent-kit start  [--folder=<repo>] [--dry-run] [--no-attach]   open Herdr + launch the orchestrator
+#   agent-kit continue [--folder=<repo>] [--session=ID] [--force] [--dry-run] [--no-attach]
+#                     restart the orchestrator with the current config, in its last chat
 #   model options: --model-orchestrator=M --effort-orchestrator=E --model-scout=M --effort-scout=E
 #                  --model-worker=M --effort-worker=E  (M: model or alias, or <program>/<model>)
+#                  --num-worker=N  (parallel workers, 1..10; default 3)
 #   agent-kit [--dry-run] [--force-agent] <target-repo>    legacy in-repo mode (kit inside the repo)
 # <repo> is the repo folder (default: the current folder). The workspace is <repo>.workspace next
 # to it, linked back as <repo>.workspace/<repo> -> ../<repo>. A folder already named *.workspace
@@ -18,16 +21,19 @@ set -euo pipefail
 
 SELF="$(readlink -f "${BASH_SOURCE[0]}")"
 SRC="$(cd "$(dirname "$SELF")/../.." && pwd -P)"   # kit home: holds .agent-system/
-usage() { sed -n '2,16p' "$SELF" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,19p' "$SELF" | sed 's/^# \{0,1\}//'; }
 die() { echo "error: $*" >&2; exit 1; }
 
-CMD=""; DRY=0; FORCE_AGENT=0; FOLDER=""; TARGET=""; MODEL_ARGS=(); NO_ATTACH=0
+CMD=""; DRY=0; FORCE_AGENT=0; FOLDER=""; TARGET=""; MODEL_ARGS=(); NO_ATTACH=0; FORCE=0; SESSION=""
 while [ $# -gt 0 ]; do
   case "$1" in
-    --model-*=*|--effort-*=*) MODEL_ARGS+=("$1") ;;
-    --model-*|--effort-*) [ $# -ge 2 ] || die "$1 needs a value"; MODEL_ARGS+=("$1=$2"); shift ;;
+    --model-*=*|--effort-*=*|--num-worker=*) MODEL_ARGS+=("$1") ;;
+    --model-*|--effort-*|--num-worker) [ $# -ge 2 ] || die "$1 needs a value"; MODEL_ARGS+=("$1=$2"); shift ;;
     --show|--list|--no-input) MODEL_ARGS+=("$1") ;;
     --no-attach) NO_ATTACH=1 ;;
+    --force) FORCE=1 ;;
+    --session=*) SESSION="${1#--session=}"; [ -n "$SESSION" ] || die "--session needs a value" ;;
+    --session) [ $# -ge 2 ] || die "--session needs a value"; SESSION="$2"; shift ;;
     --folder=*) FOLDER="${1#--folder=}"; [ -n "$FOLDER" ] || die "--folder needs a value" ;;
     --folder) [ $# -ge 2 ] || die "--folder needs a value"; FOLDER="$2"; shift ;;
     --dry-run) DRY=1 ;;
@@ -35,7 +41,7 @@ while [ $# -gt 0 ]; do
     -h|--help) usage; exit 0 ;;
     -*) echo "unknown option: $1" >&2; usage >&2; exit 2 ;;
     *)
-      if [ -z "$CMD$TARGET" ] && { [ "$1" = create ] || [ "$1" = update ] || [ "$1" = config ] || [ "$1" = start ]; }; then CMD="$1"
+      if [ -z "$CMD$TARGET" ] && { [ "$1" = create ] || [ "$1" = update ] || [ "$1" = config ] || [ "$1" = start ] || [ "$1" = continue ]; }; then CMD="$1"
       elif [ -z "$CMD$TARGET" ]; then TARGET="$1"
       else echo "unexpected argument: $1" >&2; exit 2
       fi ;;
@@ -43,7 +49,7 @@ while [ $# -gt 0 ]; do
   shift
 done
 [ -n "$CMD$TARGET" ] || { usage >&2; exit 2; }
-[ -z "$FOLDER" ] || [ -n "$CMD" ] || die "--folder only applies to create/update/config/start"
+[ -z "$FOLDER" ] || [ -n "$CMD" ] || die "--folder only applies to create/update/config/start/continue"
 [ ${#MODEL_ARGS[@]} -eq 0 ] || [ "$CMD" = create ] || [ "$CMD" = config ] \
   || die "model options only apply to create and config"
 
@@ -78,7 +84,7 @@ install_agent() {  # install_agent <dest>
   fi
 }
 
-merge_settings() {  # merge_settings <settings.json> [<real repo path>]: deny rules (+ additionalDirectories)
+merge_settings() {  # merge_settings <settings.json> [<real repo path>]: deny rules, chat-id hooks (+ additionalDirectories)
   if [ $DRY -eq 1 ]; then echo "[dry-run] merge deny rules${2:+ and additionalDirectories $2} into $1"; return; fi
   python3 - "$1" "$SRC/.agent-system/templates/claude-settings.json" "${2:-}" <<'PY'
 import json, os, sys
@@ -97,6 +103,13 @@ deny.extend(added)
 msg = f"settings.json: {len(added)} deny rule(s) added" if added else "settings.json: deny rules present"
 if obsolete:
     msg += f"; {len(obsolete)} obsolete rule(s) removed"
+# hooks that record the workspace's active chat id (record-session.py, for `agent-kit continue`)
+hooks = cur.setdefault("hooks", {})
+for event, entries in json.load(open(tpl)).get("hooks", {}).items():
+    have = hooks.setdefault(event, [])
+    if not any("record-session.py" in h.get("command", "") for e in have for h in e.get("hooks", [])):
+        have.extend(entries)
+        msg += f"; {event} hook added"
 if repo:
     dirs = perms.setdefault("additionalDirectories", [])
     if repo not in dirs:
@@ -349,12 +362,17 @@ cmd_start() {
   [ -f "$dest/.agent-system/config.json" ] || die "$dest has no kit (.agent-system/config.json): use 'agent-kit create'"
   [ $DRY -eq 1 ] && args+=(--dry-run)
   [ $NO_ATTACH -eq 1 ] && args+=(--no-attach)
+  if [ "$CMD" = continue ]; then
+    args+=(--continue)
+    [ $FORCE -eq 1 ] && args+=(--force)
+    [ -n "$SESSION" ] && args+=(--session "$SESSION")
+  fi
   PYTHONDONTWRITEBYTECODE=1 exec python3 "$dest/.agent-system/kitstart.py" --workspace "$dest" "${args[@]}"
 }
 
 case "$CMD" in
   create) cmd_create ;;
-  start) cmd_start ;;
+  start|continue) cmd_start ;;
   update) cmd_update ;;
   config) cmd_config ;;
   *) cmd_legacy ;;

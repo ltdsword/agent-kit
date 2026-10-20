@@ -7,7 +7,7 @@ Reference for the files and commands in this directory. For a step-by-step walkt
 User request -> orchestrator: configured program + model (default Claude Code, Opus 5.5), launched by `agent-kit start`
                  |- scout subagent: configured Claude model (default Sonnet 5.5, effort medium), read-only (max 3 rounds/request)
                  v
-            1..3 task DAG -> scheduler.py (leases, states, durable JSON) -> workers
+            1..N task DAG -> scheduler.py (leases, states, durable JSON) -> workers
                  worker-1 / worker-2 / worker-3: the configured program + model (default Codex gpt-6-luna @ xhigh), one Herdr workspace + git worktree each
                  task plan per worker: gen-tasks/<task-name>-<dd-mm-yy>.md (written by Opus)
                  -> wait -> collect (diff captured + appended to the task file) -> Opus review
@@ -21,10 +21,11 @@ User request -> orchestrator: configured program + model (default Claude Code, O
 
 | Path | Purpose |
 |---|---|
-| `config.json` | Program/model/effort per role (orchestrator, scout, worker; set with `agent-kit config`), pool size 3, task cap 3, parallel 3, max 2 major repairs, 3 scout rounds, gate commands |
+| `config.json` | Program/model/effort per role (orchestrator, scout, worker; set with `agent-kit config`), pool size, task cap and parallelism (3 by default; `agent-kit config --num-worker=N`, 1..10), max 2 fix rounds per task, 3 scout rounds, gate commands |
 | `models.py` | Model registry: Herdr agent programs (Claude Code and Codex verified, others unverified), Claude list, Codex catalog, effort checks, pick-from table |
 | `kitconfig.py` | `agent-kit config`: choose program/model/effort per role (flags, or interactive on a terminal) |
-| `kitstart.py` | `agent-kit start`: open Herdr and launch the orchestrator with its program/model/effort |
+| `kitstart.py` | `agent-kit start` / `continue`: open Herdr and launch the orchestrator with its program/model/effort, or resume its last chat |
+| `scripts/record-session.py` | Claude Code hook (SessionStart, UserPromptSubmit): saves the workspace's active chat id to `.orchestrator/orchestrator.json` |
 | `WORKER-RULES.md` | Rules every worker reads, whatever its program (the worker prompt points to it) |
 | `templates/ORCHESTRATOR.section.md` | Orchestrator rules, written into the workspace's `CLAUDE.md` and `AGENTS.md` |
 | `scheduler.py` | Stdlib CLI: DAG validation, readiness, leases, state machine, research gate, git/Herdr wrappers |
@@ -49,7 +50,7 @@ User request -> orchestrator: configured program + model (default Claude Code, O
 worktrees. The git repo is `config.json` `project.path` (e.g. the symlink `thrift-demo -> ../thrift-demo`);
 every git command runs there, never in the workspace. Without `project.path` the kit runs in-repo (both
 roots the same). Worktrees live in `pool.worktree_root`, outside the repo: `worktrees/` in the workspace
-(`worker-1..3`, `integration-<run>`).
+(`worker-1..N`, `integration-<run>`).
 
 ## Commands (all implemented; `python3 .agent-system/scheduler.py <cmd> --help`)
 
@@ -59,7 +60,7 @@ Prefix every command with `python3 .agent-system/scheduler.py`. Add `--json` bef
 |---|---|
 | `doctor` | Validate config, tools, scout agent, Codex profile, cached model catalog |
 | `pool init` / `pool show` | Create the worktree root, show slot paths/state; show per-slot model resolution |
-| `run create --run ID --tasks FILE [--base REF] [--request-id ID]` | Validate the 1..3 task DAG, create `agent/integration-ID` worktree |
+| `run create --run ID --tasks FILE [--base REF] [--request-id ID]` | Validate the task DAG (1..`max_tasks_per_request`), create `agent/integration-ID` worktree |
 | `run status --run ID` / `run list` / `run close --run ID --status BLOCKED\|FAILED --reason ...` | Inspect or close runs |
 | `research round --run ID --evidence FILE --question Q...` | Register a scout dossier (rejects a 4th round per request) |
 | `task new --name "<name>" [--date dd-mm-yy]` | Create `gen-tasks/<name>-<dd-mm-yy>.md` from the template (`-2`, `-3` on collision) |
@@ -74,8 +75,8 @@ Prefix every command with `python3 .agent-system/scheduler.py`. Add `--json` bef
 | `wait --run ID [--task T] [--timeout 540]` | Block until a worker writes its report or shows an approval prompt; exit 3 on timeout |
 | `collect --run ID --task T` | Validate the report against git (`pending` / `ambiguous` / `REVIEW`); save `reports/T.diff` (commits + uncommitted + new files); append "Worker result" to the task file |
 | `commit-task --run ID --task T -m MSG` | Audited orchestrator commit of an uncommitted worker diff or Opus minor fix |
-| `mark-reviewed --run ID --task T --verdict PASS\|MINOR_FIX\|MAJOR_FIX\|BLOCKED\|FAIL --report FILE [--notes ..]` | Record review; verdict + report appended to the task file |
-| `repair --run ID --task T --packet FILE` | Repair packet to the same worker session (max 2) |
+| `mark-reviewed --run ID --task T --verdict PASS\|MINOR_FIX\|MAJOR_FIX\|BLOCKED\|FAIL --report FILE [--notes ..] [--known-issues ..]` | Record review; verdict + report appended to the task file. No MAJOR_FIX after the last fix round |
+| `repair --run ID --task T --packet FILE --reason ..` | Fix round to the same worker session (max 2); errors + proposed fix copied into the task file |
 | `integrate --run ID` | Cherry-pick PASSED tasks in DAG order; post-merge check; MERGED; unlock dependents |
 | `verify --run ID` | Full `verify.sh` on the integration worktree; run becomes DONE only on pass |
 | `report --run ID [--summary FILE]` | DONE run: `final-report.md` + `final.diff` (the whole run as one diff) for the user |
@@ -103,8 +104,9 @@ Critical problems go to the user; routine ones are Opus's call, with a reason re
 file (`DECIDED_BY_OPUS` in state). Critical actions need `--decision D<n>`, an answered, unused
 user decision of the right kind for that task: `task-unblock` (blocker), `run close` and
 `mark-reviewed --verdict FAIL` (abandon), `commit-task --allow-outside` and `mark-reviewed
---accept-scope` (scope_exception), and `repair` (repair) from the task's 2nd repair on. The first
-`decisions.routine_repairs` repairs (default 1) are routine: `repair ... --reason "<evidence>"`.
+--accept-scope` (scope_exception), and `repair` (repair) beyond `decisions.routine_repairs`. With the
+defaults both fix rounds of a task are routine: `repair ... --reason "<evidence>"`. After the last round
+(`limits.max_major_repairs`, 2) `mark-reviewed` refuses MAJOR_FIX: PASS with `--known-issues`, or FAIL.
 Configure in `config.json` -> `decisions`. Policy-level critical items (requirement/scope/API/
 dependency/security/data changes, worker approval prompts, merge/push) are in `CLAUDE.md`. The user
 clicks an answer (or types one); Opus records only the user's answer, verbatim (`decision record --quote`), and every
@@ -114,7 +116,7 @@ guardrails that make every decision auditable, not a sandbox.
 
 ## State machine
 
-Tasks: `PENDING -> READY -> RUNNING -> REVIEW -> PASSED -> MERGED`, with `FIX_REQUIRED` (repair loop),
+Tasks: `PENDING -> READY -> RUNNING -> REVIEW -> PASSED -> MERGED`, with `FIX_REQUIRED` (review loop, max 2 fix rounds; afterwards a failing merge is BLOCKED),
 `BLOCKED`, `FAILED`. Invalid transitions are rejected. A task is READY only when every dependency is
 MERGED **and** its post-merge check passed. Workers: `IDLE`, `BUSY`, `BLOCKED` (quarantined dirty
 worktree), `BROKEN`. A worker holds its lease from dispatch until MERGED (retry affinity). State is

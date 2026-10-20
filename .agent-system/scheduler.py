@@ -76,6 +76,8 @@ GATED_KINDS = ("blocker", "repair", "scope_exception", "abandon")
 # Always the user's call, whatever decisions.require_user_for says: merging/pushing is irreversible.
 ALWAYS_USER_KINDS = ("finish",)
 DECISION_ID_RE = re.compile(r"^D[0-9]{1,4}$")
+# Worker slots per workspace (`agent-kit config --num-worker`); each is a Herdr workspace + git worktree.
+MAX_WORKERS = 10
 
 # Never granted to workers through worker.writable_dirs.
 SENSITIVE_DIR_NAMES = {".ssh", ".gnupg", ".aws", ".codex", ".claude", ".config", ".git"}
@@ -83,6 +85,21 @@ SENSITIVE_DIR_NAMES = {".ssh", ".gnupg", ".aws", ".codex", ".claude", ".config",
 TASK_ID_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]{0,15}$")
 # Lowercase so it can be embedded in branch names and herdr agent names (<=32 chars).
 RUN_ID_RE = re.compile(r"^[a-z][a-z0-9-]{0,19}$")
+
+
+def fix_round_summary(text: str) -> list[str]:
+    """The "Errors found" and "Proposed fix" sections of a repair file (all of it if it has neither),
+    with headings demoted one level so they nest under the task file's fix-round heading."""
+    keep, body, on = ("## errors found", "## proposed fix"), [], None
+    lines = [ln for ln in strip_guidance(text).splitlines() if not ln.startswith("# ")]
+    if not any(ln.strip().lower() in keep for ln in lines):
+        on, keep = True, ()
+    for ln in lines:
+        if ln.startswith("## ") and keep:
+            on = ln.strip().lower() in keep
+        if on:
+            body.append("#" + ln if ln.startswith("## ") else ln)
+    return body
 
 
 class SchedulerError(Exception):
@@ -136,14 +153,14 @@ def validate_config(cfg: dict) -> list[str]:
     try:
         pool, limits, worker = cfg["pool"], cfg["limits"], cfg["worker"]
         slots = pool["slots"]
-        if pool["size"] != len(slots) or not 1 <= len(slots) <= 3:
-            errors.append("pool.size must equal len(pool.slots) and be 1..3")
+        if pool["size"] != len(slots) or not 1 <= len(slots) <= MAX_WORKERS:
+            errors.append(f"pool.size must equal len(pool.slots) and be 1..{MAX_WORKERS}")
         if len(set(slots)) != len(slots):
             errors.append("pool.slots must be unique")
         if not 1 <= limits["max_parallel"] <= pool["size"]:
             errors.append("limits.max_parallel must be 1..pool.size")
-        if not 1 <= limits["max_tasks_per_request"] <= 3:
-            errors.append("limits.max_tasks_per_request must be 1..3")
+        if not 1 <= limits["max_tasks_per_request"] <= MAX_WORKERS:
+            errors.append(f"limits.max_tasks_per_request must be 1..{MAX_WORKERS}")
         if limits["max_scout_rounds"] != 3:
             errors.append("limits.max_scout_rounds is fixed at 3 by policy")
         if limits["max_major_repairs"] < 0:
@@ -160,7 +177,7 @@ def validate_config(cfg: dict) -> list[str]:
         bad = set(cfg.get("decisions", {}).get("require_user_for", GATED_KINDS)) - set(GATED_KINDS)
         if bad:
             errors.append(f"decisions.require_user_for has unknown kinds {sorted(bad)}; allowed {GATED_KINDS}")
-        rr = cfg.get("decisions", {}).get("routine_repairs", 1)
+        rr = cfg.get("decisions", {}).get("routine_repairs", 2)
         if not isinstance(rr, int) or rr < 0:
             errors.append("decisions.routine_repairs must be an integer >= 0")
         for d in worker.get("writable_dirs", []):
@@ -453,6 +470,12 @@ def record_readiness(state: dict, status: str, checklist: dict, missing: list[st
     return entry
 
 
+
+def slot_order(wid: str) -> tuple:
+    """worker-2 before worker-10."""
+    m = re.match(r"^(.*?)(\d+)$", wid)
+    return (m.group(1), int(m.group(2))) if m else (wid, 0)
+
 def dispatch_allowed(state: dict, t: dict, workspace_root: Path) -> tuple[bool, str]:
     if not (workspace_root / t["packet"]).is_file():
         return False, f"task packet missing: {t['packet']}"
@@ -471,7 +494,7 @@ def plan_dispatch(state: dict, cfg: dict, workspace_root: Path) -> tuple[list[tu
     """min(#READY, #IDLE, parallel limit) assignments in deterministic order."""
     limit = min(cfg["limits"]["max_parallel"], cfg["pool"]["size"])
     capacity = limit - sum(1 for w in state["workers"].values() if w["status"] == "BUSY")
-    idle = [wid for wid in sorted(state["workers"]) if state["workers"][wid]["status"] == "IDLE"]
+    idle = [wid for wid in sorted(state["workers"], key=slot_order) if state["workers"][wid]["status"] == "IDLE"]
     plan, skipped = [], {}
     for tid in sorted(state["tasks"]):
         t = state["tasks"][tid]
@@ -947,7 +970,7 @@ class Scheduler:
     def _prompt_text(self, state: dict, tid: str, header: Path, packet: str, kind: str) -> str:
         t = state["tasks"][tid]
         report = self.store.run_dir(state["run_id"]) / "reports" / f"{tid}.json"
-        what = ("Fix the problems listed in the repair file. The original task file is the "
+        what = ("Fix the errors listed in the repair file. The original task file is the "
                 f"reference: {self._task_file(t)}" if "repair" in kind else "Implement exactly what the file says.")
         rules = SCRIPT_DIR / "WORKER-RULES.md"
         return "\n".join([
@@ -1300,13 +1323,21 @@ class Scheduler:
             return {"task": tid, "commit": head, "commits": commits}
 
     def mark_reviewed(self, run_id: str, tid: str, verdict: str, notes: str = "",
-                      accept_scope: bool = False, report: str = "", decision: str | None = None) -> dict:
+                      accept_scope: bool = False, report: str = "", decision: str | None = None,
+                      known_issues: str = "") -> dict:
         if verdict not in REVIEW_VERDICTS:
             raise SchedulerError(f"verdict must be one of {REVIEW_VERDICTS}")
         with self.txn(run_id) as state:
             t = state["tasks"][tid]
             if t["status"] != "REVIEW":
                 raise SchedulerError(f"{tid} is {t['status']}; mark-reviewed applies to REVIEW tasks")
+            limit = self.cfg["limits"]["max_major_repairs"]
+            if verdict == "MAJOR_FIX" and t["major_repairs"] >= limit:
+                raise SchedulerError(
+                    f"{tid}: all {limit} fix rounds are used, so there is no further review round. "
+                    "Accept with --verdict PASS and list what is still wrong in --known-issues (it goes into "
+                    "the task file and the final report; the user still decides the merge), or FAIL with a "
+                    "user decision (kind abandon)")
             wt = Path(t["worktree"])
             t.setdefault("reviews", []).append({"verdict": verdict, "notes": notes, "at": now()})
             if verdict == "PASS":
@@ -1325,15 +1356,12 @@ class Scheduler:
                                              "accepting them needs --accept-scope and a user decision")
                     self._require_decision(state, "scope_exception", tid, decision, "accept-scope", notes)
                 transition_task(state, tid, "PASSED", notes or "review passed")
+                if known_issues.strip():
+                    t["known_issues"] = known_issues.strip()
             elif verdict == "MINOR_FIX":
                 log_event(state, "minor_fix_pending", task=tid, notes=notes)  # stays REVIEW
             elif verdict == "MAJOR_FIX":
-                if t["major_repairs"] >= self.cfg["limits"]["max_major_repairs"]:
-                    transition_task(state, tid, "BLOCKED",
-                                    f"major repair budget exhausted ({t['major_repairs']}); Opus must re-scope")
-                    self._release(state, t["worker"], wt)
-                else:
-                    transition_task(state, tid, "FIX_REQUIRED", notes or "major fix required")
+                transition_task(state, tid, "FIX_REQUIRED", notes or "major fix required")
             elif verdict == "BLOCKED":
                 transition_task(state, tid, "BLOCKED", notes)
                 self._release(state, t["worker"], wt)
@@ -1341,12 +1369,14 @@ class Scheduler:
                 self._require_decision(state, "abandon", tid, decision, "mark-reviewed FAIL", notes)
                 transition_task(state, tid, "FAILED", notes)
                 self._release(state, t["worker"], wt)
-            self._append_task_file(t, f"Review - attempt {t['attempts']}: {verdict}", [
-                f"- Verdict: **{verdict}** -> task is now {t['status']}",
+            self._append_task_file(t, f"Review round {t['attempts']}: {verdict}", [
+                f"- Verdict: **{verdict}** -> task is now {t['status']} (fix rounds used: {t['major_repairs']}/{limit})",
                 f"- Reviewed HEAD: {git_out(wt, 'rev-parse', 'HEAD')[:12]}"
                 + (f", commits {', '.join(c[:12] for c in t['commits'])}" if t.get("commits") else ""),
                 *([f"- Notes: {notes}"] if notes else []),
                 *(["", report.strip()] if report.strip() else []),
+                *(["", "### Known issues (accepted: no fix rounds left)", "", t["known_issues"]]
+                  if t.get("known_issues") and verdict == "PASS" else []),
             ])
             out = {"task": tid, "status": t["status"], "task_file": t["packet"]}
             if t["status"] in ("BLOCKED", "FIX_REQUIRED"):
@@ -1364,7 +1394,8 @@ class Scheduler:
                 transition_task(state, tid, "BLOCKED", "major repair budget exhausted")
                 self._release(state, t["worker"], Path(t["worktree"]))
                 return {"task": tid, "status": "BLOCKED"}
-            if not (self.workspace_root / packet).is_file():
+            packet_path = self.workspace_root / packet
+            if not packet_path.is_file():
                 raise SchedulerError(f"repair packet not found: {packet}")
             self._require_decision(state, "repair", tid, decision, "repair", reason)
             rp = self.store.run_dir(run_id) / "reports" / f"{tid}.json"
@@ -1376,8 +1407,11 @@ class Scheduler:
             transition_task(state, tid, "RUNNING", "repair dispatched", major_repairs=t["major_repairs"] + 1,
                             attempts=t["attempts"] + 1, active_packet=packet)
             t["lease"]["last_observed_at"] = now()
-            self._append_task_file(t, f"Repair {t['major_repairs']} sent to {wid}",
-                                   [f"- Repair file: `{packet}` (same worker, branch and worktree)"])
+            # The errors and the proposed fix go into the task file too, so the user sees them in one place.
+            body = fix_round_summary(packet_path.read_text())
+            limit = self.cfg["limits"]["max_major_repairs"]
+            self._append_task_file(t, f"Fix round {t['major_repairs']}/{limit}: errors and proposed fix, sent to {wid}",
+                                   [f"- Fix file: `{packet}` (same worker, branch and worktree)", *body])
             header = self._write_header(state, tid, "repair", packet)
             text = self._prompt_text(state, tid, header, packet, f"repair attempt {t['major_repairs']}")
             self.store.save(state)
@@ -1433,10 +1467,10 @@ class Scheduler:
                         break
                 if conflict:
                     git(iwt, "switch", "-q", branch)
-                    transition_task(state, tid, "FIX_REQUIRED", "integration conflict", integration_conflict=conflict)
+                    self._integration_problem(state, tid, "integration conflict", integration_conflict=conflict)
                     self._append_task_file(t, "Integration: conflict", [
                         f"- Cherry-pick of {c[:12]} conflicted in: {', '.join(conflict['files']) or 'unknown'}",
-                        "- Task is FIX_REQUIRED; integration branch unchanged"])
+                        f"- Task is {t['status']}; integration branch unchanged"])
                     results.append({"task": tid, "result": "conflict", **conflict})
                     self.store.save(state)
                     continue
@@ -1450,11 +1484,11 @@ class Scheduler:
                         self.store.save(state)
                         raise SchedulerError(f"post-merge check dirtied {iwt}; inspect manually (log {log})")
                     git(iwt, "switch", "-q", branch)
-                    transition_task(state, tid, "FIX_REQUIRED", f"post-merge check exit {code}",
-                                    post_merge_check="failed", post_merge_log=self.rel(log))
+                    self._integration_problem(state, tid, f"post-merge check exit {code}",
+                                              post_merge_check="failed", post_merge_log=self.rel(log))
                     self._append_task_file(t, "Integration: post-merge check failed", [
                         f"- `{' '.join(check)}` exit {code}, log `{self.rel(log)}`",
-                        "- Task is FIX_REQUIRED; integration branch unchanged"])
+                        f"- Task is {t['status']}; integration branch unchanged"])
                     results.append({"task": tid, "result": "post_merge_failed", "exit_code": code, "log": str(log)})
                     self.store.save(state)
                     continue
@@ -1470,6 +1504,16 @@ class Scheduler:
                 self.store.save(state)
             promoted = refresh_readiness(state)
         return {"results": results, "now_ready": promoted, "integration_sha": state["integration_sha"]}
+
+    def _integration_problem(self, state: dict, tid: str, note: str, **fields) -> None:
+        """A merged task broke: back to its worker for a fix round, or BLOCKED (the user decides) when
+        all fix rounds are used, because a task that does not merge cleanly cannot be merged anyway."""
+        t = state["tasks"][tid]
+        if t["major_repairs"] < self.cfg["limits"]["max_major_repairs"]:
+            transition_task(state, tid, "FIX_REQUIRED", note, **fields)
+        else:
+            transition_task(state, tid, "BLOCKED", f"{note}; no fix rounds left", **fields)
+            self._release(state, t["worker"], Path(t["worktree"]))
 
     def verify(self, run_id: str, cmd: list[str] | None = None) -> dict:
         argv = cmd or self.cfg["gate"]["verify_cmd"]
@@ -1515,7 +1559,7 @@ class Scheduler:
                      f"- Final gate: {'PASS' if v.get('exit_code') == 0 else 'FAIL'}"
                      + (f" (log `{v['log']}`)" if v.get("log") else ""),
                      f"- Total diff: `{self.rel(diff_path)}` ({short})", "",
-                     "## Tasks", "", "| Task | Title | Status | Repairs |", "|---|---|---|---|"]
+                     "## Tasks", "", "| Task | Title | Status | Fix rounds |", "|---|---|---|---|"]
             lines += [f"| {tid} | {t['title']} | {t['status']} | {t['major_repairs']} |"
                       for tid, t in sorted(state["tasks"].items())]
             lines += ["", "## Commits", "", "```",
@@ -1528,6 +1572,10 @@ class Scheduler:
                     rep = json.loads((rd / "reports" / f"{tid}.json").read_text())
                     risks += [f"- {tid}: {r}" for r in rep.get("risks") or []]
             lines += risks or ["- none"]
+            known = [f"- {tid}: {t['known_issues']}" for tid, t in sorted(state["tasks"].items())
+                     if t.get("known_issues")]
+            if known:
+                lines += ["", "## Known issues (accepted after the last fix round)", "", *known]
             lines += ["", "## Decisions in this run", ""]
             lines += [f"- {d['id']} ({d['kind']}{', ' + d['task'] if d['task'] else ''}): {d['title']} -> "
                       f"{(d.get('answer') or {}).get('choice', d['status'])}"
@@ -1842,21 +1890,23 @@ class Scheduler:
         """Critical = the user decides. Routine = Opus decides and records a reason.
 
         Kinds listed in decisions.require_user_for are critical, except that the first
-        decisions.routine_repairs repairs of a task (default 1) are routine."""
+        decisions.routine_repairs repairs (fix rounds) of a task (default 2) are routine."""
         dc = self.cfg.get("decisions", {})
         if kind in ALWAYS_USER_KINDS:
             return True
         if kind not in dc.get("require_user_for", GATED_KINDS):
             return False
         if kind == "repair" and tid:
-            return state["tasks"][tid]["major_repairs"] >= dc.get("routine_repairs", 1)
+            return state["tasks"][tid]["major_repairs"] >= dc.get("routine_repairs", 2)
         return True
 
     def _next_for_problem(self, state: dict, tid: str) -> str:
         run_id, t = state["run_id"], state["tasks"][tid]
         kind = "blocker" if t["status"] == "BLOCKED" else "repair"
         if not self._is_critical(state, kind, tid):
-            return (f"routine, your call: repair --run {run_id} --task {tid} --packet <repair file> "
+            n, limit = t["major_repairs"] + 1, self.cfg["limits"]["max_major_repairs"]
+            return (f"routine, your call (fix round {n}/{limit}): task new --repair-of {t['packet']}, "
+                    f"fill in the errors and the fix, then repair --run {run_id} --task {tid} --packet <repair file> "
                     "--reason \"<evidence>\" (escalate instead if it changes requirements, scope or contracts)")
         return (f"critical, ask the user: decision ask --run {run_id} --kind {kind} --task {tid} --title ... "
                 "--question ... --option A=... --option B=... --recommend A; act only with --decision <id>")
@@ -1942,7 +1992,7 @@ class Scheduler:
             if plan:
                 actions.append(f"dispatchable now: {plan} -> dispatch-ready --run {run_id}")
             actions += [f"{tid}: not dispatchable: {why}" for tid, why in skipped.items()]
-            for wid, w in sorted(state["workers"].items()):
+            for wid, w in sorted(state["workers"].items(), key=lambda kv: slot_order(kv[0])):
                 if w["status"] in ("BLOCKED", "BROKEN"):
                     actions.append(f"{wid} is {w['status']} ({w.get('status_reason')}); inspect, then worker-release")
             if state["status"] == "RUNNING" and all(t["status"] == "MERGED" for t in state["tasks"].values()) \
@@ -1990,7 +2040,7 @@ class Scheduler:
             busy = [w for w, v in state["workers"].items() if v["status"] == "BUSY"]
             if busy and remove_worktrees:
                 raise SchedulerError(f"workers still leased: {busy}")
-            for wid, w in sorted(state["workers"].items()):
+            for wid, w in sorted(state["workers"].items(), key=lambda kv: slot_order(kv[0])):
                 if w.get("herdr_workspace") and w.get("herdr_owner_run") == run_id and w["status"] != "BUSY":
                     if self.herdr.available():
                         try:
@@ -2196,7 +2246,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     run = sub.add_parser("run", help="create / inspect / close runs")
     rs = run.add_subparsers(dest="action", required=True)
-    c = rs.add_parser("create", help="validate a 1..3 task DAG and create the integration worktree")
+    c = rs.add_parser("create", help="validate the task DAG (1..limits.max_tasks_per_request) and create the integration worktree")
     c.add_argument("--run", required=True)
     c.add_argument("--tasks", required=True, type=Path, help='JSON file: {"tasks": [...]}')
     c.add_argument("--base", default="HEAD")
@@ -2301,6 +2351,8 @@ def build_parser() -> argparse.ArgumentParser:
     mr.add_argument("--notes", default="", help="one-line summary")
     mr.add_argument("--report", required=True, type=Path,
                     help="markdown review report; appended with the verdict to the end of the task file")
+    mr.add_argument("--known-issues", default="",
+                    help="with PASS after the last fix round: what is still wrong (task file + final report)")
     mr.add_argument("--accept-scope", action="store_true")
     mr.add_argument("--decision", help="answered user decision (scope_exception for --accept-scope, abandon for FAIL)")
     rp = sub.add_parser("repair", help="send a repair packet to the same worker (retry affinity)")
@@ -2417,7 +2469,8 @@ def main(argv=None) -> int:
                 review = a.report.read_text()
             except OSError as e:
                 raise SchedulerError(f"cannot read review report: {e}") from e
-            out = s.mark_reviewed(a.run, a.task, a.verdict, a.notes, a.accept_scope, review, a.decision)
+            out = s.mark_reviewed(a.run, a.task, a.verdict, a.notes, a.accept_scope, review, a.decision,
+                                  a.known_issues)
         elif a.cmd == "repair":
             out = s.repair(a.run, a.task, a.packet, a.launch, a.relaunch, a.decision, a.reason)
         elif a.cmd == "integrate":

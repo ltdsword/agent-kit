@@ -203,9 +203,10 @@ class TestConfig(Base):
         bad["worker"]["fallback_model"] = "gpt-6.1-sol"
         self.assertTrue(any("fallback" in e for e in S.validate_config(bad)))
         bad = copy.deepcopy(REAL_CONFIG)
-        bad["pool"]["size"] = 4
-        bad["pool"]["slots"].append("worker-4")
-        self.assertTrue(S.validate_config(bad))
+        bad["pool"]["size"] = 4  # slots and size disagree
+        self.assertTrue(any("pool.size" in e for e in S.validate_config(bad)))
+        bad["pool"].update(size=11, slots=[f"worker-{i}" for i in range(1, 12)])
+        self.assertTrue(any("1..10" in e for e in S.validate_config(bad)))
 
     def test_sample_dispatch_args_carry_model_and_effort(self):
         self.dag()
@@ -319,20 +320,54 @@ class TestRepairAndMerge(Base):
         self.assertEqual(sh(self.repo, "git", "rev-parse", "main"), self.base_sha)  # user branch untouched
         self.assertEqual(self.s.verify("r1")["run_status"], "DONE")
 
-    def test_retry_budget_exhausted_blocks(self):
+    def test_two_fix_rounds_then_no_more_review(self):
         self.s.create_run("r1", [self.task("T1", trivial=True)])
         self.s.dispatch_ready("r1", launch="herdr")
-        (self.repo / "packets" / "rep.md").write_text("# repair\n")
+        (self.repo / "packets" / "rep.md").write_text(
+            "# fix\n\n## Errors found\n1. `t1/out.txt:1`: says buggy. Evidence: test X fails\n\n"
+            "## Proposed fix\n1. In `t1/out.txt`, write fixed.\n\n## Do not\n- touch others\n")
+        for i in range(2):  # both fix rounds are routine: Opus gives the evidence
+            self.worker_commit("r1", "T1", f"try{i}\n")
+            self.s.collect("r1", "T1")
+            self.assertEqual(self.s.mark_reviewed("r1", "T1", "MAJOR_FIX")["status"], "FIX_REQUIRED")
+            self.s.repair("r1", "T1", "packets/rep.md", reason=f"test X fails, round {i + 1}")
+        tf = (self.repo / "packets" / "T1.md").read_text()
+        self.assertIn("## Fix round 1/2: errors and proposed fix", tf)
+        self.assertIn("## Fix round 2/2", tf)
+        self.assertIn("### Errors found\n1. `t1/out.txt:1`: says buggy", tf)
+        self.assertIn("### Proposed fix", tf)
+        self.assertNotIn("touch others", tf)  # only the errors and the fix are copied
+        self.worker_commit("r1", "T1", "try3\n")
+        self.s.collect("r1", "T1")
+        with self.assertRaisesRegex(S.SchedulerError, "no further review round"):
+            self.s.mark_reviewed("r1", "T1", "MAJOR_FIX")
+        out = self.s.mark_reviewed("r1", "T1", "PASS", known_issues="edge case Y still unhandled")
+        self.assertEqual(out["status"], "PASSED")
+        self.assertIn("Known issues (accepted: no fix rounds left)", (self.repo / "packets" / "T1.md").read_text())
+        self.assertEqual(self.s.integrate("r1")["results"][0]["result"], "MERGED")
+        self.s.verify("r1")
+        self.s.report("r1", "done")
+        rep = (self.s.store.run_dir("r1") / "final-report.md").read_text()
+        self.assertIn("- T1: edge case Y still unhandled", rep)
+        self.assertIn("| T1 | task T1 | MERGED | 2 |", rep)
+
+    def test_post_merge_failure_after_last_fix_round_blocks(self):
+        self.cfg["gate"]["post_merge_check"] = PY_FAIL
+        self.s = self.new_scheduler()
+        self.s.create_run("r1", [self.task("T1", trivial=True)])
+        self.s.dispatch_ready("r1", launch="none")
+        (self.repo / "packets" / "rep.md").write_text("# fix\n")
         for i in range(2):
             self.worker_commit("r1", "T1", f"try{i}\n")
             self.s.collect("r1", "T1")
             self.s.mark_reviewed("r1", "T1", "MAJOR_FIX")
-            self.s.repair("r1", "T1", "packets/rep.md", decision=self.user_decides("r1", "repair", "T1"))
+            self.s.repair("r1", "T1", "packets/rep.md", launch="none", reason="evidence")
         self.worker_commit("r1", "T1", "try3\n")
         self.s.collect("r1", "T1")
-        self.assertEqual(self.s.mark_reviewed("r1", "T1", "MAJOR_FIX")["status"], "BLOCKED")
+        self.s.mark_reviewed("r1", "T1", "PASS")
+        self.assertEqual(self.s.integrate("r1")["results"][0]["result"], "post_merge_failed")
         st = self.s.store.load("r1")
-        self.assertEqual(st["tasks"]["T1"]["major_repairs"], 2)
+        self.assertEqual(st["tasks"]["T1"]["status"], "BLOCKED")  # the user decides, not a 3rd round
         self.assertIsNone(st["workers"]["worker-1"]["task"])
 
     def test_post_merge_failure_not_merged(self):
@@ -585,7 +620,7 @@ class TestTaskFiles(Base):
         self.s.integrate("r1")
         self.s.verify("r1")
         text = (self.repo / "packets" / "T1.md").read_text()
-        order = [text.index(h) for h in ("## Worker result", "## Review - attempt 1: PASS",
+        order = [text.index(h) for h in ("## Worker result", "## Review round 1: PASS",
                                          "**Summary:** correct.", "## Integration: merged", "## Final gate: PASS")]
         self.assertEqual(order, sorted(order))
 
@@ -686,7 +721,7 @@ class TestDecisions(Base):
         self.worker_commit("r1", "T1")
         self.s.collect("r1", "T1")
         out = self.s.mark_reviewed("r1", "T1", "MAJOR_FIX")
-        self.assertIn("routine, your call: repair --run r1 --task T1", out["next"])  # first repair
+        self.assertIn("routine, your call (fix round 1/2)", out["next"])
         self.cfg["decisions"]["routine_repairs"] = 0
         self.s = self.new_scheduler()
         did = self.s.decision_ask("r1", "repair", "Fix?", "tests fail", ["A=repair", "B=stop"], "T1")["decision"]
@@ -711,7 +746,9 @@ class TestDecisions(Base):
         with self.assertRaisesRegex(S.SchedulerError, "at least 2 options"):
             self.s.decision_ask("r1", "question", "t", "q", ["A=only"])
 
-    def test_first_repair_routine_later_repairs_critical(self):
+    def test_routine_fix_rounds_then_critical(self):
+        self.cfg["decisions"]["routine_repairs"] = 1
+        self.s = self.new_scheduler()
         self.s.create_run("r1", [self.task("T1", trivial=True)])
         self.s.dispatch_ready("r1", launch="none")
         (self.repo / "packets" / "rep.md").write_text("# repair\n")
@@ -1128,7 +1165,8 @@ class TestModels(Base):
         n = lambda model: str(next(i for i, r in enumerate(rows, 1) if r["model"] == model))
         keys = [n("claude-fable-5-1"), "",        # orchestrator: Fable, default effort
                 "", "",                           # scout: keep, keep
-                n("gpt-x-sol"), "3"]              # worker: gpt-x-sol, effort #3 = ultra
+                n("gpt-x-sol"), "3",              # worker: gpt-x-sol, effort #3 = ultra
+                ""]                               # number of workers: keep
         with mock.patch.object(K.sys.stdin, "isatty", return_value=True), \
                 mock.patch("builtins.input", side_effect=keys), mock.patch("builtins.print"):
             self.assertEqual(K.main(["--workspace", str(ws)]), 0)
@@ -1137,14 +1175,59 @@ class TestModels(Base):
         self.assertEqual((cfg["worker"]["model"], cfg["worker"]["reasoning_effort"]), ("gpt-x-sol", "ultra"))
         self.assertEqual(json.loads((ws / ".claude" / "settings.json").read_text())["model"], "claude-fable-5-1")
         self.assertIn("model: claude-sonnet-5-5", (ws / ".claude" / "agents" / "scout.md").read_text())
+        self.assertEqual(cfg["pool"]["size"], 3)
+
+    def test_num_worker(self):
+        ws = Path(self.tmp.name) / "ws"
+        (ws / ".agent-system").mkdir(parents=True)
+        (ws / ".agent-system" / "config.json").write_text(json.dumps(self.cfg))
+        with mock.patch("builtins.print"):
+            self.assertEqual(K.main(["--workspace", str(ws), "--num-worker", "5", "--no-input"]), 0)
+            self.assertEqual(K.main(["--workspace", str(ws), "--num-worker", "11", "--no-input"]), 2)
+            self.assertEqual(K.main(["--workspace", str(ws), "--num-worker", "0", "--no-input"]), 2)
+        cfg = json.loads((ws / ".agent-system" / "config.json").read_text())
+        self.assertEqual(cfg["pool"]["slots"], [f"worker-{i}" for i in range(1, 6)])
+        self.assertEqual((cfg["pool"]["size"], cfg["limits"]["max_parallel"], cfg["limits"]["max_tasks_per_request"]),
+                         (5, 5, 5))
+        self.assertEqual(cfg["worker"]["model"], self.cfg["worker"]["model"])  # models untouched
+        self.assertEqual(S.validate_config(cfg), [])
+        for i in (4, 5):
+            (self.repo / "packets" / f"T{i}.md").write_text(f"# packet T{i}\n")
+        s = S.Scheduler(self.repo, cfg=cfg, herdr=self.herdr)
+        s.create_run("r1", [self.task(f"T{i}", trivial=True) for i in range(1, 6)])
+        self.assertEqual(len(s.dispatch_ready("r1", launch="none")["dispatched"]), 5)
+        self.assertEqual(sorted(["worker-10", "worker-2", "worker-1"], key=S.slot_order),
+                         ["worker-1", "worker-2", "worker-10"])
 
 
 class StartHerdr(FakeHerdr):
-    """FakeHerdr plus the raw calls `agent-kit start` makes (focus)."""
+    """FakeHerdr plus the raw calls `agent-kit start` makes (focus) and Herdr's real agent record."""
+
+    def __init__(self):
+        super().__init__()
+        self.sessions, self.ws_of = {}, {}
 
     def _call(self, *args, timeout_s=None):
         self.calls.append(("call", *args))
         return {}
+
+    def agent_start(self, name, pane, agent_args, timeout_ms, kind="codex"):
+        self.ws_of[name] = pane.split(":")[0]
+        return super().agent_start(name, pane, agent_args, timeout_ms, kind)
+
+    def agent_get(self, name):
+        if name not in self.live:
+            raise S.SchedulerError("agent not found")
+        sid = self.sessions.get(name)
+        return {"result": {"agent": {"name": name, "agent_status": self.live[name],
+                                     "workspace_id": self.ws_of.get(name, "wX"),
+                                     **({"agent_session": {"kind": "id", "value": sid}} if sid else {})}}}
+
+    def workspace_close(self, ws):
+        super().workspace_close(ws)
+        for name, w in list(self.ws_of.items()) + [(n, "wX") for n in self.live if n not in self.ws_of]:
+            if w == ws:
+                self.live.pop(name, None)
 
 
 class TestStart(WorkspaceBase):
@@ -1216,6 +1299,78 @@ class TestStart(WorkspaceBase):
         self.assertIn("--when-ready", popens[0][0])
         self.assertEqual(execs, [("herdr", ["herdr"])])
         self.assertFalse([c for c in self.h.calls if c[0] == "agent_start"])  # the helper does that
+
+    def test_start_saves_the_chat_id(self):
+        self.set_orch(kind="claude", model="claude-opus-5-5", effort="high")
+        self.start(env={"HERDR_ENV": "1"})
+        args = [c for c in self.h.calls if c[0] == "agent_start"][0][3]
+        saved = KS.saved_session(self.ws)
+        self.assertEqual(args[:2], ["--session-id", saved["session_id"]])
+        self.assertEqual((saved["kind"], saved["agent"]), ("claude", "orch-repo"))
+
+    def test_continue_restarts_in_the_same_chat_with_new_settings(self):
+        self.set_orch(kind="claude", model="claude-opus-5-5", effort="high")
+        self.h.live["orch-repo"], self.h.sessions["orch-repo"] = "idle", "chat-1"
+        self.set_orch(kind="claude", model="claude-fable-5-1", effort="max")  # agent-kit config
+        rc, _, _ = self.start("--continue", env={"HERDR_ENV": "1"})
+        self.assertEqual(rc, 0)
+        self.assertIn(("workspace_close", "wX"), self.h.calls)
+        args = [c for c in self.h.calls if c[0] == "agent_start"][0][3]
+        self.assertEqual(args, ["--resume", "chat-1", "--model", "claude-fable-5-1", "--effort", "max"])
+        self.assertEqual(KS.saved_session(self.ws)["session_id"], "chat-1")
+
+    def test_continue_refuses_a_busy_orchestrator_unless_forced(self):
+        self.set_orch(kind="claude", model="claude-opus-5-5")
+        self.h.live["orch-repo"], self.h.sessions["orch-repo"] = "working", "chat-1"
+        with mock.patch("sys.stderr"):
+            rc, _, _ = self.start("--continue", env={"HERDR_ENV": "1"})
+        self.assertEqual(rc, 1)
+        self.assertFalse([c for c in self.h.calls if c[0] in ("workspace_close", "agent_start")])
+        rc, _, _ = self.start("--continue", "--force", env={"HERDR_ENV": "1"})
+        self.assertEqual(rc, 0)
+        self.assertEqual([c for c in self.h.calls if c[0] == "agent_start"][0][3][:2], ["--resume", "chat-1"])
+
+    def test_continue_uses_the_saved_chat_or_starts_new(self):
+        self.set_orch(kind="codex", model="gpt-6-sol", effort="high")
+        self.start("--continue", env={"HERDR_ENV": "1"})  # nothing saved, nothing running: a new chat
+        first = [c for c in self.h.calls if c[0] == "agent_start"][-1][3]
+        self.assertNotIn("resume", first)
+        self.h.live.clear()
+        KS.save_session(self.ws, "codex", "chat-9", "orch-repo")
+        self.start("--continue", env={"HERDR_ENV": "1"})
+        args = [c for c in self.h.calls if c[0] == "agent_start"][-1][3]
+        self.assertEqual(args[:4], ["resume", "chat-9", "-m", "gpt-6-sol"])
+        self.assertEqual(len([c for c in self.h.calls if c[0] == "agent_prompt"]), 1)  # no bootstrap on resume
+        self.h.live.clear()
+        self.start("--continue", "--session", "chat-7", env={"HERDR_ENV": "1"})
+        self.assertEqual([c for c in self.h.calls if c[0] == "agent_start"][-1][3][:2], ["resume", "chat-7"])
+
+    def test_config_saves_the_running_chat_id(self):
+        self.h.live["orch-repo"], self.h.sessions["orch-repo"] = "idle", "chat-3"
+        with mock.patch("builtins.print"):
+            self.assertEqual(K.main(["--workspace", str(self.ws), "--num-worker", "4", "--no-input"], herdr=self.h), 0)
+        self.assertEqual(KS.saved_session(self.ws)["session_id"], "chat-3")
+
+    def test_hook_records_the_active_chat(self):
+        hook = self.ws / ".agent-system" / "scripts" / "record-session.py"
+        hook.parent.mkdir(parents=True, exist_ok=True)
+        hook.write_text((Path(KS.__file__).parent / "scripts" / "record-session.py").read_text())
+        run = lambda ev: subprocess.run([sys.executable, str(hook)], input=json.dumps(ev), text=True,
+                                        capture_output=True)
+        self.assertEqual(run({"session_id": "w1", "cwd": str(self.ws / "worktrees" / "worker-1"),
+                              "hook_event_name": "SessionStart"}).returncode, 0)
+        self.assertEqual(KS.saved_session(self.ws), {})  # not the workspace: ignored
+        run({"session_id": "c1", "cwd": str(self.ws), "hook_event_name": "SessionStart",
+             "transcript_path": "/x/projects/elsewhere/c1.jsonl"})
+        run({"session_id": "c2", "cwd": str(self.ws), "hook_event_name": "UserPromptSubmit"})  # e.g. after /resume
+        self.assertEqual((KS.saved_session(self.ws)["session_id"], KS.saved_session(self.ws)["kind"]), ("c2", "claude"))
+        self.assertEqual(run("not json").returncode, 0)  # never blocks Claude
+        KS.save_session(self.ws, "claude", "c1", "orch-repo")
+        f = KS.session_file(self.ws)
+        f.write_text(json.dumps({**json.loads(f.read_text()), "transcript": "/x/projects/elsewhere/c1.jsonl"}))
+        sid, note = KS.stop_for_continue(KS.plan(self.ws, self.cfg), self.h, None, False)
+        self.assertEqual(sid, "c1")
+        self.assertIn("started in another folder", note)
 
     def test_missing_program_and_dry_run(self):
         self.set_orch(kind="grok", model="grok-4")
