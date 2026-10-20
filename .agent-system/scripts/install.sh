@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # agent-kit: copy the orchestration kit into a project workspace, or update one.
-#   agent-kit create [--folder=<repo>] [--dry-run] [model options]
+#   agent-kit create [--folder=<repo>] [--dry-run] [--init-git] [model options]
 #   agent-kit update [--folder=<repo>] [--dry-run] [--force-agent]
 #   agent-kit config [--folder=<repo>] [model options] [--show] [--list]
 #   agent-kit start  [--folder=<repo>] [--dry-run] [--no-attach]   open Herdr + launch the orchestrator
@@ -9,22 +9,23 @@
 #   model options: --model-orchestrator=M --effort-orchestrator=E --model-scout=M --effort-scout=E
 #                  --model-worker=M --effort-worker=E  (M: model or alias, or <program>/<model>)
 #                  --num-worker=N  (parallel workers, 1..10; default 3)
-#   agent-kit [--dry-run] [--force-agent] <target-repo>    legacy in-repo mode (kit inside the repo)
+#   agent-kit [--dry-run] [--force-agent] [--init-git] <target-repo>   legacy: kit inside the repo
 # <repo> is the repo folder (default: the current folder). The workspace is <repo>.workspace next
 # to it, linked back as <repo>.workspace/<repo> -> ../<repo>. A folder already named *.workspace
 # is taken as the workspace itself, so `agent-kit update` also works from inside a workspace.
 # create: make the workspace (kit, config with project.path, CLAUDE.md/AGENTS.md, .claude/, folders).
 # update: refresh the kit files; keeps config.json, project notes and customized scout.md.
-# The kit is copied from this script's kit home (e.g. ~/Code/agent-kit, ~/.local/bin/agent-kit
-# links here; or /usr/share/agent-kit from the apt package). Nothing is ever written into the repo: create/update fail if its git status changes.
+# The kit is copied from this script's kit home (~/Code/agent-kit via ~/.local/bin/agent-kit, or
+# /usr/share/agent-kit from apt). Nothing is written into the repo, except `git init` + a first commit
+# when create finds no repo and you agree (--init-git: yes); create/update fail if its git status changes.
 set -euo pipefail
 
 SELF="$(readlink -f "${BASH_SOURCE[0]}")"
 SRC="$(cd "$(dirname "$SELF")/../.." && pwd -P)"   # kit home: holds .agent-system/
-usage() { sed -n '2,19p' "$SELF" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,20p' "$SELF" | sed 's/^# \{0,1\}//'; }
 die() { echo "error: $*" >&2; exit 1; }
 
-CMD=""; DRY=0; FORCE_AGENT=0; FOLDER=""; TARGET=""; MODEL_ARGS=(); NO_ATTACH=0; FORCE=0; SESSION=""
+CMD=""; DRY=0; FORCE_AGENT=0; FOLDER=""; TARGET=""; MODEL_ARGS=(); NO_ATTACH=0; FORCE=0; SESSION=""; INIT_GIT=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --model-*=*|--effort-*=*|--num-worker=*) MODEL_ARGS+=("$1") ;;
@@ -38,6 +39,7 @@ while [ $# -gt 0 ]; do
     --folder) [ $# -ge 2 ] || die "--folder needs a value"; FOLDER="$2"; shift ;;
     --dry-run) DRY=1 ;;
     --force-agent) FORCE_AGENT=1 ;;
+    --init-git) INIT_GIT=1 ;;
     -h|--help) usage; exit 0 ;;
     -*) echo "unknown option: $1" >&2; usage >&2; exit 2 ;;
     *)
@@ -52,6 +54,7 @@ done
 [ -z "$FOLDER" ] || [ -n "$CMD" ] || die "--folder only applies to create/update/config/start/continue"
 [ ${#MODEL_ARGS[@]} -eq 0 ] || [ "$CMD" = create ] || [ "$CMD" = config ] \
   || die "model options only apply to create and config"
+[ $INIT_GIT -eq 0 ] || [ "$CMD" = create ] || [ -n "$TARGET" ] || die "--init-git only applies to create"
 
 do_() { if [ $DRY -eq 1 ]; then echo "[dry-run] $*"; else "$@"; fi; }
 repo_status() { git -C "$1" status --porcelain --untracked-files=all; }
@@ -171,6 +174,44 @@ check_repo_unchanged() {  # check_repo_unchanged <repo> <status before>
   [ $DRY -eq 1 ] || [ "$(repo_status "$1")" = "$2" ] || die "the repo's git status changed during install: inspect $1"
 }
 
+ensure_git_repo() {  # ensure_git_repo <folder>: a Git repo with a commit, or offer to make one
+  local repo="$1" what cmd answer
+  [ -d "$repo" ] || die "$repo does not exist"
+  git -C "$repo" rev-parse --verify HEAD >/dev/null 2>&1 && return 0
+  if git -C "$repo" rev-parse --git-dir >/dev/null 2>&1 \
+     && [ "$(git -C "$repo" rev-parse --show-toplevel)" = "$(cd "$repo" && pwd -P)" ]; then
+    what="is a Git repository with no commits yet"; cmd="git add -A && git commit -m \"Initial commit\""
+  elif git -C "$repo" rev-parse --git-dir >/dev/null 2>&1; then
+    return 0  # inside another repo: the top-folder check below explains it
+  else
+    what="is not a Git repository"; cmd="git init && git add -A && git commit -m \"Initial commit\""
+  fi
+  echo "$repo $what. agent-kit needs a Git repository with at least one commit (workers use Git worktrees)."
+  echo "It can run, in $repo:  $cmd"
+  echo "This commits every file in the folder (except those in its .gitignore): add a .gitignore first if"
+  echo "some files must not be committed (build output, secrets, large data)."
+  if [ $DRY -eq 1 ]; then
+    echo "[dry-run] would ask before running it; the rest of the dry run needs the repository"; exit 0
+  fi
+  if [ $INIT_GIT -eq 1 ]; then
+    answer=y; echo "--init-git: yes"
+  else
+    printf "Create it now? [y/N] "
+    read -r answer || answer=""
+    [ -t 0 ] || echo "$answer"
+  fi
+  case "$answer" in
+    [yY]|[yY][eE][sS]) ;;
+    *) die "aborted: $repo $what (answer y, or pass --init-git, to create it)" ;;
+  esac
+  git -C "$repo" var GIT_COMMITTER_IDENT >/dev/null 2>&1 \
+    || die "Git needs your name and email first: git config --global user.name \"Your Name\" && git config --global user.email you@example.com"
+  git -C "$repo" rev-parse --git-dir >/dev/null 2>&1 || git -C "$repo" init -q || die "git init failed in $repo"
+  git -C "$repo" add -A && git -C "$repo" commit -q --allow-empty -m "Initial commit" \
+    || die "the first commit failed in $repo"
+  echo "created the Git repository: $(git -C "$repo" log --oneline -1) ($(git -C "$repo" ls-files | wc -l | tr -d ' ') files)"
+}
+
 resolve_folder() {  # sets dest (the workspace) and repo_name from --folder or the current folder
   local f
   f="$(realpath -m -- "${FOLDER:-$PWD}")"
@@ -186,8 +227,7 @@ cmd_create() {
   resolve_folder
   [ ! -e "$dest/.agent-system" ] || die "$dest already has .agent-system: use 'agent-kit update'"
   repo="$(dirname "$dest")/$repo_name"
-  git -C "$repo" rev-parse --verify HEAD >/dev/null 2>&1 \
-    || die "$repo is not a Git repository with at least one commit"
+  ensure_git_repo "$repo"
   repo="$(cd "$repo" && pwd -P)"
   [ "$(git -C "$repo" rev-parse --show-toplevel)" = "$repo" ] \
     || die "$repo is inside a Git repository, not its top folder: pass the repo's top folder"
@@ -318,8 +358,7 @@ PY
 cmd_legacy() {  # kit inside the target repo (your own repos only: also edits its .gitignore)
   TARGET="$(cd "$TARGET" && pwd -P)"
   [ "$SRC" != "$TARGET" ] || die "target is the kit home"
-  git -C "$TARGET" rev-parse --verify HEAD >/dev/null 2>&1 \
-    || die "$TARGET is not a Git repository with at least one commit (run 'git init && git add -A && git commit' first)"
+  ensure_git_repo "$TARGET"
   echo "installing agent-system (in-repo mode) from $SRC into $TARGET"
   copy_kit "$TARGET"
   if [ -f "$TARGET/.agent-system/config.json" ]; then

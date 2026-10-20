@@ -66,7 +66,8 @@ Worker agents are named `<slot>-<run>`, e.g. `worker-1-r1`. Their workspaces are
 `agent-kit create` sets up the kit files and the scout agent. You set up once per machine: the
 programs you chose for each role, installed and logged in; their Herdr integrations
 (`herdr integration install <program>`, so Herdr can track their state); for Codex workers
-`~/.codex/worker.config.toml` (see the top-level README); and a git repo with a baseline commit.
+`~/.codex/worker.config.toml` (see the top-level README); and a git repo with a baseline commit
+(`agent-kit create` offers to make one: `git init` + a first commit, only if you answer yes).
 Steps 1-2 below apply to Codex.
 
 1. **Codex client 0.163.0 or newer, logged in.** Older clients (e.g. 0.154.0) reject the worker model
@@ -295,9 +296,8 @@ keeps its `config.json` and notes. Details: `docs/WORKSPACE-SETUP.md` section 4.
 
 ```bash
 cd ~/Code/other-project
-git init && git add -A && git commit -m "baseline"        # only if it is not a git repo yet
 agent-kit --dry-run ~/Code/other-project                  # preview
-agent-kit ~/Code/other-project
+agent-kit ~/Code/other-project                            # not a git repo yet? it offers git init + a first commit
 git add .agent-system .claude CLAUDE.md AGENTS.md .gitignore
 git commit -m "chore: add multi-agent orchestration kit"
 ```

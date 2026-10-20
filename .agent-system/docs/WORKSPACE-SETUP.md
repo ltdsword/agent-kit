@@ -93,9 +93,12 @@ repo's top folder) and creates the new folder `<repo>.workspace` next to it, wit
 - the models for each role (orchestrator, scout, worker): asked on a terminal, or from `--model-*` /
   `--effort-*` options; change them later with `agent-kit config` (README, "Choosing models").
 
-It refuses an existing workspace (use `update`), a folder that is not a repo's top folder, or a missing
-repo, writes nothing into the repo, and fails if the repo's `git status` changes. `--dry-run` prints
-the plan.
+If the folder is not a Git repository yet (or has no commit), it explains and asks before running
+`git init && git add -A && git commit -m "Initial commit"` there: yes creates it and continues, no (or
+no terminal to ask on) stops without changes; `--init-git` answers yes. That first commit is the only
+thing it ever writes into the repo. It refuses an existing workspace (use `update`), a missing folder,
+or a folder inside another repo that is not its top folder, and fails if the repo's `git status`
+changes. `--dry-run` prints the plan.
 
 ```bash
 # 2. Fill in the TODOs at the top of CLAUDE.md (stack, generated code); check gate commands and
@@ -181,5 +184,6 @@ Code and Codex are verified (`models.py`, README "Choosing models").
 full dispatch -> collect -> integrate -> verify -> cleanup with `git -C repo status --porcelain` empty
 throughout, state/task files/worktrees under the workspace, the workspace not a git repo; refusal of
 a bad `project.path`; doctor checks. `TestInstall`: `agent-kit create --folder=<repo>` from the parent
-folder, from inside the repo, and from a `*.workspace` folder; refusals (no repo, repo subfolder), `update` keeping config and notes, stack detection, dry run,
+folder, from inside the repo, and from a `*.workspace` folder; refusals (missing folder, repo subfolder), the Git offer (no repo or no commit: answer no / no answer
+aborts, yes or `--init-git` creates it), `update` keeping config and notes, stack detection, dry run,
 legacy in-repo mode.

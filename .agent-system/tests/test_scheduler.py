@@ -1411,9 +1411,10 @@ class TestInstall(Base):
         sh(self.repo, "rm", "-rf", "packets")
         self.ws = Path(self.tmp.name) / "repo.workspace"
 
-    def kit(self, *args, cwd=None, ok=True):
+    def kit(self, *args, cwd=None, ok=True, input=None):
         p = subprocess.run(["bash", str(self.INSTALL), *args], cwd=cwd or self.tmp.name,
-                           capture_output=True, text=True)
+                           capture_output=True, text=True,
+                           **({"input": input} if input is not None else {"stdin": subprocess.DEVNULL}))
         if ok:
             self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
         else:
@@ -1466,11 +1467,49 @@ class TestInstall(Base):
         self.kit("create", cwd=self.ws)  # a *.workspace folder is taken as the workspace itself
         self.assert_workspace()
 
+    def test_create_offers_to_create_the_git_repo(self):
+        plain = Path(self.tmp.name) / "plain"
+        plain.mkdir()
+        (plain / "a.txt").write_text("hello\n")
+        ws = Path(self.tmp.name) / "plain.workspace"
+        out = self.kit("create", "--folder=plain", "--dry-run").stdout  # dry run: asks nothing, changes nothing
+        self.assertIn("is not a Git repository", out)
+        self.assertIn("[dry-run] would ask", out)
+        self.assertFalse((plain / ".git").exists())
+        for answer in ("n\n", None):  # "no", or no answer at all: abort, nothing created
+            err = self.kit("create", "--folder=plain", input=answer, ok=False).stderr
+            self.assertIn("aborted", err)
+            self.assertIn("--init-git", err)
+            self.assertFalse((plain / ".git").exists())
+            self.assertFalse(ws.exists())
+        out = self.kit("create", "--folder=plain", input="y\n").stdout
+        self.assertIn("git init && git add -A", out)
+        self.assertIn("created the Git repository", out)
+        self.assertEqual(sh(plain, "git", "ls-files"), "a.txt")
+        self.assertEqual(sh(plain, "git", "rev-list", "--count", "HEAD"), "1")
+        self.assertEqual(sh(plain, "git", "status", "--porcelain"), "")
+        self.assertEqual(os.readlink(ws / "plain"), "../plain")
+        self.assertTrue((ws / ".agent-system" / "config.json").is_file())
+
+    def test_create_init_git_flag_and_repo_without_commits(self):
+        empty = Path(self.tmp.name) / "empty"
+        empty.mkdir()
+        sh(empty, "git", "init", "-q")
+        out = self.kit("create", "--folder=empty", "--init-git").stdout  # no question asked
+        self.assertIn("no commits yet", out)
+        self.assertNotIn("git init &&", out)
+        self.assertEqual(sh(empty, "git", "rev-list", "--count", "HEAD"), "1")
+        self.assertTrue((Path(self.tmp.name) / "empty.workspace" / ".agent-system").is_dir())
+        before = sh(self.repo, "git", "rev-list", "--count", "HEAD")
+        self.kit("create", "--folder=repo", "--init-git")  # a repo with commits: just proceeds
+        self.assertEqual(sh(self.repo, "git", "rev-list", "--count", "HEAD"), before)
+        self.assertIn("only applies to create", self.kit("update", "--init-git", ok=False).stderr)
+
     def test_create_refusals(self):
         other = Path(self.tmp.name) / "repo-tools"
         other.mkdir()
         self.assertIn("not a Git repository", self.kit("create", cwd=other, ok=False).stderr)
-        self.assertIn("not a Git repository", self.kit("create", "--folder=nope", ok=False).stderr)
+        self.assertIn("does not exist", self.kit("create", "--folder=nope", ok=False).stderr)
         (self.repo / "sub").mkdir()
         self.assertIn("top folder", self.kit("create", cwd=self.repo / "sub", ok=False).stderr)
         self.assertFalse((self.repo / "sub.workspace").exists())

@@ -163,6 +163,23 @@ Native Windows (PowerShell, cmd) is not supported.
 `wsl --install` installs a current Ubuntu LTS. If `python3 --version` shows less than 3.11, install a
 newer Ubuntu with `wsl --install -d Ubuntu-24.04`.
 
+**Using it from Windows.** agent-kit, Herdr, the agent programs and your workspaces all live in WSL, and
+you run them there: copying the kit or a workspace out to Windows does not work (`agent-kit` is a bash
+script, the workspace links back to the repo with a Linux symlink, and the saved paths are Linux
+paths). You can still read and edit everything from Windows:
+
+| From Windows | How |
+|---|---|
+| Browse the files in Explorer | `\\wsl.localhost\Ubuntu\home\<user>\Code`, or `explorer.exe .` in the Ubuntu terminal (task files in `gen-tasks/`, `final-report.md`, `final.diff`) |
+| Edit in VS Code | Install the **WSL** extension, then `code .` in the Ubuntu terminal: a normal VS Code window on the WSL files |
+| Run agent-kit and watch Herdr | **Windows Terminal** with an Ubuntu tab: `agent-kit start` |
+| Get the result into a Windows project | Choose "Merge and push" at the end of a run, then `git pull` in your Windows clone: the result is ordinary Git commits |
+
+Don't point Windows Git tools (Git for Windows, GitHub Desktop, Visual Studio) at the repo folder that
+agent-kit uses in WSL: they disagree with WSL's Git about line endings and file permissions, so files
+show as changed when nobody edited them, and agent-kit refuses to merge into a folder with
+uncommitted changes. If you want a Windows copy, keep it as a separate clone and sync it with push/pull.
+
 #### From Git (any system; also for working on the kit)
 
 ```bash
@@ -192,6 +209,7 @@ it from apt and from Git at the same time: whichever comes first in `PATH` wins 
 # 1. Create the workspace next to the repo (writes nothing into the repo).
 cd ~/Code
 agent-kit create --folder=myrepo             # creates ~/Code/myrepo.workspace; asks which models to use
+                                             # (not a Git repo yet? it offers to run git init + a first commit)
 
 # 2. Finish the project notes and check.
 cd myrepo.workspace
@@ -298,9 +316,9 @@ the same). Use that only for repos you own.
 ## 4. agent-kit commands
 
 ```bash
-agent-kit create [--folder=<repo>] [--dry-run]
+agent-kit create [--folder=<repo>] [--dry-run] [--init-git]
 agent-kit update [--folder=<repo>] [--dry-run] [--force-agent]
-agent-kit [--dry-run] [--force-agent] <target-repo>      # legacy in-repo mode
+agent-kit [--dry-run] [--force-agent] [--init-git] <target-repo>      # legacy in-repo mode
 agent-kit --help
 ```
 
@@ -308,6 +326,7 @@ agent-kit --help
 |---|---|
 | `agent-kit create --folder=myrepo` | From the repo's parent folder: create `myrepo.workspace` next to `myrepo` and install everything |
 | `agent-kit create` | Same, run from inside the repo (the current folder is the repo; it must be the repo's top folder) |
+| `agent-kit create --init-git` | Same; if the folder is not a Git repo yet (or has no commit), create it without asking (`git init`, first commit) |
 | `agent-kit update --folder=myrepo` | Bring `myrepo.workspace` up to the latest kit |
 | `agent-kit update` | Same, run from inside the workspace (a folder named `*.workspace` is taken as the workspace itself) or from inside the repo |
 | `agent-kit config --model-worker=gpt-6-sol --effort-worker=high` | Change a workspace's models (orchestrator, scout, worker); see "Choosing models" below |
@@ -339,8 +358,29 @@ agent-kit --help
   orchestrator rules, and `AGENTS.md` with the same orchestrator rules for programs other than Claude
   Code (worker rules live in `.agent-system/WORKER-RULES.md`).
 
-It refuses when the workspace already has a kit (use `update`), when the folder is not a Git repo's
-top folder, or when the repo has no commit. At the end it checks that the new workspace loads.
+**A folder without Git.** The workers use Git worktrees, so the repo must be a Git repository with at
+least one commit. If it already is, `create` just proceeds. If not, `create` explains and asks:
+
+```
+myapp is not a Git repository. agent-kit needs a Git repository with at least one commit (workers use Git worktrees).
+It can run, in myapp:  git init && git add -A && git commit -m "Initial commit"
+This commits every file in the folder (except those in its .gitignore): add a .gitignore first if
+some files must not be committed (build output, secrets, large data).
+Create it now? [y/N]
+```
+
+- **y**: it creates the repository and the first commit, then sets up the workspace as normal. A
+  repository with no commits yet only gets the first commit.
+- **n**, Enter, or no answer (e.g. not run from a terminal): it stops and changes nothing.
+- `--init-git` answers yes without asking (for scripts); `--dry-run` only shows what it would ask.
+- Git must know your name and email for the commit; if not, it stops and shows the two
+  `git config --global` commands.
+
+This first commit is the only thing agent-kit ever writes into your repo, and only when you agree.
+
+It refuses when the workspace already has a kit (use `update`), when the folder does not exist, or
+when the folder is inside another Git repository but not its top folder. At the end it checks that
+the new workspace loads.
 
 **`update`** replaces the kit files (scheduler, prompts, scripts, docs, tests, templates) and the
 marked sections of `CLAUDE.md`/`AGENTS.md`. It **keeps** `config.json`, your project notes, your task
@@ -721,6 +761,8 @@ Free GitHub Pages needs a public repository.
 | `collect` says `pending` / `ambiguous` | No report yet / report disagrees with git: inspect `worktrees/worker-N` |
 | `doctor`: `project-clean-of-kit` FAIL | AI tooling files show in the repo's `git status`: move them to the workspace |
 | `agent-kit create`: "inside a Git repository, not its top folder" | Run it from the repo's top folder, or pass `--folder=<repo>` |
+| `agent-kit create`: "aborted: ... is not a Git repository" | You answered no (or there was no terminal to ask on). Run it again and answer `y`, or pass `--init-git`; add a `.gitignore` first if needed |
+| `agent-kit create`: "Git needs your name and email first" | `git config --global user.name "Your Name"` and `git config --global user.email you@example.com`, then run it again |
 | `verify.sh`: `SKIP pytest - ... not installed` | `python3 -m pip install pytest`; until then Python tests are not run |
 | A run is stuck | `S run status --run R`, `S resume --run R`, or close it via a decision |
 
