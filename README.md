@@ -42,6 +42,7 @@ The orchestrator asks with clickable choices (you get notified via Herdr / Remot
 ## Contents
 
 1. [Requirements](#1-requirements)
+   - Install: [Ubuntu / Debian](#ubuntu--debian), [macOS](#macos), [Windows (WSL2)](#windows-wsl2), [From Git](#from-git-any-system-also-for-working-on-the-kit)
 2. [Quick start](#2-quick-start)
 3. [How it works](#3-how-it-works)
 4. [agent-kit commands](#4-agent-kit-commands)
@@ -60,7 +61,7 @@ The orchestrator asks with clickable choices (you get notified via Herdr / Remot
 
 | Tool | Why | Check |
 |---|---|---|
-| Linux, macOS or Windows (WSL2), `bash`, `git`, `python3` 3.11+ | scheduler and scripts (Python stdlib only, no pip installs) | `python3 --version` |
+| Linux, macOS 12.3+ or Windows (WSL2), `bash`, `git`, `python3` 3.11+ (macOS: from Homebrew) | scheduler and scripts (Python stdlib only, no pip installs) | `python3 --version` |
 | The agent programs you choose, installed and logged in. Defaults: Claude Code (orchestrator and scout) and Codex CLI 0.163.0+ (workers) | run the roles; any program Herdr supports can be chosen (section 4) | `claude --version`, `codex --version`, `codex login status` |
 | Herdr 0.9+ (terminal workspace manager for AI coding agents), with its Claude and Codex integrations | runs and shows the agents; live dispatch needs `HERDR_ENV=1` | `herdr status` |
 | `jq` (optional) | nicer error messages in `doctor.sh --probe-codex` | |
@@ -85,9 +86,27 @@ Test with `codex sandbox -- sh -c 'echo ok'`.
 
 ### Install
 
-**With apt** (Debian 12+, Ubuntu 24.04+, and Ubuntu on Windows WSL2):
+Pick your system. Each guide installs the same things: `git` and Python 3.11+, the agent programs
+(defaults: Claude Code for the orchestrator and scout, Codex CLI for workers), Herdr with its Claude
+and Codex integrations, and `agent-kit`. Then finish with [After installing](#after-installing-all-systems).
+
+#### Ubuntu / Debian
+
+Ubuntu 24.04+ or Debian 12+ (Ubuntu 22.04 ships Python 3.10, which is too old).
 
 ```bash
+# 1. Basics, and Node.js for the Codex CLI
+sudo apt update && sudo apt install -y git python3 curl nodejs npm
+
+# 2. Agent programs, then log in to each
+curl -fsSL https://claude.ai/install.sh | bash       # Claude Code; then run `claude` once to log in
+sudo npm install -g @openai/codex                    # Codex CLI; then `codex login`
+
+# 3. Herdr 0.9+: install it with its own instructions, then its integrations
+herdr integration install claude
+herdr integration install codex
+
+# 4. agent-kit
 curl -fsSL https://ltdsword.github.io/agent-kit/setup.sh | sudo sh   # once: adds the signed agent-kit repository
 sudo apt install agent-kit
 agent-kit --help
@@ -96,23 +115,74 @@ agent-kit --help
 The kit is installed in `/usr/share/agent-kit`. `sudo apt upgrade` brings new versions; then run
 `agent-kit update` in each workspace to copy the new kit into it.
 
-**Windows:** install WSL2 and Ubuntu (`wsl --install` in an administrator PowerShell, then restart),
-open the Ubuntu terminal, and install the agent programs and agent-kit there as on Linux. Keep your
-repos in the Linux file system (e.g. `~/Code`), not under `/mnt/c`: Git and the workers are much
-faster there, and symlinks work.
+On Ubuntu 24.04+, Codex's sandbox also needs the AppArmor step under "Linux sandbox" above.
 
-**From Git** (any Linux or macOS; also for working on the kit): clone the kit anywhere (the examples
-below use `~/Code`) and put `agent-kit` on your PATH:
+#### macOS
+
+macOS 12.3 or newer, with [Homebrew](https://brew.sh). The `python3` that comes with macOS is 3.9,
+so install a newer one with Homebrew. There is no apt on macOS, so install agent-kit from Git.
 
 ```bash
-git clone git@github.com:ltdsword/agent-kit.git ~/Code/agent-kit
+# 1. Basics
+xcode-select --install                               # git (skip if `git --version` works)
+brew install python@3.12 node
+python3 --version                                    # must be 3.11+; if not, put Homebrew first in PATH
+
+# 2. Agent programs, then log in to each
+curl -fsSL https://claude.ai/install.sh | bash       # Claude Code; then run `claude` once to log in
+npm install -g @openai/codex                         # Codex CLI; then `codex login`
+
+# 3. Herdr 0.9+: install it with its own instructions, then its integrations
+herdr integration install claude
+herdr integration install codex
+
+# 4. agent-kit, from Git
+git clone https://github.com/ltdsword/agent-kit.git ~/Code/agent-kit
+mkdir -p ~/.local/bin
+ln -s ~/Code/agent-kit/.agent-system/scripts/install.sh ~/.local/bin/agent-kit
+echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zshrc && source ~/.zshrc
+agent-kit --help
+```
+
+To update: `git -C ~/Code/agent-kit pull`, then `agent-kit update` in each workspace. Codex's
+sandbox on macOS uses the built-in Seatbelt, so the Linux AppArmor step does not apply. The macOS
+steps have not yet been tested on a real Mac; please report problems.
+
+#### Windows (WSL2)
+
+agent-kit runs on Windows inside WSL2 (Ubuntu on Windows), where everything works as on Linux.
+Native Windows (PowerShell, cmd) is not supported.
+
+1. In **PowerShell as administrator**: `wsl --install` (installs WSL2 and Ubuntu), then restart.
+2. Open **Ubuntu** from the Start menu and create your Linux user when asked.
+3. In the Ubuntu terminal, follow [Ubuntu / Debian](#ubuntu--debian) above, all steps.
+4. Keep your repos in the Linux file system, e.g. `~/Code`, **not** under `/mnt/c/...`: Git and the
+   workers are much faster there, and the workspace symlinks work. Open the files from Windows with
+   `explorer.exe .` or VS Code's WSL extension (`code .` in the Ubuntu terminal).
+
+`wsl --install` installs a current Ubuntu LTS. If `python3 --version` shows less than 3.11, install a
+newer Ubuntu with `wsl --install -d Ubuntu-24.04`.
+
+#### From Git (any system; also for working on the kit)
+
+```bash
+git clone https://github.com/ltdsword/agent-kit.git ~/Code/agent-kit   # or git@github.com:ltdsword/agent-kit.git
 mkdir -p ~/.local/bin
 ln -s ~/Code/agent-kit/.agent-system/scripts/install.sh ~/.local/bin/agent-kit   # ~/.local/bin must be on PATH
 agent-kit --help
 python3 -m unittest discover -s ~/Code/agent-kit/.agent-system/tests            # optional: offline self-test
 ```
 
-`agent-kit` follows its symlink to find the kit, so the kit folder can live anywhere.
+`agent-kit` follows its symlink to find the kit, so the kit folder can live anywhere. Don't install
+it from apt and from Git at the same time: whichever comes first in `PATH` wins (`which agent-kit`).
+
+#### After installing (all systems)
+
+1. Create the Codex worker profile `~/.codex/worker.config.toml` (see "Codex worker profile" above).
+2. Check: `claude --version`, `codex --version`, `codex login status`, `herdr status`,
+   `codex sandbox -- sh -c 'echo ok'`.
+3. Continue with [Quick start](#2-quick-start); after `agent-kit create`, run
+   `.agent-system/scripts/doctor.sh` in the workspace.
 
 ---
 

@@ -269,7 +269,7 @@ PY
     echo "[dry-run] choose models (asked on a terminal, or from --model-* options)"
   else
     echo; echo "== models (change later with: agent-kit config)"
-    kitconfig "$dest" "${MODEL_ARGS[@]}" || die "model choice failed; fix it with: agent-kit config --folder=$dest"
+    kitconfig "$dest" ${MODEL_ARGS[@]+"${MODEL_ARGS[@]}"} || die "model choice failed; fix it with: agent-kit config --folder=$dest"
   fi
   check_repo_unchanged "$repo" "$before"
   [ $DRY -eq 1 ] || PYTHONDONTWRITEBYTECODE=1 python3 "$dest/.agent-system/scheduler.py" --workspace-root "$dest" pool show >/dev/null \
@@ -353,7 +353,7 @@ cmd_config() {
   local dest repo_name
   resolve_folder
   [ -f "$dest/.agent-system/config.json" ] || die "$dest has no kit (.agent-system/config.json): use 'agent-kit create'"
-  kitconfig "$dest" "${MODEL_ARGS[@]}"
+  kitconfig "$dest" ${MODEL_ARGS[@]+"${MODEL_ARGS[@]}"}  # bash 3.2 (macOS): empty array + set -u
 }
 
 cmd_start() {
@@ -367,7 +367,7 @@ cmd_start() {
     [ $FORCE -eq 1 ] && args+=(--force)
     [ -n "$SESSION" ] && args+=(--session "$SESSION")
   fi
-  PYTHONDONTWRITEBYTECODE=1 exec python3 "$dest/.agent-system/kitstart.py" --workspace "$dest" "${args[@]}"
+  PYTHONDONTWRITEBYTECODE=1 exec python3 "$dest/.agent-system/kitstart.py" --workspace "$dest" ${args[@]+"${args[@]}"}
 }
 
 case "$CMD" in
