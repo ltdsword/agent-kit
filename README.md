@@ -60,7 +60,7 @@ The orchestrator asks with clickable choices (you get notified via Herdr / Remot
 
 | Tool | Why | Check |
 |---|---|---|
-| Linux or macOS, `bash`, `git`, `python3` 3.11+ | scheduler and scripts (Python stdlib only, no pip installs) | `python3 --version` |
+| Linux, macOS or Windows (WSL2), `bash`, `git`, `python3` 3.11+ | scheduler and scripts (Python stdlib only, no pip installs) | `python3 --version` |
 | The agent programs you choose, installed and logged in. Defaults: Claude Code (orchestrator and scout) and Codex CLI 0.163.0+ (workers) | run the roles; any program Herdr supports can be chosen (section 4) | `claude --version`, `codex --version`, `codex login status` |
 | Herdr 0.9+ (terminal workspace manager for AI coding agents), with its Claude and Codex integrations | runs and shows the agents; live dispatch needs `HERDR_ENV=1` | `herdr status` |
 | `jq` (optional) | nicer error messages in `doctor.sh --probe-codex` | |
@@ -85,7 +85,24 @@ Test with `codex sandbox -- sh -c 'echo ok'`.
 
 ### Install
 
-Clone the kit anywhere (the examples below use `~/Code`) and put `agent-kit` on your PATH:
+**With apt** (Debian 12+, Ubuntu 24.04+, and Ubuntu on Windows WSL2):
+
+```bash
+curl -fsSL https://ltdsword.github.io/agent-kit/setup.sh | sudo sh   # once: adds the signed agent-kit repository
+sudo apt install agent-kit
+agent-kit --help
+```
+
+The kit is installed in `/usr/share/agent-kit`. `sudo apt upgrade` brings new versions; then run
+`agent-kit update` in each workspace to copy the new kit into it.
+
+**Windows:** install WSL2 and Ubuntu (`wsl --install` in an administrator PowerShell, then restart),
+open the Ubuntu terminal, and install the agent programs and agent-kit there as on Linux. Keep your
+repos in the Linux file system (e.g. `~/Code`), not under `/mnt/c`: Git and the workers are much
+faster there, and symlinks work.
+
+**From Git** (any Linux or macOS; also for working on the kit): clone the kit anywhere (the examples
+below use `~/Code`) and put `agent-kit` on your PATH:
 
 ```bash
 git clone git@github.com:ltdsword/agent-kit.git ~/Code/agent-kit
@@ -579,6 +596,21 @@ agent-kit update --folder=~/Code/myrepo              # roll it out to each works
 | `tests/test_scheduler.py` | Scheduler, workspace mode and installer tests |
 | `docs/` | Workspace rule; Decision Hub plan (not planned) |
 | `../.claude/agents/scout.md` | The Sonnet scout definition |
+
+### Releasing (apt package)
+
+`packaging/build-deb.sh` builds `agent-kit_<version>_all.deb` from the last commit (`git archive`, so
+uncommitted and untracked files never ship); `packaging/build-apt-repo.sh` turns the released `.deb`
+files into a signed apt repository; `.github/workflows/release.yml` does both on a version tag and
+publishes the repository to GitHub Pages (`https://ltdsword.github.io/agent-kit`):
+
+```bash
+git tag v0.2.0 && git push origin v0.2.0   # tests, builds, creates the GitHub release, publishes apt
+```
+
+One-time setup: Settings → Pages → Source "GitHub Actions", and a repository secret
+`APT_SIGNING_KEY` holding the signing key (`gpg --armor --export-secret-keys <key-id>`; optional
+secret `APT_SIGNING_PASSPHRASE`). Keep the same key forever: users trust it once in `setup.sh`.
 
 ---
 

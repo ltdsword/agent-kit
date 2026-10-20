@@ -1,0 +1,74 @@
+# Release: on a version tag (git tag v0.2.0 && git push origin v0.2.0) test, build the .deb,
+# attach it to a GitHub release, and publish the signed apt repository (every released version)
+# to GitHub Pages. Run it by hand (Actions -> release -> Run workflow) to republish the repository
+# without a new release.
+# Needs: Settings -> Pages -> Source "GitHub Actions"; secret APT_SIGNING_KEY (armored private key,
+# gpg --armor --export-secret-keys); optional secret APT_SIGNING_PASSPHRASE.
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Test
+        run: |
+          git config --global user.name ci
+          git config --global user.email ci@example.com
+          python3 -m unittest discover -s .agent-system/tests -q
+
+      - name: Build the .deb
+        if: github.ref_type == 'tag'
+        run: packaging/build-deb.sh "${GITHUB_REF_NAME#v}" dist
+
+      - name: Publish the GitHub release
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" dist/*.deb --title "$GITHUB_REF_NAME" --generate-notes
+
+      - name: Collect every released .deb
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p debs
+          for tag in $(gh release list --limit 100 --json tagName --jq '.[].tagName'); do
+            gh release download "$tag" --pattern '*.deb' --dir debs --clobber
+          done
+
+      - name: Build the apt repository
+        env:
+          APT_SIGNING_KEY: ${{ secrets.APT_SIGNING_KEY }}
+          GPG_PASSPHRASE: ${{ secrets.APT_SIGNING_PASSPHRASE }}
+          APT_REPO_URL: https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}
+        run: |
+          [ -n "$APT_SIGNING_KEY" ] || { echo "secret APT_SIGNING_KEY is not set"; exit 1; }
+          echo "$APT_SIGNING_KEY" | gpg --batch --import
+          packaging/build-apt-repo.sh debs site
+
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+      - id: deploy
+        uses: actions/deploy-pages@v4

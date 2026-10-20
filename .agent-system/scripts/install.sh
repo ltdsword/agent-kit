@@ -15,8 +15,8 @@
 # is taken as the workspace itself, so `agent-kit update` also works from inside a workspace.
 # create: make the workspace (kit, config with project.path, CLAUDE.md/AGENTS.md, .claude/, folders).
 # update: refresh the kit files; keeps config.json, project notes and customized scout.md.
-# The kit is copied from this script's kit home (e.g. ~/Code/agent-kit; ~/.local/bin/agent-kit
-# links here). Nothing is ever written into the repo: create/update fail if its git status changes.
+# The kit is copied from this script's kit home (e.g. ~/Code/agent-kit, ~/.local/bin/agent-kit
+# links here; or /usr/share/agent-kit from the apt package). Nothing is ever written into the repo: create/update fail if its git status changes.
 set -euo pipefail
 
 SELF="$(readlink -f "${BASH_SOURCE[0]}")"
