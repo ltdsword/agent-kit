@@ -602,7 +602,7 @@ class Store:
 def _agent_state(res) -> str | None:
     """Find the lifecycle state (idle/working/blocked/done/unknown) in a herdr agent get result."""
     if isinstance(res, dict):
-        for k in ("state", "status", "agent_state"):
+        for k in ("agent_status", "state", "status", "agent_state"):  # herdr reports agent_status
             if isinstance(res.get(k), str):
                 return res[k]
         for v in res.values():
