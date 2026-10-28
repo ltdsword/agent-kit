@@ -92,9 +92,9 @@ web; multi-user teams; a cloud backend (designed for in 3.3, not built).
 |---|---|---|---|
 | `scheduler.py` | kit | Python stdlib | Source of truth for runs, tasks, decisions. Barely changes (10.4) |
 | `agentctl.py` (connector) | kit, `.agent-system/` | Python stdlib | One per running workspace: sync status, documents and decisions up; deliver answers and prompts down |
-| `agent-hub` backend | `hub/server/` in this repo | TypeScript (Node 22), Hono, better-sqlite3, drizzle, zod | Store, serve the API and live updates, pair devices |
+| `agent-hub` backend | `hub/server/` in this repo | TypeScript on Node 24 LTS, Hono, built-in `node:sqlite` (plain SQL migrations, no ORM) | Store, serve the API and live updates, pair devices |
 | Web UI | `hub/web/` | TypeScript, React (Vite SPA) | Screens in section 12 |
-| Protocol | `hub/protocol/` | JSON Schema + generated zod | One schema set; contract tests on both sides |
+| Protocol | `hub/protocol/` | JSON Schema (source of truth) + generated TS types + ajv; stdlib validator `.agent-system/hubschema.py` | One schema set; contract tests on both sides. Behavior: `docs/hub-api.md` |
 
 ### 3.2 Hosting
 
@@ -116,7 +116,7 @@ web; multi-user teams; a cloud backend (designed for in 3.3, not built).
 
 Built so that moving the backend off the laptop is a configuration change, not a rewrite:
 - Connector to backend is plain outbound HTTP (long polling), so it works through NAT.
-- drizzle on SQLite now, Postgres later: same schema, same queries.
+- Plain SQL on `node:sqlite` now, behind one data-access module; Postgres later means porting that module.
 - When the backend leaves the computer: per-workspace tokens instead of the machine connector key
   (13.2); upload minimization defaults flip to "titles and statuses only"; answers signed by the
   backend with an Ed25519 key that never leaves it, verified locally with `ssh-keygen -Y verify`
@@ -136,10 +136,11 @@ The hub lives in **this repo** under `hub/`, not in a separate repo:
 
 ```text
 hub/
-├── protocol/schemas/*.json        # hello, snapshot, decision, event, document, command, ack
+├── protocol/schemas/protocol.schema.json  # every message ($defs); copied to .agent-system/hub-protocol.schema.json
 ├── protocol/fixtures/*.json       # shared by TS and Python contract tests
+├── protocol/src/{index,api,types.gen}.ts
 ├── server/src/{index,db,auth,connector-api,user-api,stream,pair}.ts
-├── server/migrations/             # drizzle, SQLite
+├── server/migrations/*.sql        # plain SQL, SQLite
 └── web/src/{routes,components,api}/
 ```
 

@@ -1,0 +1,14 @@
+{
+  "id": "cmd_finzaaaabbbbcccc",
+  "type": "answer",
+  "run_id": "r3",
+  "decision_id": "D2",
+  "body": {
+    "choice": "B",
+    "followup": "B",
+    "value": "feature/r3"
+  },
+  "device": "laptop",
+  "created_at": "2026-10-27T11:15:00Z",
+  "expires_at": null
+}

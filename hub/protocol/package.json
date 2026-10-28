@@ -1,0 +1,21 @@
+{
+  "name": "@agent-hub/protocol",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Agent Hub protocol v1: JSON Schema (source of truth), generated TS types, ajv validators, shared fixtures",
+  "exports": {".": "./src/index.ts", "./schema": "./schemas/protocol.schema.json"},
+  "scripts": {
+    "gen": "node scripts/gen-types.ts && node scripts/sync-kit.ts",
+    "check-gen": "node scripts/gen-types.ts --check && node scripts/sync-kit.ts --check",
+    "typecheck": "tsc --noEmit -p .",
+    "test": "npm run check-gen && vitest run"
+  },
+  "dependencies": {"ajv": "^8.20.0"},
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "json-schema-to-typescript": "^16.0.0",
+    "typescript": "~5.9.3",
+    "vitest": "^5.0.5"
+  }
+}

@@ -1,0 +1,75 @@
+{
+  "workspace_id": "ws_k3m7q2abcdefghij",
+  "hub_status": "REJECTED",
+  "status_reason": "'feature/ bad' is not a valid branch name",
+  "updated_at": "2026-10-28T08:00:05Z",
+  "pending_command": {
+    "id": "cmd_finzaaaabbbbcccc",
+    "workspace_id": "ws_k3m7q2abcdefghij",
+    "type": "answer",
+    "run_id": "r3",
+    "decision_id": "D2",
+    "body": {
+      "choice": "B",
+      "followup": "B",
+      "value": "feature/ bad"
+    },
+    "status": "REJECTED",
+    "status_reason": "'feature/ bad' is not a valid branch name",
+    "device": "laptop",
+    "created_at": "2026-10-28T08:05:00Z",
+    "delivered_at": null,
+    "expires_at": null
+  },
+  "decision": {
+    "run_id": "r3",
+    "decision_id": "D2",
+    "kind": "finish",
+    "task_id": null,
+    "agent": "orchestrator",
+    "title": "Merge run r3?",
+    "question": "Run r3 is done and passed the final gate. Review the report and the total diff, then choose.",
+    "options": [
+      {
+        "key": "A",
+        "label": "Merge and push"
+      },
+      {
+        "key": "B",
+        "label": "Merge locally only, no push"
+      },
+      {
+        "key": "C",
+        "label": "Don't merge"
+      }
+    ],
+    "recommend": "A",
+    "followup": {
+      "when": [
+        "A",
+        "B"
+      ],
+      "question": "What branch do you choose to merge?",
+      "options": [
+        {
+          "key": "A",
+          "label": "This branch (main)",
+          "value": "main",
+          "input": false
+        },
+        {
+          "key": "B",
+          "label": "Other branch (type its name; a new name creates that branch)",
+          "value": null,
+          "input": true
+        }
+      ],
+      "validate": "branch"
+    },
+    "local_status": "PENDING",
+    "answer": null,
+    "consumed_by": null,
+    "opened_at": "2026-10-27T11:12:00Z",
+    "cancel_reason": null
+  }
+}

@@ -1,0 +1,65 @@
+{
+  "items": [
+    {
+      "id": "h_d2",
+      "at": "2026-10-27T11:15:00Z",
+      "type": "answer",
+      "run_id": "r3",
+      "decision_id": "D2",
+      "title": "Merge run r3?",
+      "choice": "A",
+      "label": "Merge and push",
+      "text": null,
+      "quote": "A: Merge and push / main",
+      "channel": "hub",
+      "device": "phone",
+      "status": "APPLIED"
+    },
+    {
+      "id": "h_cmd_pro1",
+      "at": "2026-10-28T08:05:00Z",
+      "type": "prompt",
+      "run_id": null,
+      "decision_id": null,
+      "title": null,
+      "choice": null,
+      "label": null,
+      "text": "Also add a test for empty emails",
+      "quote": null,
+      "channel": "hub",
+      "device": "laptop",
+      "status": "HELD"
+    },
+    {
+      "id": "h_r4_d1",
+      "at": "2026-10-28T07:55:00Z",
+      "type": "routine",
+      "run_id": "r4",
+      "decision_id": "D1",
+      "title": "approved ./gradlew test",
+      "choice": null,
+      "label": null,
+      "text": "build inside worktree",
+      "quote": null,
+      "channel": "opus",
+      "device": null,
+      "status": "APPLIED"
+    },
+    {
+      "id": "h_r4_d0",
+      "at": "2026-10-28T07:40:00Z",
+      "type": "answer",
+      "run_id": "r4",
+      "decision_id": "D0",
+      "title": "Narrow T4?",
+      "choice": "A",
+      "label": "Narrow to the API layer",
+      "text": null,
+      "quote": "A, go ahead",
+      "channel": "chat",
+      "device": null,
+      "status": "APPLIED"
+    }
+  ],
+  "next": "2026-10-28T07:40:00Z"
+}

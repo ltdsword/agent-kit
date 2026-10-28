@@ -1,0 +1,64 @@
+{
+  "run_id": "r3",
+  "decision_id": "D2",
+  "kind": "finish",
+  "task_id": null,
+  "agent": "orchestrator",
+  "title": "Merge run r3?",
+  "question": "Run r3 is done and passed the final gate. Review the report and the total diff, then choose.",
+  "options": [
+    {
+      "key": "A",
+      "label": "Merge and push"
+    },
+    {
+      "key": "B",
+      "label": "Merge locally only, no push"
+    },
+    {
+      "key": "C",
+      "label": "Don't merge"
+    }
+  ],
+  "recommend": "A",
+  "followup": {
+    "when": [
+      "A",
+      "B"
+    ],
+    "question": "What branch do you choose to merge?",
+    "options": [
+      {
+        "key": "A",
+        "label": "This branch (main)",
+        "value": "main",
+        "input": false
+      },
+      {
+        "key": "B",
+        "label": "Other branch (type its name; a new name creates that branch)",
+        "value": null,
+        "input": true
+      }
+    ],
+    "validate": "branch"
+  },
+  "local_status": "ANSWERED",
+  "answer": {
+    "choice": "A",
+    "label": "Merge and push",
+    "note": "",
+    "channel": "hub",
+    "by": "phone",
+    "at": "2026-10-27T11:15:00Z",
+    "quote": "A: Merge and push / main",
+    "followup": {
+      "choice": "A",
+      "label": "This branch (main)",
+      "value": "main"
+    }
+  },
+  "consumed_by": "finish A into main at 2026-10-27T11:20:00Z",
+  "opened_at": "2026-10-27T11:12:00Z",
+  "cancel_reason": null
+}

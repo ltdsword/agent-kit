@@ -1,0 +1,17 @@
+{
+  "id": "ws_k3m7q2abcdefghij",
+  "name": "thrift-demo",
+  "path": "/home/me/Code/thrift-demo.workspace",
+  "status": "ONLINE",
+  "last_seen_at": "2026-10-28T08:04:05Z",
+  "kit_version": "b1741ff",
+  "kit_outdated": false,
+  "open_decisions": 1,
+  "problems": 1,
+  "orchestrator_state": "idle",
+  "active_run": {
+    "run_id": "r4",
+    "status": "RUNNING"
+  },
+  "archived": false
+}

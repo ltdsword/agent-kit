@@ -1,0 +1,13 @@
+{
+  "id": "cmd_7h2aaaabbbbccccd",
+  "type": "start_workspace",
+  "run_id": "r4",
+  "decision_id": "D3",
+  "body": {
+    "choice": "A",
+    "note": "keep T1's message text"
+  },
+  "device": "phone",
+  "created_at": "2026-10-28T08:03:10Z",
+  "expires_at": null
+}

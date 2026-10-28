@@ -1,0 +1,6 @@
+{
+  "error": {
+    "code": "workspace_not_online",
+    "message": "thrift-demo is STOPPED; start it on your computer with agent-kit start"
+  }
+}

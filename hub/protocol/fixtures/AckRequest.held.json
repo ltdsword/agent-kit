@@ -1,0 +1,4 @@
+{
+  "status": "HELD",
+  "reason": "agent_blocked: the orchestrator has a prompt open in the terminal"
+}

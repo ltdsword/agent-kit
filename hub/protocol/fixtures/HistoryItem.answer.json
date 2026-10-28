@@ -1,0 +1,15 @@
+{
+  "id": "h_d2",
+  "at": "2026-10-27T11:15:00Z",
+  "type": "answer",
+  "run_id": "r3",
+  "decision_id": "D2",
+  "title": "Merge run r3?",
+  "choice": "A",
+  "label": "Merge and push",
+  "text": null,
+  "quote": "A: Merge and push / main",
+  "channel": "hub",
+  "device": "phone",
+  "status": "APPLIED"
+}

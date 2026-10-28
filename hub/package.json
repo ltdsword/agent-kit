@@ -1,0 +1,11 @@
+{
+  "name": "agent-hub",
+  "private": true,
+  "description": "Agent Hub: web dashboard + local backend for agent-kit workspaces (see .agent-system/docs/DECISION-HUB-PLAN.md)",
+  "engines": {"node": ">=24"},
+  "workspaces": ["protocol"],
+  "scripts": {
+    "test": "npm test --workspaces --if-present",
+    "typecheck": "npm run typecheck --workspaces --if-present"
+  }
+}

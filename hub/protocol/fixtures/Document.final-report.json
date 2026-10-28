@@ -1,0 +1,11 @@
+{
+  "path": ".orchestrator/runs/r3/final-report.md",
+  "run_id": "r3",
+  "kind": "final_report",
+  "title": "Run r3: final report",
+  "format": "markdown",
+  "sha256": "6a4f391522e06f13176b7e5ed59e6b520d47476e028542fb09ba854c3fcfe36f",
+  "bytes": 161,
+  "truncated": false,
+  "content": "# Run r3: final report\n\n## Summary\n\nAdded user search.\n\n## Tasks\n\n| Task | Title | Status | Fix rounds |\n|---|---|---|---|\n| T1 | Add user search | MERGED | 0 |\n"
+}

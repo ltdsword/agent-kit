@@ -1,0 +1,11 @@
+{
+  "n": 41,
+  "at": "2026-10-28T07:58:00Z",
+  "kind": "task",
+  "data": {
+    "task": "T2",
+    "old": "REVIEW",
+    "new": "FIX_REQUIRED",
+    "reason": "integration conflict"
+  }
+}

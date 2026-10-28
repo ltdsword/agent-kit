@@ -1,0 +1,194 @@
+{
+  "protocol": 1,
+  "workspace_id": "ws_k3m7q2abcdefghij",
+  "session_id": "ses_aaaabbbbccccdddd",
+  "taken_at": "2026-10-28T08:04:05Z",
+  "kit_version": "b1741ff",
+  "orchestrator": {
+    "name": "orch-thrift-demo",
+    "kind": "claude",
+    "model": "claude-opus-5-5",
+    "effort": "high",
+    "herdr_state": "idle",
+    "session_id": "0ddd1bd6-d081-46e2-8432-a55af607814a",
+    "screen": [
+      "\u25cf Decision D3 is waiting: answer on the hub or reply here (D3 A/B/C)."
+    ]
+  },
+  "workers": [
+    {
+      "slot": "worker-1",
+      "status": "BUSY",
+      "status_reason": null,
+      "run_id": "r4",
+      "task_id": "T1",
+      "agent_name": "r4-worker-1",
+      "kind": "codex",
+      "model": "gpt-6-luna",
+      "effort": "xhigh",
+      "herdr_state": "working",
+      "since": "2026-10-28T07:52:00Z",
+      "screen": null
+    },
+    {
+      "slot": "worker-2",
+      "status": "BUSY",
+      "status_reason": null,
+      "run_id": "r4",
+      "task_id": "T2",
+      "agent_name": "r4-worker-2",
+      "kind": "codex",
+      "model": "gpt-6-luna",
+      "effort": "xhigh",
+      "herdr_state": "idle",
+      "since": "2026-10-28T07:52:00Z",
+      "screen": null
+    },
+    {
+      "slot": "worker-3",
+      "status": "IDLE",
+      "status_reason": null,
+      "run_id": null,
+      "task_id": null,
+      "agent_name": null,
+      "kind": "codex",
+      "model": "gpt-6-luna",
+      "effort": "xhigh",
+      "herdr_state": "absent",
+      "since": null,
+      "screen": null
+    }
+  ],
+  "scout": {
+    "run_id": "r4",
+    "rounds_used": 2,
+    "max_rounds": 3,
+    "readiness": "READY",
+    "rounds": [
+      {
+        "n": 1,
+        "questions": [
+          "Where is user validation done?"
+        ],
+        "evidence_path": ".orchestrator/runs/r4/research/round-1.md",
+        "at": "2026-10-28T07:10:00Z"
+      },
+      {
+        "n": 2,
+        "questions": [
+          "Which tests cover UserHandler?"
+        ],
+        "evidence_path": ".orchestrator/runs/r4/research/round-2.md",
+        "at": "2026-10-28T07:20:00Z"
+      }
+    ]
+  },
+  "runs": [
+    {
+      "run_id": "r4",
+      "status": "RUNNING",
+      "created_at": "2026-10-28T07:30:00Z",
+      "base_branch": "main",
+      "integration_branch": "agent/integration-r4",
+      "gate": {
+        "status": null,
+        "at": null
+      },
+      "tasks": [
+        {
+          "id": "T1",
+          "title": "Limit name length",
+          "status": "RUNNING",
+          "worker": "worker-1",
+          "depends_on": [],
+          "major_repairs": 0,
+          "max_repairs": 2,
+          "owned_paths": [
+            "src/main/java/user/T1.java"
+          ],
+          "packet": "gen-tasks/limit-name-length-28-10-26.md",
+          "known_issues": null
+        },
+        {
+          "id": "T2",
+          "title": "Validate email format",
+          "status": "FIX_REQUIRED",
+          "worker": "worker-2",
+          "depends_on": [],
+          "major_repairs": 1,
+          "max_repairs": 2,
+          "owned_paths": [
+            "src/main/java/user/T2.java"
+          ],
+          "packet": "gen-tasks/validate-email-format-28-10-26.md",
+          "known_issues": null
+        },
+        {
+          "id": "T3",
+          "title": "Update user API docs",
+          "status": "PENDING",
+          "worker": null,
+          "depends_on": [
+            "T1",
+            "T2"
+          ],
+          "major_repairs": 0,
+          "max_repairs": 2,
+          "owned_paths": [
+            "src/main/java/user/T3.java"
+          ],
+          "packet": "gen-tasks/update-user-api-docs-28-10-26.md",
+          "known_issues": null
+        }
+      ],
+      "problems": [
+        {
+          "task_id": "T2",
+          "type": "FIX_REQUIRED",
+          "since": "2026-10-28T07:58:00Z",
+          "decision_id": "D3",
+          "note": "merge conflict in UserHandler.java"
+        }
+      ],
+      "report_path": null,
+      "finish": null
+    },
+    {
+      "run_id": "r3",
+      "status": "DONE",
+      "created_at": "2026-10-27T09:00:00Z",
+      "base_branch": "main",
+      "integration_branch": "agent/integration-r3",
+      "gate": {
+        "status": "PASS",
+        "at": "2026-10-27T11:10:00Z"
+      },
+      "tasks": [
+        {
+          "id": "T1",
+          "title": "Add user search",
+          "status": "MERGED",
+          "worker": null,
+          "depends_on": [],
+          "major_repairs": 0,
+          "max_repairs": 2,
+          "owned_paths": [
+            "src/main/java/user/T1.java"
+          ],
+          "packet": "gen-tasks/add-user-search-28-10-26.md",
+          "known_issues": null
+        }
+      ],
+      "problems": [],
+      "report_path": ".orchestrator/runs/r3/final-report.md",
+      "finish": {
+        "decision_id": "D2",
+        "choice": "A",
+        "result": "merged into main, pushed to origin/main",
+        "branch": "main",
+        "pushed": true,
+        "at": "2026-10-27T11:20:00Z"
+      }
+    }
+  ]
+}

@@ -1,0 +1,30 @@
+{
+  "run_id": "r4",
+  "decision_id": "X3",
+  "kind": "repair",
+  "task_id": "T2",
+  "agent": "worker-2",
+  "title": "T2: merge conflict in UserHandler.java",
+  "question": "Cherry-pick of a1b2c3 conflicted with T1's change at UserHandler.java:42 (both edit the name check). Post-merge tests not run.",
+  "options": [
+    {
+      "key": "A",
+      "label": "Repair: rebase T2 on T1's version"
+    },
+    {
+      "key": "B",
+      "label": "Drop T2's name change, keep only the email part"
+    },
+    {
+      "key": "C",
+      "label": "Stop T2, I'll handle it"
+    }
+  ],
+  "recommend": "A",
+  "followup": null,
+  "local_status": "PENDING",
+  "answer": null,
+  "consumed_by": null,
+  "opened_at": "2026-10-28T08:00:00Z",
+  "cancel_reason": null
+}

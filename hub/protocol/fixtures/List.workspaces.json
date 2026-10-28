@@ -1,0 +1,36 @@
+{
+  "items": [
+    {
+      "id": "ws_k3m7q2abcdefghij",
+      "name": "thrift-demo",
+      "path": "/home/me/Code/thrift-demo.workspace",
+      "status": "ONLINE",
+      "last_seen_at": "2026-10-28T08:04:05Z",
+      "kit_version": "b1741ff",
+      "kit_outdated": false,
+      "open_decisions": 1,
+      "problems": 1,
+      "orchestrator_state": "idle",
+      "active_run": {
+        "run_id": "r4",
+        "status": "RUNNING"
+      },
+      "archived": false
+    },
+    {
+      "id": "ws_p4x2d6abcdefghij",
+      "name": "billing-api",
+      "path": "/home/me/Code/billing-api.workspace",
+      "status": "STOPPED",
+      "last_seen_at": "2026-10-27T11:20:00Z",
+      "kit_version": "118b217",
+      "kit_outdated": true,
+      "open_decisions": 0,
+      "problems": 0,
+      "orchestrator_state": null,
+      "active_run": null,
+      "archived": false
+    }
+  ],
+  "next": null
+}

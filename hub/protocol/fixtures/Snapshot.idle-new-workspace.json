@@ -1,0 +1,19 @@
+{
+  "protocol": 1,
+  "workspace_id": "ws_k3m7q2abcdefghij",
+  "session_id": "ses_aaaabbbbccccdddd",
+  "taken_at": "2026-10-28T08:04:05Z",
+  "kit_version": "b1741ff",
+  "orchestrator": {
+    "name": "orch-thrift-demo",
+    "kind": "claude",
+    "model": "claude-opus-5-5",
+    "effort": "high",
+    "herdr_state": "working",
+    "session_id": "0ddd1bd6-d081-46e2-8432-a55af607814a",
+    "screen": null
+  },
+  "workers": [],
+  "scout": null,
+  "runs": []
+}
