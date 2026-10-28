@@ -63,3 +63,78 @@ report "blocked" with the exact command and error. Everything else: just do it.
 
 ---
 <!-- Do not edit above this line after dispatch. scheduler.py appends: Worker result, Review, Integration, Final gate. -->
+
+## Worker result - attempt 1 (28/10/26 21:51)
+
+- Status: **done** (worker worker-1, branch `agent/hub2-t1`)
+- Commits: none, changes left uncommitted (orchestrator commits after review)
+- Files: `hub/package-lock.json`, `hub/package.json`, `hub/proxy/.gitignore`, `hub/proxy/README.md`, `hub/proxy/migrations/0001_spike.sql`, `hub/proxy/package.json`, `hub/proxy/scripts/echo-client.ts`, `hub/proxy/src/auth.ts`, `hub/proxy/src/computer-relay.ts`, `hub/proxy/src/env.ts`, `hub/proxy/src/hash.ts`, `hub/proxy/src/index.ts`, `hub/proxy/test/proxy.test.ts`, `hub/proxy/tsconfig.json`, `hub/proxy/wrangler.jsonc`
+- Scope: OK
+- Tests reported:
+  - `source ~/.nvm/nvm.sh && nvm use 24 && npm run typecheck` -> exit 2
+  - `source ~/.nvm/nvm.sh && nvm use 24 && npm run typecheck` -> exit 0
+  - `source ~/.nvm/nvm.sh && nvm use 24 && npm test` -> exit 1
+  - `source ~/.nvm/nvm.sh && nvm use 24 && npm test` -> exit 0
+  - `source ~/.nvm/nvm.sh && nvm use 24 && npm run typecheck` -> exit 0
+- Risks:
+  - Remote deployment and target-plan CPU timing were not run; confirm free-plan Durable Object and D1 availability before P1.
+  - Recheck the committed compatibility date (2026-10-28) when deploying.
+  - Echo-client proxy support requires undici to be importable without adding a dependency; it was available in the local Wrangler install used by the loopback test.
+- Not done: none
+- Full diff: `.orchestrator/runs/hub2/reports/T1.diff`
+
+````text
+ hub/package-lock.json               | 1643 ++++++++++++++++++++++++++++++++++-
+ hub/package.json                    |    2 +-
+ hub/proxy/.gitignore                |    3 +
+ hub/proxy/README.md                 |   83 ++
+ hub/proxy/migrations/0001_spike.sql |    5 +
+ hub/proxy/package.json              |   17 +
+ hub/proxy/scripts/echo-client.ts    |  150 ++++
+ hub/proxy/src/auth.ts               |   18 +
+ hub/proxy/src/computer-relay.ts     |  150 ++++
+ hub/proxy/src/env.ts                |    6 +
+ hub/proxy/src/hash.ts               |   21 +
+ hub/proxy/src/index.ts              |  118 +++
+ hub/proxy/test/proxy.test.ts        |  425 +++++++++
+ hub/proxy/tsconfig.json             |   13 +
+ hub/proxy/wrangler.jsonc            |   22 +
+ 15 files changed, 2631 insertions(+), 45 deletions(-)
+````
+
+(diff is 2926 lines; read the full diff file)
+
+## Review round 1: PASS (28/10/26 21:52)
+
+- Verdict: **PASS** -> task is now PASSED (fix rounds used: 0/2)
+- Reviewed HEAD: 4904ab4949d6, commits 4904ab4949d6
+
+# Review: hub2 T1, proxy spike (P0)
+
+Verdict: **PASS**
+
+## Checked
+- `cd hub && npm test`: protocol 51, server 6, proxy 9 pass; `npm run typecheck` clean.
+- wrangler.jsonc account-neutral (placeholder D1 id, no account_id/routes); DO uses `new_sqlite_classes` (free-plan path).
+- Bearer check constant-time; every /spike route gated; 400/401/404/405/413 bodies use the ApiError shape.
+- ComputerRelay: hibernation API, one socket (old closed 4000), pending map resolves on reply/close/timeout, ping/pong, malformed frames counted.
+- Tests cover health, auth, hash bounds, D1, offline 503, round trip, replace, timeout 504, 413, echo-client script.
+
+## Notes for P0-deploy / P2
+- Workers freeze `performance.now()` during CPU-only work, so deployed `wall_ms` reads ~0. Measure PBKDF2 cost from `wrangler tail` CPU time / `exceededCpu` outcome instead.
+- Echo client imports `undici` (resolved via wrangler's install) to send auth headers on the WebSocket handshake. P2b backend must declare undici or authenticate another way.
+- 900 KB relay cap is spike-only; chunking in P2a.
+
+## Integration: merged (28/10/26 21:52)
+
+- On `agent/integration-hub2` at 9b7e8d378fb6; `.agent-system/scripts/verify.sh --quick` passed (log `.orchestrator/runs/hub2/logs/post-merge-T1-a1.log`)
+
+## Final gate: PASS (28/10/26 21:52)
+
+- `.agent-system/scripts/verify.sh` exit 0 on agent/integration-hub2 at 9b7e8d378fb6 (log `.orchestrator/runs/hub2/logs/verify-1793199138.log`)
+- Task MERGED; run DONE
+
+## Final gate: PASS (28/10/26 21:53)
+
+- `.agent-system/scripts/verify.sh` exit 0 on agent/integration-hub2 at 9b7e8d378fb6 (log `.orchestrator/runs/hub2/logs/verify-1793199176.log`)
+- Task MERGED; run DONE
