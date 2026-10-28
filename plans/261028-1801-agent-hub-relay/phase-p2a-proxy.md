@@ -37,6 +37,8 @@ Read first: `docs/hub-api.md` (v2: the contract), `hub/protocol/src/api.ts` (rou
    - `relay(request, user)`: frame `req` with a new id, signed assertion, `stream` flag; await `res`
      (30 s → 504 `computer_timeout`; offline → 503 `computer_offline`). Streams: return a `ReadableStream`
      fed by `chunk` frames until `end`; browser disconnect → send `cancel`.
+   - Set `stream: true` on `GET .../documents/content` requests too (documents can exceed one frame;
+     the backend can't detect size itself), and return the joined chunks as one JSON response.
    - `hello` / `workspaces` frames upsert `workspace_index` rows (D1) for that computer; update
      `computers.last_seen_at`.
    - Frames > `relayFrameBytes` rejected; malformed frames counted and ignored.
