@@ -214,6 +214,39 @@ def describe(p: dict) -> str:
     return "\n".join(lines)
 
 
+def start_connector(ws: Path, cfg: dict, popen=None, log=None) -> None:
+    """Start the optional hub connector after the orchestrator, without affecting the start result."""
+    if not (cfg.get("hub") or {}).get("enabled"):
+        return
+    log = log or print
+    pidfile = ws / ".orchestrator" / "hub-connector.pid"
+    try:
+        pid = int(pidfile.read_text().strip())
+        if pid <= 0:
+            pid = None
+            raise ProcessLookupError
+        try:
+            os.kill(pid, 0)
+        except PermissionError:
+            pass
+    except (OSError, ValueError):
+        pid = None
+    if pid is not None:
+        log("hub connector already running")
+        return
+    popen = popen or subprocess.Popen
+    logpath = ws / ".orchestrator" / "hub-connector.log"
+    logpath.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        with open(logpath, "a") as output:
+            popen([sys.executable, str(Path(__file__).resolve().with_name("agentctl.py")), "watch"],
+                  cwd=str(ws), stdout=output, stderr=output, stdin=subprocess.DEVNULL,
+                  start_new_session=True, env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"})
+        log(f"hub connector started (log: {logpath})")
+    except Exception as e:
+        log(f"hub connector could not be started: {e}; orchestrator continues")
+
+
 def main(argv=None, herdr: S.Herdr | None = None, env=None, execvp=os.execvp, runner=subprocess.run) -> int:
     ap = argparse.ArgumentParser(prog="agent-kit start", description=__doc__.split("\n\n")[0])
     ap.add_argument("--workspace", type=Path, required=True)
@@ -253,6 +286,7 @@ def main(argv=None, herdr: S.Herdr | None = None, env=None, execvp=os.execvp, ru
             if p["resume"] and not resume_args(p["kind"], p["resume"]):
                 p["resume"] = None
         print(launch(p, herdr, timeout_ms))
+        start_connector(ws, cfg)
         return 0
 
     print(describe(p))
@@ -286,6 +320,7 @@ def main(argv=None, herdr: S.Herdr | None = None, env=None, execvp=os.execvp, ru
             if note:
                 print(note.rstrip("; "))
         print(launch(p, herdr, timeout_ms))
+        start_connector(ws, cfg)
         if not inside and not a.no_attach:
             execvp("herdr", ["herdr"])
         return 0

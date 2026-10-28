@@ -25,6 +25,7 @@ User request -> orchestrator: configured program + model (default Claude Code, O
 | `models.py` | Model registry: Herdr agent programs (Claude Code and Codex verified, others unverified), Claude list, Codex catalog, effort checks, pick-from table |
 | `kitconfig.py` | `agent-kit config`: choose program/model/effort per role (flags, or interactive on a terminal) |
 | `kitstart.py` | `agent-kit start` / `continue`: open Herdr and launch the orchestrator with its program/model/effort, or resume its last chat |
+| `agentctl.py` | Agent Hub connector: enable the workspace, preview a sync, watch status and documents, and manage the connector |
 | `scripts/record-session.py` | Claude Code hook (SessionStart, UserPromptSubmit): saves the workspace's active chat id to `.orchestrator/orchestrator.json` |
 | `WORKER-RULES.md` | Rules every worker reads, whatever its program (the worker prompt points to it) |
 | `templates/ORCHESTRATOR.section.md` | Orchestrator rules, written into the workspace's `CLAUDE.md` and `AGENTS.md` |
@@ -59,6 +60,7 @@ Prefix every command with `python3 .agent-system/scheduler.py`. Add `--json` bef
 | Command | What it does |
 |---|---|
 | `doctor` | Validate config, tools, scout agent, Codex profile, cached model catalog |
+| `agentctl enable [--url URL]` / `sync --dry-run [--json]` / `watch [--interval 5] [--no-orchestrator]` / `status` / `stop` / `reset-id` | Configure and inspect the optional Agent Hub connector (`python3 .agent-system/agentctl.py <command>`) |
 | `pool init` / `pool show` | Create the worktree root, show slot paths/state; show per-slot model resolution |
 | `run create --run ID --tasks FILE [--base REF] [--request-id ID]` | Validate the task DAG (1..`max_tasks_per_request`), create `agent/integration-ID` worktree |
 | `run status --run ID` / `run list` / `run close --run ID --status BLOCKED\|FAILED --reason ...` | Inspect or close runs |

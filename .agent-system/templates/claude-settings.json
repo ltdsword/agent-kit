@@ -2,7 +2,11 @@
   "permissions": {
     "deny": [
       "Edit(.orchestrator/**/state.json)",
-      "Edit(.orchestrator/**/decisions/**)"
+      "Edit(.orchestrator/**/decisions/**)",
+      "Read(~/.config/agent-hub/**)",
+      "Edit(~/.config/agent-hub/**)",
+      "Read(~/.local/share/agent-hub/**)",
+      "Edit(~/.local/share/agent-hub/**)"
     ]
   },
   "hooks": {

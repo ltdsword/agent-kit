@@ -346,7 +346,8 @@ def topo_order(deps: dict) -> list[str]:
 # --------------------------------------------------------------------------- state machine
 
 def log_event(state: dict, kind: str, **data) -> None:
-    state.setdefault("events", []).append({"at": now(), "kind": kind, **data})
+    state["event_n"] = state.get("event_n", 0) + 1
+    state.setdefault("events", []).append({"n": state["event_n"], "at": now(), "kind": kind, **data})
     del state["events"][:-500]
 
 
@@ -1760,10 +1761,39 @@ class Scheduler:
                       for o in parsed],
                     "", "Waiting for the user's answer in chat."])
             log_event(state, "decision_opened", id=did, decision_kind=kind, task=task)
-        return {"decision": did, "status": "PENDING", "file": self.rel(path),
-                "next": "ask the user in chat (question, options, your recommendation) and end your turn; "
-                        "when they reply, record their exact words with `decision record --run "
-                        f"{run_id} --id {did} --choice <KEY> --quote \"...\"`"}
+        hub_online = self._hub_online_hint()
+        if hub_online:
+            lines = [f"{o['key']}: {o['label']}" for o in parsed]
+            recommendation = next((o["label"] for o in parsed if o["key"] == recommend), None)
+            next_text = ("Ask in plain chat, then end your turn (do not use AskUserQuestion):\n\n"
+                         f"{title}\n{question}\n\n" + "\n".join(lines) + "\n\n"
+                         + (f"Recommendation: {recommend}: {recommendation}.\n" if recommendation else "")
+                         + f"Answer on the hub or reply here ({did} A/B/... or your own words).")
+        else:
+            next_text = ("ask the user in chat (question, options, your recommendation) and end your turn; "
+                         "when they reply, record their exact words with `decision record --run "
+                         f"{run_id} --id {did} --choice <KEY> --quote \"...\"`")
+        return {"decision": did, "status": "PENDING", "file": self.rel(path), "hub": "online" if hub_online else "offline",
+                "next": next_text}
+
+    def _hub_online_hint(self) -> bool:
+        """Read the connector's short-lived status hint without making decisions depend on it."""
+        try:
+            hint = json.loads((self.workspace_root / ".orchestrator" / "hub.json").read_text())
+            pid = hint.get("connector_pid")
+            if hint.get("backend") != "online" or not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+                return False
+            heartbeat = _dt.datetime.fromisoformat(str(hint["heartbeat_at"]).replace("Z", "+00:00"))
+            age = (_dt.datetime.now(_dt.timezone.utc) - heartbeat.astimezone(_dt.timezone.utc)).total_seconds()
+            if not 0 <= age < 90:
+                return False
+            try:
+                os.kill(pid, 0)
+            except PermissionError:
+                pass
+            return True
+        except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError):
+            return False
 
     def decision_answer(self, run_id: str, did: str, choice: str, note: str = "", channel: str = "chat",
                         by: str | None = None, followup: str | None = None, value: str | None = None,
@@ -2127,6 +2157,28 @@ def doctor(workspace_root: Path) -> list[dict]:
     except SchedulerError as e:
         add("config", False, str(e))
         return checks
+    hub = cfg.get("hub") or {}
+    if hub.get("enabled"):
+        workspace_id = hub.get("workspace_id")
+        add("hub-workspace-id", isinstance(workspace_id, str) and
+            re.fullmatch(r"ws_[a-z2-7]{16}", workspace_id) is not None,
+            "hub.workspace_id is valid" if isinstance(workspace_id, str) and
+            re.fullmatch(r"ws_[a-z2-7]{16}", workspace_id) else "hub.workspace_id is missing or invalid")
+        key_path = Path(os.environ.get("AGENT_HUB_CONFIG", "~/.config/agent-hub")).expanduser() / "connector.key"
+        try:
+            key = key_path.read_text().strip()
+            key_readable = bool(key)
+        except OSError:
+            key = None
+            key_readable = False
+        add("hub-connector-key", key_readable,
+            f"connector key readable at {key_path}" if key_readable else f"missing or unreadable: {key_path}")
+        try:
+            import agentctl  # lazy: scheduler itself never owns network code
+            agentctl.ping(hub.get("url", "http://127.0.0.1:7420"), key=key, timeout=3)
+            add("hub-backend", True, "GET /api/v1/agent/ping succeeded")
+        except Exception as e:
+            add("hub-backend", False, f"GET /api/v1/agent/ping failed: {e}", "warn")
     for role, r in (("orchestrator", {**{"kind": "claude"}, **cfg.get("orchestrator", {})}),
                     ("worker", {"kind": cfg["worker"].get("kind", "codex"), "model": cfg["worker"]["model"],
                                 "effort": cfg["worker"].get("reasoning_effort")})):

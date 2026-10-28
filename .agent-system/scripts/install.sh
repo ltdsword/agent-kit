@@ -91,7 +91,7 @@ cmd_version() {  # agent-kit --version [--folder=<repo>]
 
 copy_kit() {  # copy_kit <dest>: kit code, docs, prompts, scripts, tests, templates (never config.json)
   do_ mkdir -p "$1/.agent-system" "$1/.claude/agents"
-  for item in scheduler.py models.py kitconfig.py kitstart.py hubschema.py hub-protocol.schema.json WORKER-RULES.md README.md GUIDE.md docs prompts scripts tests templates; do
+  for item in scheduler.py models.py kitconfig.py kitstart.py agentctl.py hubschema.py hub-protocol.schema.json WORKER-RULES.md README.md GUIDE.md docs prompts scripts tests templates; do
     [ -e "$SRC/.agent-system/$item" ] || continue
     do_ rm -rf "$1/.agent-system/$item"
     do_ cp -r "$SRC/.agent-system/$item" "$1/.agent-system/$item"

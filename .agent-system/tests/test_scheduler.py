@@ -17,6 +17,7 @@ import scheduler as S  # noqa: E402
 import models as M  # noqa: E402
 import kitconfig as K  # noqa: E402
 import kitstart as KS  # noqa: E402
+import agentctl as AC  # noqa: E402
 
 REAL_CONFIG = json.loads((Path(__file__).resolve().parents[1] / "config.json").read_text())
 PY_OK = [sys.executable, "-c", "raise SystemExit(0)"]
@@ -842,6 +843,68 @@ class TestDecisions(Base):
         self.assertTrue(any("unknown kinds" in e for e in S.validate_config(bad)))
 
 
+class TestHubScheduler(Base):
+    def test_log_event_numbers_and_keeps_500_events(self):
+        state = {"events": [{"at": "old", "kind": "legacy"} for _ in range(500)]}
+        S.log_event(state, "first")
+        S.log_event(state, "second")
+        self.assertEqual(state["event_n"], 2)
+        self.assertEqual(len(state["events"]), 500)
+        self.assertNotIn("n", state["events"][0])  # existing events are not rewritten
+        self.assertEqual([event["n"] for event in state["events"][-2:]], [1, 2])
+
+    def test_decision_ask_hub_online_offline_stale_and_dead_pid(self):
+        self.s.create_run("r1", [self.task("T1", trivial=True)])
+        hint = self.repo / ".orchestrator" / "hub.json"
+        hint.write_text(json.dumps({"backend": "online", "connector_pid": os.getpid(), "heartbeat_at": S.now()}))
+        online = self.s.decision_ask("r1", "question", "Choose", "Which option?", ["A=keep", "B=change"],
+                                     recommend="B")
+        self.assertEqual(online["hub"], "online")
+        self.assertIn("Choose", online["next"])
+        self.assertIn("Which option?", online["next"])
+        self.assertIn("A: keep", online["next"])
+        self.assertIn("Recommendation: B: change", online["next"])
+        self.assertIn("end your turn", online["next"])
+        self.assertIn("do not use AskUserQuestion", online["next"])
+
+        hint.write_text(json.dumps({"backend": "offline", "connector_pid": os.getpid(), "heartbeat_at": S.now()}))
+        self.assertEqual(self.s.decision_ask("r1", "question", "Offline", "q", ["A=x", "B=y"])["hub"],
+                         "offline")
+        hint.write_text(json.dumps({"backend": "online", "connector_pid": os.getpid(),
+                                    "heartbeat_at": "2000-01-01T00:00:00+00:00"}))
+        self.assertEqual(self.s.decision_ask("r1", "question", "Stale", "q", ["A=x", "B=y"])["hub"],
+                         "offline")
+        hint.write_text(json.dumps({"backend": "online", "connector_pid": 2**30, "heartbeat_at": S.now()}))
+        self.assertEqual(self.s.decision_ask("r1", "question", "Dead", "q", ["A=x", "B=y"])["hub"],
+                         "offline")
+
+    def test_validate_config_and_doctor_hub_checks(self):
+        self.cfg["hub"] = {"enabled": True, "url": "http://127.0.0.1:7420",
+                           "workspace_id": "ws_abcdefghijklmnop",
+                           "upload": {"documents": True, "diffs": True, "agent_screens": True},
+                           "screen_lines": 40}
+        self.assertEqual(S.validate_config(self.cfg), [])
+        (self.repo / ".agent-system").mkdir(exist_ok=True)
+        (self.repo / ".agent-system" / "config.json").write_text(json.dumps(self.cfg))
+        key_dir = Path(self.tmp.name) / "hub-config"
+        key_dir.mkdir()
+        (key_dir / "connector.key").write_text("test-key")
+        with mock.patch.dict(os.environ, {"AGENT_HUB_CONFIG": str(key_dir)}), \
+                mock.patch.object(AC, "ping", return_value={}), \
+                mock.patch.object(S.shutil, "which", return_value=None):
+            checks = S.doctor(self.repo)
+        by_name = {item["check"]: item for item in checks}
+        self.assertEqual(by_name["hub-workspace-id"]["status"], "ok")
+        self.assertEqual(by_name["hub-connector-key"]["status"], "ok")
+        self.assertEqual(by_name["hub-backend"]["status"], "ok")
+        with mock.patch.dict(os.environ, {"AGENT_HUB_CONFIG": str(key_dir)}), \
+                mock.patch.object(AC, "ping", side_effect=RuntimeError("offline")), \
+                mock.patch.object(S.shutil, "which", return_value=None):
+            checks = S.doctor(self.repo)
+        by_name = {item["check"]: item for item in checks}
+        self.assertEqual(by_name["hub-backend"]["status"], "warn")
+
+
 class TestCli(Base):
     def test_help_and_status(self):
         for argv in (["--help"], ["run", "create", "--help"], ["research", "readiness", "--help"]):
@@ -1399,6 +1462,30 @@ class TestStart(WorkspaceBase):
         rc, execs, _ = self.start("--dry-run")
         self.assertEqual((rc, execs), (0, []))
         self.assertFalse([c for c in self.h.calls if c[0] in ("workspace_create", "agent_start")])
+
+    def test_connector_starts_only_when_hub_enabled(self):
+        rc, _, popens = self.start(env={"HERDR_ENV": "1"})
+        self.assertEqual(rc, 0)
+        self.assertEqual(popens, [])
+        self.cfg["hub"] = {"enabled": True, "url": "http://127.0.0.1:7420"}
+        (self.ws / ".agent-system" / "config.json").write_text(json.dumps(self.cfg))
+        rc, _, popens = self.start(env={"HERDR_ENV": "1"})
+        self.assertEqual(rc, 0)
+        self.assertEqual(len(popens), 1)
+        self.assertEqual(popens[0][0][1:], [str(Path(KS.__file__).with_name("agentctl.py")), "watch"])
+
+    def test_connector_start_is_detached_with_workspace_cwd_and_log(self):
+        self.cfg["hub"] = {"enabled": True}
+        calls = []
+        with mock.patch.object(KS.subprocess, "Popen",
+                               side_effect=lambda *args, **kwargs: calls.append((args, kwargs))), \
+                mock.patch("builtins.print"):
+            KS.start_connector(self.ws, self.cfg)
+        args, kwargs = calls[0]
+        self.assertTrue(kwargs["start_new_session"])
+        self.assertEqual(kwargs["cwd"], str(self.ws))
+        self.assertEqual(kwargs["stdin"], subprocess.DEVNULL)
+        self.assertIs(kwargs["stdout"], kwargs["stderr"])
 
 
 class TestInstall(Base):

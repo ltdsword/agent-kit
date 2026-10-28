@@ -1,6 +1,7 @@
 {
   "schema_version": 1,
   "_comment": "Read by scheduler.py. Choose programs/models/efforts with `agent-kit config` (any program Herdr can launch; only claude and codex are verified). Every worker slot uses worker.model + worker.reasoning_effort; there is deliberately no fallback/downgrade setting.",
+  "hub": {"enabled": false, "url": "http://127.0.0.1:7420", "workspace_id": null, "upload": {"documents": true, "diffs": true, "agent_screens": true}, "screen_lines": 40},
   "orchestrator": {"kind": "claude", "model": "claude-opus-5-5", "effort": "high"},
   "scout": {"agent": "scout", "model": "claude-sonnet-5-5", "effort": "medium", "agent_file": ".claude/agents/scout.md"},
   "worker": {
