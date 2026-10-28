@@ -13,6 +13,7 @@ html, body { margin: 0; }
 .cols { display: flex; flex-wrap: wrap; gap: 20px; align-items: flex-start; }
 .col-main { flex: 999 1 600px; min-width: 0; display: flex; flex-direction: column; gap: 20px; }
 .col-side { flex: 1 1 360px; min-width: 0; display: flex; flex-direction: column; gap: 20px; }
+.col-solo { flex: 1 1 100%; max-width: 920px; margin: 0 auto; }
 .grid-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(340px, 100%), 1fr)); gap: 16px; align-items: start; }
 .grid-workers { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(250px, 100%), 1fr)); gap: 12px; align-items: start; }
 .dl-grid { margin: 0; display: grid; grid-template-columns: 96px minmax(0, 1fr); gap: 10px 12px; font-size: 13.5px; }

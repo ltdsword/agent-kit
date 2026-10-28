@@ -84,7 +84,8 @@ def _loopback_url(url: str) -> bool:
 
 
 def request_json(url: str, method: str, body: dict | None = None, key: str | None = None) -> dict:
-    headers = {"Accept": "application/json"}
+    # Cloudflare bot protection rejects the default Python-urllib User-Agent (error 1010).
+    headers = {"Accept": "application/json", "User-Agent": "agent-kit/2"}
     raw = None
     if body is not None:
         raw = json.dumps(body, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
@@ -267,13 +268,13 @@ def hub_status() -> int:
         ping = f"online (protocol {response['protocol']})"
     except Exception:
         ping = "offline"
-    relay = "relay: no status line in hub.log"
+    # The backend writes relay-status.json (transport, connected, owner); never secrets.
+    relay = "relay: off (no relay-status.json; run agent-kit hub-login, then hub start)"
     try:
-        lines = (directory / "hub.log").read_text(encoding="utf-8", errors="replace").splitlines()
-        line = next((item for item in reversed(lines) if "relay" in item.lower()), None)
-        if line:
-            relay = "relay: " + agentctl.scrub(line.strip())[:300]
-    except OSError:
+        status = json.loads((directory / "relay-status.json").read_text(encoding="utf-8"))
+        state = "connected" if status.get("connected") and pid is not None else "not connected"
+        relay = f"relay: {state} via {status.get('transport') or 'none'}, owner {status.get('owner')}"
+    except (OSError, ValueError, AttributeError):
         pass
     print(f"pid: {pid if pid is not None else 'stopped'}\nping: {ping}\n{relay}")
     return 0

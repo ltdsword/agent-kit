@@ -29,6 +29,9 @@ export function WorkspacePage() {
 
   const needCount = needsYou(hub, w.id).length;
   const show = (t: Tab) => tab === 'all' || tab === t;
+  // A tab whose content sits in one column gets that column alone, wide and centred.
+  const hasMain = show('needs') || show('agents');
+  const hasSide = show('runs') || show('docs') || show('needs');
 
   return (
     <div className="fade-in stack">
@@ -66,16 +69,20 @@ export function WorkspacePage() {
       )}
 
       <div className="page page-wide cols" style={{ paddingTop: 16, flexDirection: 'row' }}>
-        <div className="col-main">
-          {show('needs') && <NeedsYouSection workspace={w} />}
-          {show('agents') && <OrchestratorCard workspace={w} />}
-          {show('agents') && <SubagentsSection workspace={w} />}
-        </div>
-        <div className="col-side">
-          {show('runs') && <RunCard workspace={w} />}
-          {show('docs') && <DocumentList workspace={w} />}
-          {show('needs') && <HistoryPreview workspace={w} />}
-        </div>
+        {hasMain && (
+          <div className={`col-main${hasSide ? '' : ' col-solo'}`}>
+            {show('needs') && <NeedsYouSection workspace={w} />}
+            {show('agents') && <OrchestratorCard workspace={w} />}
+            {show('agents') && <SubagentsSection workspace={w} />}
+          </div>
+        )}
+        {hasSide && (
+          <div className={`col-side${hasMain ? '' : ' col-solo'}`}>
+            {show('runs') && <RunCard workspace={w} />}
+            {show('docs') && <DocumentList workspace={w} />}
+            {show('needs') && <HistoryPreview workspace={w} />}
+          </div>
+        )}
       </div>
     </div>
   );

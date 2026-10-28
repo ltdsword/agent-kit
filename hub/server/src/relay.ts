@@ -44,14 +44,18 @@ export class RelayClient {
   private sendWorkspaces?: () => void;
   private backoffMs = 1_000;
 
-  constructor(
-    private readonly app: Hono,
-    private readonly db: HubDatabase,
-    private readonly config: ServerConfig,
-    private readonly computer: ComputerConfig,
-    events: EventHub,
-    private readonly clock: () => number,
-  ) {
+  private readonly app: Hono;
+  private readonly db: HubDatabase;
+  private readonly config: ServerConfig;
+  private readonly computer: ComputerConfig;
+  private readonly clock: () => number;
+
+  constructor(app: Hono, db: HubDatabase, config: ServerConfig, computer: ComputerConfig, events: EventHub, clock: () => number) {
+    this.app = app;
+    this.db = db;
+    this.config = config;
+    this.computer = computer;
+    this.clock = clock;
     this.currentStatus = { transport: null, connected: false, owner: computer.username, pid: process.pid, updated_at: new Date(clock()).toISOString() };
     this.unsubscribe = events.subscribe((event) => {
       if (event.type !== "workspace") return;
