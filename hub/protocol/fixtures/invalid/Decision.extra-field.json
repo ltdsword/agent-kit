@@ -9,15 +9,18 @@
   "options": [
     {
       "key": "A",
-      "label": "Repair: rebase T2 on T1's version"
+      "label": "Repair: rebase T2 on T1's version",
+      "consequence": null
     },
     {
       "key": "B",
-      "label": "Drop T2's name change, keep only the email part"
+      "label": "Drop T2's name change, keep only the email part",
+      "consequence": null
     },
     {
       "key": "C",
-      "label": "Stop T2, I'll handle it"
+      "label": "Stop T2, I'll handle it",
+      "consequence": null
     }
   ],
   "recommend": "A",
@@ -27,5 +30,8 @@
   "consumed_by": null,
   "opened_at": "2026-10-28T08:00:00Z",
   "cancel_reason": null,
+  "evidence": [],
+  "note": null,
+  "approval": null,
   "surprise": 1
 }

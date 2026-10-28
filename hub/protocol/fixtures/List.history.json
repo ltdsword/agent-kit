@@ -12,7 +12,7 @@
       "text": null,
       "quote": "A: Merge and push / main",
       "channel": "hub",
-      "device": "phone",
+      "by": "alice",
       "status": "APPLIED"
     },
     {
@@ -27,7 +27,7 @@
       "text": "Also add a test for empty emails",
       "quote": null,
       "channel": "hub",
-      "device": "laptop",
+      "by": "alice",
       "status": "HELD"
     },
     {
@@ -42,7 +42,7 @@
       "text": "build inside worktree",
       "quote": null,
       "channel": "opus",
-      "device": null,
+      "by": null,
       "status": "APPLIED"
     },
     {
@@ -57,7 +57,7 @@
       "text": null,
       "quote": "A, go ahead",
       "channel": "chat",
-      "device": null,
+      "by": null,
       "status": "APPLIED"
     }
   ],

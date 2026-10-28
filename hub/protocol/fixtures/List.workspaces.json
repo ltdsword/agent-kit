@@ -13,9 +13,14 @@
       "orchestrator_state": "idle",
       "active_run": {
         "run_id": "r4",
-        "status": "RUNNING"
+        "status": "RUNNING",
+        "title": "User name validation"
       },
-      "archived": false
+      "archived": false,
+      "upload": {"documents": true, "diffs": true, "orchestrator_screen": true},
+      "orchestrator_last_activity_at": "2026-10-28T08:04:00Z",
+      "computer_id": "c_aaaaaaaaaaaaaaaa",
+      "computer_online": true
     },
     {
       "id": "ws_p4x2d6abcdefghij",
@@ -29,7 +34,11 @@
       "problems": 0,
       "orchestrator_state": null,
       "active_run": null,
-      "archived": false
+      "archived": false,
+      "upload": null,
+      "orchestrator_last_activity_at": null,
+      "computer_id": null,
+      "computer_online": false
     }
   ],
   "next": null

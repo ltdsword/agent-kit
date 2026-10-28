@@ -1,5 +1,5 @@
 {
-  "protocol": 1,
+  "protocol": 2,
   "workspace_id": "ws_k3m7q2abcdefghij",
   "session_id": "ses_aaaabbbbccccdddd",
   "taken_at": "2026-10-28T08:04:05Z",
@@ -27,8 +27,7 @@
       "model": "gpt-6-luna",
       "effort": "xhigh",
       "herdr_state": "working",
-      "since": "2026-10-28T07:52:00Z",
-      "screen": null
+      "since": "2026-10-28T07:52:00Z"
     },
     {
       "slot": "worker-2",
@@ -41,8 +40,7 @@
       "model": "gpt-6-luna",
       "effort": "xhigh",
       "herdr_state": "idle",
-      "since": "2026-10-28T07:52:00Z",
-      "screen": null
+      "since": "2026-10-28T07:52:00Z"
     },
     {
       "slot": "worker-3",
@@ -55,8 +53,7 @@
       "model": "gpt-6-luna",
       "effort": "xhigh",
       "herdr_state": "absent",
-      "since": null,
-      "screen": null
+      "since": null
     }
   ],
   "scout": {
@@ -86,6 +83,8 @@
   "runs": [
     {
       "run_id": "r4",
+      "title": "User name validation",
+      "goal": "Enforce clear name limits and validate the related input paths.",
       "status": "RUNNING",
       "created_at": "2026-10-28T07:30:00Z",
       "base_branch": "main",
@@ -98,34 +97,29 @@
         {
           "id": "T1",
           "title": "Limit name length",
+          "summary": "Keep user names within the documented character limit.",
           "status": "RUNNING",
           "worker": "worker-1",
           "depends_on": [],
           "major_repairs": 0,
           "max_repairs": 2,
-          "owned_paths": [
-            "src/main/java/user/T1.java"
-          ],
-          "packet": "gen-tasks/limit-name-length-28-10-26.md",
           "known_issues": null
         },
         {
           "id": "T2",
           "title": "Validate email format",
+          "summary": "Reject malformed email addresses before storing user records.",
           "status": "FIX_REQUIRED",
           "worker": "worker-2",
           "depends_on": [],
           "major_repairs": 1,
           "max_repairs": 2,
-          "owned_paths": [
-            "src/main/java/user/T2.java"
-          ],
-          "packet": "gen-tasks/validate-email-format-28-10-26.md",
           "known_issues": null
         },
         {
           "id": "T3",
           "title": "Update user API docs",
+          "summary": "Document the updated user input validation behavior.",
           "status": "PENDING",
           "worker": null,
           "depends_on": [
@@ -134,10 +128,6 @@
           ],
           "major_repairs": 0,
           "max_repairs": 2,
-          "owned_paths": [
-            "src/main/java/user/T3.java"
-          ],
-          "packet": "gen-tasks/update-user-api-docs-28-10-26.md",
           "known_issues": null
         }
       ],
@@ -155,6 +145,8 @@
     },
     {
       "run_id": "r3",
+      "title": "User search improvements",
+      "goal": "Add useful user search support and integrate the finished change.",
       "status": "DONE",
       "created_at": "2026-10-27T09:00:00Z",
       "base_branch": "main",
@@ -167,15 +159,12 @@
         {
           "id": "T1",
           "title": "Add user search",
+          "summary": "Add a search endpoint for finding users by name.",
           "status": "MERGED",
           "worker": null,
           "depends_on": [],
           "major_repairs": 0,
           "max_repairs": 2,
-          "owned_paths": [
-            "src/main/java/user/T1.java"
-          ],
-          "packet": "gen-tasks/add-user-search-28-10-26.md",
           "known_issues": null
         }
       ],
@@ -190,5 +179,6 @@
         "at": "2026-10-27T11:20:00Z"
       }
     }
-  ]
+  ],
+  "orchestrator_last_activity_at": "2026-10-28T08:04:00Z"
 }

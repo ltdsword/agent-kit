@@ -1,205 +1,239 @@
-# Agent Hub API v1 (contract)
+# Agent Hub API v2 (contract)
 
-The contract between the **connector** (`.agent-system/agentctl.py`, Python), the **backend**
-(`hub/server`, Node 24) and the **web UI** (`hub/web`). Design and reasons are in
-`.agent-system/docs/DECISION-HUB-PLAN.md`; this file defines behavior.
+The browser talks to the shared proxy. The proxy relays workspace requests to the local backend on
+the selected computer. The connector continues to talk directly to that backend over loopback; its
+routes are loopback-only and are never relayed.
 
 The sources of truth, in order:
 1. `hub/protocol/schemas/protocol.schema.json`: every message body (`$defs`). TS types are
-   generated from it (`hub/protocol/src/types.gen.ts`). The kit keeps a byte copy,
-   `.agent-system/hub-protocol.schema.json`, for the connector.
-2. `hub/protocol/src/api.ts`: routes, headers, limits, error codes.
-3. `hub/protocol/fixtures/*.json`: canonical examples. `<Def>.<case>.json` must validate against
-   `$defs.<Def>`, and everything in `invalid/` must be rejected. Both validators run them: vitest
-   (`npm test -w @agent-hub/protocol`) and unittest (`.agent-system/tests/test_hubschema.py`).
-4. This document: the semantics the schema can't express.
+   generated from it (`hub/protocol/src/types.gen.ts`). The kit keeps a byte copy at
+   `.agent-system/hub-protocol.schema.json` for the connector.
+2. `hub/protocol/src/api.ts`: routes, headers, limits and error codes.
+3. `hub/protocol/fixtures/*.json`: canonical examples. `<Def>.<case>.json` validates against
+   `$defs.<Def>`; every fixture in `invalid/` is rejected by both the Vitest and Python validators.
+4. This document: the semantics the schema cannot express.
 
-**Changing the contract**:
-1. Edit the schema and fixtures, then run `npm run gen -w @agent-hub/protocol` (regenerates the
-   types and the kit copy).
-2. Update this file.
-3. Both test suites must pass.
-
-Breaking changes bump `PROTOCOL`. Only the lead edits `hub/protocol/**`; tracks request changes.
+Breaking changes bump `PROTOCOL`. Protocol 2 is required by the connector and relay.
 
 ## 1. Common rules
 
-- Base URL: `http://127.0.0.1:7420` (`DEFAULT_PORT`), all routes under `/api/v1`. In local mode the
-  backend serves the built UI at `/`.
-- JSON only (`Content-Type: application/json`), UTF-8. Timestamps: ISO 8601 UTC with `Z`.
-- Every request carries `X-Agent-Hub-Protocol: 1`. Below `MIN_PROTOCOL` → `426 protocol_unsupported`.
-  A missing header counts as 1.
-- Errors: `ApiError` `{"error": {"code", "message"}}`, with the codes and HTTP statuses in
-  `ERRORS`. `bad_request` messages name the first schema error (`/decisions/0/decision_id must match
-  pattern ...`).
-- The backend validates every request body against its `$def` and rejects extra properties. The
-  connector validates what it sends in tests, and responses at runtime.
-- Lists use `List` `{items, next}`. `next` is an opaque cursor (pass it as `cursor=`), or `null`
-  when there are no more. Default page 50, newest first unless stated.
-- Ids:
-  - `workspace_id` `ws_` + 16 base32 (a-z, 2-7), made by the connector;
-  - `session_id` `ses_` + 16, made per connector start;
-  - command `cmd_` + 16, made by the backend.
-- Size limits are in `LIMITS`; over them → `413 payload_too_large`.
+- The local backend base URL is `http://127.0.0.1:7420` (`DEFAULT_PORT`). Routes use `/api/v1`.
+  The browser uses the proxy base URL; workspace paths under `/api/v1` are relayed to the backend unchanged.
+- JSON bodies use UTF-8 and `Content-Type: application/json`. Timestamps are ISO 8601 with a UTC
+  `Z` suffix.
+- Connector requests carry `X-Agent-Hub-Protocol: 2`. `MIN_PROTOCOL` is 2; a lower or missing
+  version gets `426 protocol_unsupported`.
+- Errors use `ApiError`: `{"error":{"code","message"}}`. Statuses are in `ERRORS`; schema
+  failures use `bad_request` and identify the first validation error.
+- Request bodies are validated against their `$def`; extra properties are rejected. Lists use
+  `List` (`items`, `next`), where `next` is an opaque cursor or `null`.
+- IDs: `workspace_id` is `ws_` plus 16 lowercase base32 characters; `session_id` is `ses_` plus
+  16 base32 characters; command IDs are `cmd_` plus 16 base32 characters. Run IDs match
+  `^[a-z0-9][a-z0-9-]{1,39}$`; task IDs match `^T[1-9][0-9]{0,2}$`.
+- Size and time limits are in `LIMITS`. Oversized backend payloads get `413 payload_too_large`.
 
 ## 2. Auth
 
-| Credential | Format | Created by | Stored | Used on |
-|---|---|---|---|---|
-| Connector key | 32 random bytes, base64url | backend on first start | plaintext in `~/.config/agent-hub/connector.key` (0600); backend keeps a sha256 | connector routes |
-| Device token | 32 random bytes, base64url | `POST /pair` | browser `localStorage`; backend keeps a sha256 | user routes, `/stream?token=` |
-| Pairing code | 8 chars `[A-Z2-9]`, single use, 10 min | `agent-hub pair --name <device>` on the computer | backend keeps a sha256 + expiry | `POST /pair` |
+| Credential | Created by | Stored / used by | Used between |
+|---|---|---|---|
+| Session token | Proxy login | Browser stores it; proxy validates it | Browser → proxy user routes |
+| Admin key | Proxy setup | Admin computer keeps `~/.config/agent-hub/admin.key` | Admin CLI → proxy |
+| Computer key | Computer registration | Backend keeps it in `computer.json`; proxy stores its hash | Proxy ↔ local backend relay |
+| Connector key | Local backend on first start | `~/.config/agent-hub/connector.key`; backend stores its hash | Connector → local backend |
+| Assertion | Proxy signs per relayed request | Backend verifies with the pinned proxy public key | Proxy → backend request |
 
-- `Authorization: Bearer <secret>`. A wrong secret gets `401 unauthorized`; a connector key on a
-  user route, or a device token on a connector route, gets `403 forbidden`. `/pair` needs no token.
-- `EventSource` can't set headers, so `/stream` takes the device token as `?token=`.
-- CORS: allowed origins are the backend's own origin plus `AGENT_HUB_ORIGINS` (comma-separated, e.g.
-  the Vercel URL). No cookies are used, so there is no CSRF surface.
-- The backend binds `127.0.0.1` only (`AGENT_HUB_HOST` can't be set to `0.0.0.0` without
-  `--i-know`).
+Session and computer credentials use `Authorization: Bearer <secret>`. The browser also sends its
+session token in `Authorization` when opening the computer event stream; the stream is read with
+`fetch` streaming, not `EventSource`. The proxy validates ownership before routing. Connector
+routes remain bound to loopback and use the connector key; the browser never calls them.
+
+The proxy hashes passwords with PBKDF2-SHA256, a 16-byte salt, and 20,000 iterations. Each user's
+iteration count is stored so it can be raised and passwords re-hashed at login. Login is limited to
+5 attempts per minute per username and IP; excess attempts return `429 rate_limited`. Sessions last
+12 hours, or 30 days when `remember` is true. New passwords must be 12–256 characters.
 
 ## 3. Connector routes
 
+Connector routes are local to the backend and are never exposed through the proxy.
+
 ### 3.1 Session
 
-- `GET /agent/ping` → `PingResponse`. Used by `agentctl enable/status` and for clock skew.
-- `POST /agent/hello` (`HelloRequest` → `HelloResponse`):
-  - Creates the workspace if new (`known: false`) and updates name, path and kit version if known.
-  - Opens a `workspace_sessions` row and sets the status to ONLINE.
-  - `409 duplicate_workspace` when a *different* `session_id` for this workspace made a request in
-    the last 90 s (a copied workspace).
-  - The response tells the connector what the backend already has: `event_cursors`,
-    `decision_hashes` (sha256 of the canonical Decision JSON: keys sorted, no spaces, UTF-8),
-    `document_hashes`, `snapshot_hash`. On a wiped DB all are empty, and the connector sends
-    everything.
-- `POST /agent/workspaces/:ws/goodbye` (`GoodbyeRequest`) → `204`: the status becomes STOPPED and
-  the session is closed.
-- Liveness: any connector request on `:ws` refreshes `last_seen_at` and sets ONLINE (unless it's
-  `goodbye`). No request for `offlineAfterSeconds` (90) → OFFLINE (checked by a backend timer every
-  10 s). `POST .../heartbeat` → `204` exists for loops with nothing else to send; send one at least
-  every `heartbeatSeconds` (30).
+- `GET /api/v1/agent/ping` → `PingResponse`.
+- `POST /api/v1/agent/hello` (`HelloRequest` → `HelloResponse`) creates or updates the workspace,
+  opens a session, and sets it ONLINE. `upload` declares whether documents, diffs and the
+  orchestrator screen are uploaded. A different session ID making a request within 90 seconds gets
+  `409 duplicate_workspace`. The response reports event cursors, decision hashes (SHA-256 of
+  canonical Decision JSON), document hashes and the snapshot hash so the connector can send only
+  changes.
+- `POST /api/v1/agent/workspaces/:ws/goodbye` → `204`; the workspace becomes STOPPED.
+- Connector activity refreshes `last_seen_at`; no activity for `offlineAfterSeconds` (90) makes a
+  workspace OFFLINE. `POST .../heartbeat` is available for loops with nothing else to send; send
+  one at least every `heartbeatSeconds` (30).
 
-### 3.2 Sync (all idempotent; resending is always safe)
+### 3.2 Sync
 
-- `PUT .../snapshot` (`Snapshot`) → `204`:
-  - replaces the stored snapshot;
-  - `snapshot.workspace_id` must equal `:ws` (`400` otherwise);
-  - the backend derives `runs` rows from it.
-- `PUT .../decisions` (`DecisionsBatch`) → `204`: upsert by `(ws, run_id, decision_id)`, then
-  recompute `hub_status` (section 5) and emit `decision` stream events for the ones that changed.
-- `POST .../events` (`EventsBatch`) → `EventsResponse`: insert, ignoring duplicate `(run_id, n)`;
-  `cursor` = the highest `n` stored for the run. Gaps are allowed (the 500-event trim in
-  `state.json`).
-- `PUT .../documents` (`DocumentsBatch`) → `204`: upsert by `path`, clearing `deleted`. The
-  backend recomputes sha256 and returns `400` if it differs from the one sent.
-- `DELETE .../documents?path=` → `204`: marks `deleted=true` and keeps the content (history
-  outlives the workspace).
+- Sync requests are idempotent; resending them is safe.
+- `PUT .../snapshot` replaces the current snapshot. The workspace ID must match `:ws`. The backend
+  derives its run rows from the snapshot. Worker
+  screens and task file details are not uploaded; an orchestrator screen is `null` when its upload
+  setting is off. Older runs can have null title/goal and older tasks can have a null summary.
+- `PUT .../decisions` upserts by `(workspace, run_id, decision_id)` and emits decision events when
+  content changes. Each option may include its consequence; decisions include evidence, Opus's
+  rationale in `note`, and optional worker approval.
+- `POST .../events` inserts events by `(run_id, n)`, ignoring duplicates; event number gaps are
+  allowed when old state logs have trimmed events.
+- `PUT .../documents` upserts by path. The backend recomputes SHA-256 and rejects mismatches.
+  Document kinds are `final_report`, `final_diff`, `decision` and `research`.
+- `DELETE .../documents?path=` marks a document deleted while retaining its content.
 
 ### 3.3 Commands (hub → system)
 
-- `GET .../commands?wait=25` → `CommandsResponse`:
-  - Returns commands in `QUEUED`, plus `HELD` ones whose last ack is more than 5 s old, oldest
-    first, max 50.
-  - With none, the request is held open for up to `wait` seconds (long poll), returning early as
-    soon as one is created.
-  - Expired commands are never returned.
-- `POST .../commands/:id/ack` (`AckRequest`) → `204`:
+- `GET .../commands?wait=25` returns queued commands and eligible held commands, up to 50, or holds
+  the request open until a command arrives or the wait expires.
+- `POST .../commands/:id/ack` records `DELIVERED`, `HELD`, `REJECTED` or `FAILED`. Acks are
+  idempotent. `Command.by` is the username that sent the command.
+- Commands are returned oldest first. `HELD` commands are retried after their last ack is more than
+  five seconds old; expired commands are not returned.
+- `DELIVERED` is final. `HELD` means the agent is blocked or not live yet and is retried later;
+  `reason` is shown to the user. `REJECTED` is final when the scheduler refuses an answer, with its
+  exact reason. `FAILED` is final for other delivery errors.
+- If the scheduler records an answer but typing its notice fails, the connector still acknowledges
+  the answer as delivered and retries the notice locally.
 
-  | Ack | New command status | Meaning |
-  |---|---|---|
-  | `DELIVERED` | DELIVERED (final) | answer: recorded by the scheduler **and** the notice typed to the orchestrator. reply/prompt: typed to the orchestrator |
-  | `HELD` | HELD | Herdr said `agent_blocked` (a dialog is open), or the orchestrator isn't live yet; retried later. `reason` is shown to the user |
-  | `REJECTED` | REJECTED (final) | the scheduler refused the answer; `reason` is its exact message (e.g. `D3 is ANSWERED, not PENDING`, `'x y' is not a valid branch name`) |
-  | `FAILED` | FAILED (final) | anything else (Herdr error text in `reason`) |
+## 4. Connector behavior per command
 
-  Acks are idempotent; an ack after a final status is ignored with `204`.
-- Answer special case: when the scheduler accepted the answer but typing the notice failed or was
-  held, the connector acks `DELIVERED` anyway (the answer is recorded) and retries the notice
-  locally. The user-visible truth is that the answer is in.
-
-## 4. Connector behavior per command (what the system does)
-
-| Command | Connector action | Orchestrator receives (typed into its pane) |
+| Command | Connector action | Orchestrator receives |
 |---|---|---|
-| `answer` | `Scheduler.decision_answer(run, id, choice, note, channel="hub", by=<device>, followup, value, quote="<KEY>: <label>[ / <branch>]")` | `[hub] D3 answered by the user: A (Repair: rebase T2 on T1's version). Note: keep T1's message text. It is recorded (channel hub); carry it out with --decision D3.` |
-| `reply` | nothing recorded | `[hub] reply to D3 from the user: "<text>"` |
-| `prompt` | nothing recorded | `[hub] <text>` |
+| `answer` | Calls the scheduler with the selected choice, followup and username | `[hub] D3 answered by alice: <choice>. It is recorded; carry it out with --decision D3.` |
+| `reply` | Records no scheduler answer | `[hub] reply to D3 from alice: "<text>"` |
+| `prompt` | Records no scheduler answer | `[hub] <text>` |
 
-Delivery goes through `herdr agent prompt <orchestrator> <text>` with `--wait --until working
---until blocked`. `agent_blocked` → ack HELD. Every delivered command is appended to
-`.orchestrator/hub-log.jsonl` (`{"at", "id", "type", "run_id", "decision_id", "body", "device"}`),
-so a wiped backend can re-import prompt history. The Opus rules for these messages are in the plan,
-section 19.2.
+Delivery uses `herdr agent prompt <orchestrator> <text>` and waits until the orchestrator is working
+or blocked. A blocked agent is acknowledged as `HELD`. Delivered commands are appended to local
+`.orchestrator/hub-log.jsonl` with their username and body for recovery.
 
 ## 5. Decision status in the hub (`HubDecision.hub_status`)
 
-The backend derives it from the synced `Decision` and the decision's latest `answer`/`reply`
-command, in this order:
+The backend derives status from the synced decision and its latest answer or reply command:
 
-| Condition | hub_status | status_reason |
-|---|---|---|
-| `local_status = DECIDED_BY_OPUS` | ROUTINE | null |
-| `local_status = CANCELLED` | CANCELLED | `cancel_reason` |
-| `local_status = ANSWERED` and `consumed_by` set | APPLIED | null |
-| `local_status = ANSWERED`, `answer.channel = hub` | DELIVERED | null |
-| `local_status = ANSWERED`, `answer.channel = chat` | ANSWERED_ELSEWHERE | null |
-| `PENDING`, latest answer command QUEUED, HELD or DELIVERED | SENT | the HELD reason, if any |
-| `PENDING`, latest answer command REJECTED | REJECTED | its reason |
-| `PENDING` otherwise (no command, or only replies) | OPEN | null |
-
-A reply doesn't change the status. The UI shows it through `pending_command` (type `reply`).
-`decisions_open` in `WorkspaceDetail` = hub_status in OPEN, SENT, REJECTED.
-
-## 6. User routes
-
-| Route | Behavior |
+| Condition | `hub_status` |
 |---|---|
-| `POST /pair` | `PairRequest` → `PairResponse`; wrong or expired code → `401`; 5 failures per minute per IP → `429` |
-| `GET /devices`, `DELETE /devices/:id` | `current` marks the caller; revoking yourself logs you out |
-| `GET /workspaces?archived=false` | `List<WorkspaceSummary>`, ONLINE first, then by `last_seen_at` desc. `kit_outdated` = `kit_version` differs from `AGENT_HUB_KIT_VERSION` (false if unset) |
-| `GET /workspaces/:ws` | `WorkspaceDetail`; `snapshot` null until the first one arrives |
-| `PATCH /workspaces/:ws` | `{"archived": bool}` → `WorkspaceSummary` (archived workspaces are hidden by default and come back when the connector says hello) |
-| `GET /workspaces/:ws/decisions?status=&run=` | `List<HubDecision>`, newest `opened_at` first |
-| `GET /workspaces/:ws/decisions/:run/:id` | `HubDecision` |
-| `POST .../decisions/:run/:id/answer` | `AnswerRequest` → `201 UserCommand` (type answer, `expires_at` null). Checks: hub_status OPEN or REJECTED, else `409 decision_not_answerable`; `choice` ∈ options; if `choice` ∈ `followup.when`, `followup` must be one of its keys, and `value` is required for an option with `input: true` (forbidden otherwise; the option's own value is used); else `422 invalid_option`. Allowed while the workspace is OFFLINE or STOPPED (it waits as SENT, "waiting for your computer") |
-| `POST .../decisions/:run/:id/reply` | `TextRequest` → `201 UserCommand` (type reply). The decision must be OPEN, SENT or REJECTED, and the workspace ONLINE, else `409 workspace_not_online` |
-| `POST /workspaces/:ws/prompts` | `TextRequest` → `201 UserCommand` (type prompt, `expires_at` = now + 30 min). ONLINE only, else `409 workspace_not_online` |
-| `GET /workspaces/:ws/commands` | `List<UserCommand>`, newest first |
-| `GET /workspaces/:ws/documents?run=` | `List<DocumentMeta>`, grouped by the UI; newest `updated_at` first |
-| `GET /workspaces/:ws/documents/content?path=` | `DocumentContent` |
-| `GET /workspaces/:ws/history?type=&run=` | `List<HistoryItem>`, newest first (below) |
+| `local_status = DECIDED_BY_OPUS` | `ROUTINE` |
+| `local_status = CANCELLED` | `CANCELLED` (`cancel_reason`) |
+| `local_status = ANSWERED` and `consumed_by` is set | `APPLIED` |
+| `local_status = ANSWERED`, answer channel is `hub` | `DELIVERED` |
+| `local_status = ANSWERED`, answer channel is `chat` | `ANSWERED_ELSEWHERE` |
+| Pending answer command is queued, held or delivered | `SENT` |
+| Latest reply was delivered and no answer is recorded | `REPLY_SENT` |
+| Pending answer command was rejected | `REJECTED` (rejection reason) |
+| Pending with no answer command or only an undelivered reply | `OPEN` |
 
-**History** is built from synced decisions and from commands:
-- `answer`: a decision with `answer.channel` `hub` or `chat`; `at` = `answer.at`, `status` = its
-  hub_status.
-- `routine`: `DECIDED_BY_OPUS`; `text` = the reason.
-- `reply` / `prompt`: commands of those types; `status` = the command status.
+`status_reason` carries the held or rejected reason when applicable. Replies do not answer a
+decision; `pending_command` shows the latest reply. `decisions_open` includes `OPEN`, `SENT` and
+`REJECTED` decisions.
 
-`id` is stable (`h_<run>_<D>` or `h_<command id>`).
+## 6. Proxy and user routes
 
-The backend never accepts a request that starts, stops or runs anything in a workspace; no such
-route exists.
+The proxy owns authentication, user and computer management, workspace routing and live streams.
+Workspace routes under `/api/v1/workspaces/:ws/...` are relayed to the selected backend unchanged.
+
+| Route | Request → response | Auth |
+|---|---|---|
+| `POST /api/v1/auth/login` | `LoginRequest` → `LoginResponse` | None |
+| `POST /api/v1/auth/logout` | → `204` | Session token |
+| `POST /api/v1/auth/password` | `PasswordChangeRequest` → `204` | Session token |
+| `GET /api/v1/me` | → `Me` with the user's computers | Session token |
+| `POST /api/v1/admin/users` | `AdminUserRequest` → `AdminUserResponse` | Admin key |
+| `POST /api/v1/admin/users/:username/reset-password` | → `AdminUserResponse` | Admin key |
+| `POST /api/v1/computers/register` | `ComputerRegisterRequest` → `ComputerRegisterResponse` | None |
+| `GET /api/v1/computers/:c/connect` | WebSocket relay | Computer key |
+| `GET /api/v1/computers/:c/poll?wait=:seconds` | → `RelayPollResponse` | Computer key |
+| `POST /api/v1/computers/:c/frames` | `RelayFramesRequest` → `204` | Computer key |
+| `GET /api/v1/computers/:c/stream` | `text/event-stream` of `StreamEvent` | Session token |
+
+The browser's remaining workspace routes are `GET /workspaces`, `GET /workspaces/:ws`,
+`PATCH /workspaces/:ws`, and the decisions, commands, documents and history routes under
+`/workspaces/:ws`. `/workspaces` merges live lists from online computers. It also returns index-only
+entries for workspaces on offline computers seen within 15 days, with status `OFFLINE` and
+`computer_online: false`. The local backend sends `computer_id: null` and `computer_online: true`;
+the proxy fills in the computer ID.
+
+| Workspace route | Behavior |
+|---|---|
+| `GET /workspaces?archived=false` | `List<WorkspaceSummary>`, online first and then by `last_seen_at` descending. `kit_outdated` compares `kit_version` with `AGENT_HUB_KIT_VERSION` (false when unset). |
+| `GET /workspaces/:ws` | `WorkspaceDetail`; snapshot is null until the first snapshot arrives. |
+| `PATCH /workspaces/:ws` | `{"archived": boolean}` → `WorkspaceSummary`. Archived workspaces are hidden by default and return when the connector says hello. |
+| `GET /workspaces/:ws/decisions?status=&run=` | `List<HubDecision>`, newest `opened_at` first. |
+| `GET /workspaces/:ws/decisions/:run/:id` | `HubDecision`. |
+| `POST .../decisions/:run/:id/answer` | `AnswerRequest` → `201 UserCommand`. The status must be OPEN or REJECTED. Choice and followup values must match the decision; a required input value is required and forbidden otherwise. Invalid choices return `422 invalid_option`; unanswerable decisions return `409 decision_not_answerable`. Answers may queue while the workspace is offline. |
+| `POST .../decisions/:run/:id/reply` | `TextRequest` → `201 UserCommand`. Decision must be OPEN, SENT or REJECTED and workspace ONLINE; otherwise `409 workspace_not_online`. |
+| `POST /workspaces/:ws/prompts` | `TextRequest` → `201 UserCommand`, expiring after 30 minutes. Workspace must be ONLINE or gets `409 workspace_not_online`. |
+| `GET /workspaces/:ws/commands` | `List<UserCommand>`, newest first. |
+| `GET /workspaces/:ws/documents?run=` | `List<DocumentMeta>`, newest `updated_at` first. |
+| `GET /workspaces/:ws/documents/content?path=` | `DocumentContent`. |
+| `GET /workspaces/:ws/history?type=&run=` | `List<HistoryItem>`, newest first. |
+
+History is built from hub/chat answers, Opus routine decisions, and reply/prompt commands. IDs are
+stable (`h_<run>_<D>` or `h_<command id>`). The backend has no route to start, stop or run anything
+in a workspace.
+
+### 6.1 Relay frames
+
+The proxy and local backend exchange JSON text frames over WebSocket. Each request has a unique ID;
+the matching response or stream frames carry that ID. The browser-to-backend assertion is attached
+to every `RelayRequest`.
+
+| Frame | Direction | Meaning |
+|---|---|---|
+| `req` | Proxy → backend | Method, `/api/v1/` path, query without `?`, optional JSON body, assertion and stream flag |
+| `res` | Backend → proxy | HTTP status and JSON body |
+| `chunk` / `end` | Backend → proxy | Stream data followed by its final status; `stream: true` produces zero or more `chunk` frames and one `end` |
+| `cancel` | Proxy → backend | Browser disconnected; backend can stop the active request |
+| `hello` / `workspaces` | Backend → proxy | Protocol version, computer identity and workspace index |
+| `ping` / `pong` | Both directions | Relay heartbeat |
+
+The proxy returns `503 computer_offline` when no computer socket is available and `504
+computer_timeout` when a request exceeds 30 seconds. Relay frames are capped at 900 KB. Backend
+request bodies larger than that return `413 payload_too_large`. Documents can be up to 1 MB, so a
+`DocumentContent` response is sent with `stream: true` and split into chunks.
+
+The HTTPS long-poll fallback is used when a WebSocket upgrade fails. Polls are held for at most 25
+seconds; `RelayPollResponse.frames` and posted `RelayFramesRequest.frames` batches contain at most
+50 objects. Each frame is validated by its `type` as a request or cancel, or as a response, chunk,
+end, hello, workspaces or pong frame respectively.
+
+### 6.2 Assertion verification
+
+The wire assertion is `base64url(JSON payload) + "." + base64url(signature)`. The Ed25519 signature
+covers the ASCII bytes of the first part. Its payload is `Assertion` (`v`, `sub`, `cid`, `rid`,
+`exp`). The backend verifies the signature with the proxy public key pinned during `hub-login`, requires `exp` to be
+between now and 120 seconds from now, checks `cid` against its own computer ID, checks `sub` against
+its owner, and checks `rid` against the relay frame ID.
+
+Runs are stored by the backend and upserted by `(workspace, run_id)`. Finished runs are deleted 60
+days after finishing.
 
 ## 7. Live updates
 
-`GET /stream?token=<device token>` is Server-Sent Events. Each event is
-`event: <type>\ndata: <StreamEvent JSON>\n\n`, with types `workspace`, `snapshot`, `decision`,
-`command`, `document`, `history`. A `: ping` comment comes every 15 s.
-
-The UI refetches the named resource; events carry no payload beyond `ref`. On reconnect, the UI
-refetches the current page. If the stream can't connect, it falls back to polling every 10 s.
+`GET /api/v1/computers/:c/stream` returns named Server-Sent Events through the proxy. The browser
+uses `fetch` streaming so it can send the session token in the `Authorization` header. Event names
+are `workspace`, `snapshot`, `decision`, `command`, `document` and `history`; the payload is a
+`StreamEvent` reference. The UI refetches the named resource after an event and the current page
+after reconnecting.
 
 ## 8. Backend configuration (environment)
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `AGENT_HUB_PORT` | 7420 | port |
-| `AGENT_HUB_HOST` | 127.0.0.1 | bind address |
+| `AGENT_HUB_PORT` | 7420 | Local backend port |
+| `AGENT_HUB_HOST` | 127.0.0.1 | Bind address; connector routes stay loopback-only |
 | `AGENT_HUB_DATA` | `~/.local/share/agent-hub` | SQLite file `hub.db` |
-| `AGENT_HUB_CONFIG` | `~/.config/agent-hub` | `connector.key` |
-| `AGENT_HUB_ORIGINS` | (empty) | extra CORS origins |
-| `AGENT_HUB_KIT_VERSION` | (unset) | for `kit_outdated` |
+| `AGENT_HUB_CONFIG` | `~/.config/agent-hub` | `connector.key` and default computer configuration directory |
+| `AGENT_HUB_COMPUTER` | `$AGENT_HUB_CONFIG/computer.json` | Path to the registered computer configuration |
+| `AGENT_HUB_RECENT_DAYS` | 15 | Keep offline workspace index entries visible this many days |
+| `AGENT_HUB_RUN_RETENTION_DAYS` | 60 | Retain finished runs this many days |
+| `AGENT_HUB_ORIGINS` | (empty) | Extra allowed origins |
+| `AGENT_HUB_KIT_VERSION` | (unset) | Version used for `kit_outdated` |
 
-The connector reads its URL from `config.json` `hub.url`, and the key from
-`$AGENT_HUB_CONFIG/connector.key`. It must not use a proxy for loopback URLs: Claude Code's org
-settings set `HTTPS_PROXY`.
+The connector reads the backend URL from `config.json` `hub.url` and its key from
+`$AGENT_HUB_CONFIG/connector.key`. It must bypass proxies for loopback URLs.

@@ -1,5 +1,7 @@
 {
   "run_id": "r3",
+  "title": "User search improvements",
+  "goal": "Add useful user search support and integrate the finished change.",
   "status": "DONE",
   "created_at": "2026-10-27T09:00:00Z",
   "base_branch": "main",
@@ -12,15 +14,12 @@
     {
       "id": "T1",
       "title": "Add user search",
+      "summary": "Add a search endpoint for finding users by name.",
       "status": "MERGED",
       "worker": null,
       "depends_on": [],
       "major_repairs": 0,
       "max_repairs": 2,
-      "owned_paths": [
-        "src/main/java/user/T1.java"
-      ],
-      "packet": "gen-tasks/add-user-search-28-10-26.md",
       "known_issues": null
     }
   ],

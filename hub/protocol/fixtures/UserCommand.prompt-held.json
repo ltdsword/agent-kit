@@ -9,7 +9,7 @@
   },
   "status": "HELD",
   "status_reason": "the orchestrator has a prompt open in the terminal",
-  "device": "laptop",
+  "by": "alice",
   "created_at": "2026-10-28T08:05:00Z",
   "delivered_at": null,
   "expires_at": "2026-10-28T08:35:00Z"

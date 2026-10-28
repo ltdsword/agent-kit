@@ -1,0 +1,1 @@
+{"type": "req", "id": "req-001", "method": "GET", "path": "/api/v1/workspaces/ws_k3m7q2abcdefghij", "query": "", "body": null, "assertion": "eyJ2IjoxLCJzdWIiOiJhbGljZSJ9.signature", "stream": false}

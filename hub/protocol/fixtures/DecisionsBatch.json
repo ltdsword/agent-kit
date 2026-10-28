@@ -11,15 +11,18 @@
       "options": [
         {
           "key": "A",
-          "label": "Repair: rebase T2 on T1's version"
+          "label": "Repair: rebase T2 on T1's version",
+          "consequence": null
         },
         {
           "key": "B",
-          "label": "Drop T2's name change, keep only the email part"
+          "label": "Drop T2's name change, keep only the email part",
+          "consequence": null
         },
         {
           "key": "C",
-          "label": "Stop T2, I'll handle it"
+          "label": "Stop T2, I'll handle it",
+          "consequence": null
         }
       ],
       "recommend": "A",
@@ -28,7 +31,10 @@
       "answer": null,
       "consumed_by": null,
       "opened_at": "2026-10-28T08:00:00Z",
-      "cancel_reason": null
+      "cancel_reason": null,
+      "evidence": [{"code": "merge-conflict", "note": "Both tasks edit the same validation path.", "bad": false}],
+      "note": null,
+      "approval": null
     },
     {
       "run_id": "r4",
@@ -54,7 +60,10 @@
       },
       "consumed_by": "approved ./gradlew test at 2026-10-28T07:55:00Z",
       "opened_at": "2026-10-28T07:55:00Z",
-      "cancel_reason": null
+      "cancel_reason": null,
+      "evidence": [],
+      "note": "The approval is safe within the worker's assigned workspace.",
+      "approval": {"command": "./gradlew test", "cwd": "/repo", "why": ["Run the requested test suite."]}
     }
   ]
 }

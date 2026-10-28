@@ -7,7 +7,7 @@
     "choice": "A",
     "note": "keep T1's message text"
   },
-  "device": "phone",
+  "by": "alice",
   "created_at": "2026-10-28T08:03:10Z",
   "expires_at": null
 }

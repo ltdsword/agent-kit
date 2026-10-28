@@ -9,15 +9,18 @@
   "options": [
     {
       "key": "A",
-      "label": "Merge and push"
+      "label": "Merge and push",
+      "consequence": null
     },
     {
       "key": "B",
-      "label": "Merge locally only, no push"
+      "label": "Merge locally only, no push",
+      "consequence": null
     },
     {
       "key": "C",
-      "label": "Don't merge"
+      "label": "Don't merge",
+      "consequence": null
     }
   ],
   "recommend": "A",
@@ -60,5 +63,8 @@
   },
   "consumed_by": "finish A into main at 2026-10-27T11:20:00Z",
   "opened_at": "2026-10-27T11:12:00Z",
-  "cancel_reason": null
+  "cancel_reason": null,
+  "evidence": [],
+  "note": null,
+  "approval": null
 }

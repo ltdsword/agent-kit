@@ -1,5 +1,5 @@
 {
-  "protocol": 1,
+  "protocol": 2,
   "workspace_id": "ws_k3m7q2abcdefghij",
   "session_id": "ses_aaaabbbbccccdddd",
   "taken_at": "2026-10-28T08:04:05Z",
@@ -15,5 +15,6 @@
   },
   "workers": [],
   "scout": null,
-  "runs": []
+  "runs": [],
+  "orchestrator_last_activity_at": null
 }

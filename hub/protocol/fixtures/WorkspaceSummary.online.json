@@ -11,7 +11,12 @@
   "orchestrator_state": "idle",
   "active_run": {
     "run_id": "r4",
-    "status": "RUNNING"
+    "status": "RUNNING",
+    "title": "User name validation"
   },
-  "archived": false
+  "archived": false,
+  "upload": {"documents": true, "diffs": true, "orchestrator_screen": true},
+  "orchestrator_last_activity_at": "2026-10-28T08:04:00Z",
+  "computer_id": "c_aaaaaaaaaaaaaaaa",
+  "computer_online": true
 }

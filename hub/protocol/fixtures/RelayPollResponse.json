@@ -1,0 +1,1 @@
+{"frames": [{"type": "req", "id": "req-003", "method": "GET", "path": "/api/v1/workspaces", "query": "", "body": null, "assertion": "eyJ2IjoxLCJzdWIiOiJhbGljZSJ9.signature", "stream": false}, {"type": "cancel", "id": "req-002"}]}

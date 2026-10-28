@@ -1,14 +1,16 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://agent-kit.local/hub/protocol/1",
-  "title": "Agent Hub protocol, version 1",
-  "description": "Single source of truth for the connector API (agentctl <-> backend) and the user API (web UI <-> backend). Uses only this JSON Schema subset so the stdlib Python validator can check it: type (string or list), enum, const, required, properties, additionalProperties (boolean or schema), items, minItems, maxItems, minLength, maxLength, pattern, minimum, maximum, $ref to #/$defs/*, anyOf (only for nullable refs). No oneOf/allOf/format.",
+  "$id": "https://agent-kit.local/hub/protocol/2",
+  "title": "Agent Hub protocol, version 2",
+  "description": "Single source of truth for the connector API (agentctl <-> backend), the browser API (web UI <-> proxy), and the relay frames (proxy <-> backend). Uses only this JSON Schema subset so the stdlib Python validator can check it: type (string or list), enum, const, required, properties, additionalProperties (boolean or schema), items, minItems, maxItems, minLength, maxLength, pattern, minimum, maximum, $ref to #/$defs/*, anyOf (only for nullable refs). No oneOf/allOf/format.",
   "$defs": {
     "Timestamp": {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]+)?(Z|[+-][0-9]{2}:[0-9]{2})$"},
     "NullableTimestamp": {"type": ["string", "null"], "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]+)?(Z|[+-][0-9]{2}:[0-9]{2})$"},
     "WorkspaceId": {"type": "string", "pattern": "^ws_[a-z2-7]{16}$"},
-    "RunId": {"type": "string", "pattern": "^[a-z][a-z0-9-]{0,19}$"},
-    "TaskId": {"type": "string", "pattern": "^[A-Za-z][A-Za-z0-9_-]{0,15}$"},
+    "RunId": {"type": "string", "pattern": "^[a-z0-9][a-z0-9-]{1,39}$"},
+    "TaskId": {"type": "string", "pattern": "^T[1-9][0-9]{0,2}$"},
+    "Username": {"type": "string", "pattern": "^[a-z][a-z0-9_-]{2,31}$"},
+    "ComputerId": {"type": "string", "pattern": "^c_[a-z2-7]{16}$"},
     "DecisionId": {"type": "string", "pattern": "^D[0-9]{1,4}$"},
     "Sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
     "OptionKey": {"type": "string", "pattern": "^[A-Za-z0-9]{1,8}$"},
@@ -20,12 +22,12 @@
     "AgentState": {"enum": ["idle", "working", "blocked", "done", "unknown", "absent"]},
     "DecisionKind": {"enum": ["blocker", "repair", "scope_exception", "abandon", "worker_approval", "question", "finish"]},
     "LocalDecisionStatus": {"enum": ["PENDING", "ANSWERED", "CANCELLED", "DECIDED_BY_OPUS"]},
-    "HubDecisionStatus": {"enum": ["OPEN", "SENT", "DELIVERED", "APPLIED", "ANSWERED_ELSEWHERE", "REJECTED", "CANCELLED", "ROUTINE"]},
+    "HubDecisionStatus": {"enum": ["OPEN", "SENT", "REPLY_SENT", "DELIVERED", "APPLIED", "ANSWERED_ELSEWHERE", "REJECTED", "CANCELLED", "ROUTINE"]},
     "AnswerChannel": {"enum": ["chat", "hub", "opus"]},
     "CommandType": {"enum": ["answer", "reply", "prompt"]},
     "CommandStatus": {"enum": ["QUEUED", "HELD", "DELIVERED", "REJECTED", "FAILED", "EXPIRED"]},
     "AckStatus": {"enum": ["DELIVERED", "HELD", "REJECTED", "FAILED"]},
-    "DocumentKind": {"enum": ["final_report", "final_diff", "task_file", "decision", "research", "review"]},
+    "DocumentKind": {"enum": ["final_report", "final_diff", "decision", "research"]},
     "DocumentFormat": {"enum": ["markdown", "diff", "text"]},
 
     "ApiError": {
@@ -35,7 +37,7 @@
     },
 
     "Agent": {
-      "description": "The orchestrator. name = kitstart.agent_name(repo). screen = last lines of its pane (null when upload.agent_screens is off).",
+      "description": "The orchestrator. name = kitstart.agent_name(repo). screen = last lines of its pane (null when upload.orchestrator_screen is off).",
       "type": "object", "additionalProperties": false,
       "required": ["name", "kind", "model", "effort", "herdr_state", "session_id", "screen"],
       "properties": {
@@ -50,7 +52,7 @@
     },
     "Worker": {
       "type": "object", "additionalProperties": false,
-      "required": ["slot", "status", "status_reason", "run_id", "task_id", "agent_name", "kind", "model", "effort", "herdr_state", "since", "screen"],
+      "required": ["slot", "status", "status_reason", "run_id", "task_id", "agent_name", "kind", "model", "effort", "herdr_state", "since"],
       "properties": {
         "slot": {"type": "string", "pattern": "^worker-[0-9]{1,2}$"},
         "status": {"$ref": "#/$defs/WorkerStatus"},
@@ -62,8 +64,7 @@
         "model": {"type": "string", "maxLength": 128},
         "effort": {"type": ["string", "null"], "maxLength": 32},
         "herdr_state": {"$ref": "#/$defs/AgentState"},
-        "since": {"$ref": "#/$defs/NullableTimestamp"},
-        "screen": {"type": ["array", "null"], "items": {"type": "string"}, "maxItems": 200}
+        "since": {"$ref": "#/$defs/NullableTimestamp"}
       }
     },
     "ScoutRound": {
@@ -88,17 +89,16 @@
     },
     "Task": {
       "type": "object", "additionalProperties": false,
-      "required": ["id", "title", "status", "worker", "depends_on", "major_repairs", "max_repairs", "owned_paths", "packet", "known_issues"],
+      "required": ["id", "title", "summary", "status", "worker", "depends_on", "major_repairs", "max_repairs", "known_issues"],
       "properties": {
         "id": {"$ref": "#/$defs/TaskId"},
-        "title": {"type": "string", "maxLength": 300},
+        "title": {"type": "string", "maxLength": 60},
+        "summary": {"type": ["string", "null"], "maxLength": 300},
         "status": {"$ref": "#/$defs/TaskStatus"},
         "worker": {"type": ["string", "null"]},
         "depends_on": {"type": "array", "items": {"$ref": "#/$defs/TaskId"}, "maxItems": 20},
         "major_repairs": {"type": "integer", "minimum": 0},
         "max_repairs": {"type": "integer", "minimum": 0},
-        "owned_paths": {"type": "array", "items": {"type": "string", "maxLength": 512}, "maxItems": 100},
-        "packet": {"type": ["string", "null"], "maxLength": 512},
         "known_issues": {"type": ["string", "null"], "maxLength": 4000}
       }
     },
@@ -125,9 +125,11 @@
     },
     "Run": {
       "type": "object", "additionalProperties": false,
-      "required": ["run_id", "status", "created_at", "base_branch", "integration_branch", "gate", "tasks", "problems", "report_path", "finish"],
+      "required": ["run_id", "title", "goal", "status", "created_at", "base_branch", "integration_branch", "gate", "tasks", "problems", "report_path", "finish"],
       "properties": {
         "run_id": {"$ref": "#/$defs/RunId"},
+        "title": {"type": ["string", "null"], "maxLength": 80},
+        "goal": {"type": ["string", "null"], "maxLength": 500},
         "status": {"$ref": "#/$defs/RunStatus"},
         "created_at": {"$ref": "#/$defs/NullableTimestamp"},
         "base_branch": {"type": ["string", "null"], "maxLength": 255},
@@ -143,9 +145,9 @@
     "Snapshot": {
       "description": "The whole live status of one workspace. Overwrites the previous one. Max 256 KB serialized.",
       "type": "object", "additionalProperties": false,
-      "required": ["protocol", "workspace_id", "session_id", "taken_at", "kit_version", "orchestrator", "workers", "scout", "runs"],
+      "required": ["protocol", "workspace_id", "session_id", "taken_at", "kit_version", "orchestrator", "workers", "scout", "runs", "orchestrator_last_activity_at"],
       "properties": {
-        "protocol": {"const": 1},
+        "protocol": {"const": 2},
         "workspace_id": {"$ref": "#/$defs/WorkspaceId"},
         "session_id": {"type": "string", "maxLength": 64},
         "taken_at": {"$ref": "#/$defs/Timestamp"},
@@ -153,13 +155,22 @@
         "orchestrator": {"$ref": "#/$defs/Agent"},
         "workers": {"type": "array", "items": {"$ref": "#/$defs/Worker"}, "maxItems": 10},
         "scout": {"anyOf": [{"$ref": "#/$defs/Scout"}, {"type": "null"}]},
-        "runs": {"type": "array", "items": {"$ref": "#/$defs/Run"}, "maxItems": 200}
+        "runs": {"type": "array", "items": {"$ref": "#/$defs/Run"}, "maxItems": 200},
+        "orchestrator_last_activity_at": {"$ref": "#/$defs/NullableTimestamp"}
       }
     },
 
     "Option": {
-      "type": "object", "additionalProperties": false, "required": ["key", "label"],
-      "properties": {"key": {"$ref": "#/$defs/OptionKey"}, "label": {"type": "string", "minLength": 1, "maxLength": 300}}
+      "type": "object", "additionalProperties": false, "required": ["key", "label", "consequence"],
+      "properties": {"key": {"$ref": "#/$defs/OptionKey"}, "label": {"type": "string", "minLength": 1, "maxLength": 300}, "consequence": {"type": ["string", "null"], "maxLength": 300}}
+    },
+    "Evidence": {
+      "type": "object", "additionalProperties": false, "required": ["code", "note", "bad"],
+      "properties": {"code": {"type": "string", "maxLength": 300}, "note": {"type": "string", "maxLength": 300}, "bad": {"type": "boolean"}}
+    },
+    "Approval": {
+      "type": "object", "additionalProperties": false, "required": ["command", "cwd", "why"],
+      "properties": {"command": {"type": "string", "maxLength": 2000}, "cwd": {"type": ["string", "null"], "maxLength": 512}, "why": {"type": "array", "items": {"type": "string", "maxLength": 300}, "maxItems": 10}}
     },
     "FollowupOption": {
       "type": "object", "additionalProperties": false, "required": ["key", "label", "value", "input"],
@@ -201,7 +212,7 @@
     "Decision": {
       "description": "One scheduler decision as the connector sees it in state.json. agent = the worker slot holding task_id, else 'orchestrator'.",
       "type": "object", "additionalProperties": false,
-      "required": ["run_id", "decision_id", "kind", "task_id", "agent", "title", "question", "options", "recommend", "followup", "local_status", "answer", "consumed_by", "opened_at", "cancel_reason"],
+      "required": ["run_id", "decision_id", "kind", "task_id", "agent", "title", "question", "options", "recommend", "followup", "local_status", "answer", "consumed_by", "opened_at", "cancel_reason", "evidence", "note", "approval"],
       "properties": {
         "run_id": {"$ref": "#/$defs/RunId"},
         "decision_id": {"$ref": "#/$defs/DecisionId"},
@@ -217,7 +228,10 @@
         "answer": {"anyOf": [{"$ref": "#/$defs/Answer"}, {"type": "null"}]},
         "consumed_by": {"type": ["string", "null"], "maxLength": 500},
         "opened_at": {"$ref": "#/$defs/Timestamp"},
-        "cancel_reason": {"type": ["string", "null"], "maxLength": 1000}
+        "cancel_reason": {"type": ["string", "null"], "maxLength": 1000},
+        "evidence": {"type": "array", "items": {"$ref": "#/$defs/Evidence"}, "maxItems": 20},
+        "note": {"type": ["string", "null"], "maxLength": 1000},
+        "approval": {"anyOf": [{"$ref": "#/$defs/Approval"}, {"type": "null"}]}
       }
     },
     "Event": {
@@ -257,14 +271,14 @@
     },
     "Command": {
       "description": "Hub -> system. Delivered to the connector, applied via the scheduler (answer) or typed to the orchestrator (reply, prompt).",
-      "type": "object", "additionalProperties": false, "required": ["id", "type", "run_id", "decision_id", "body", "device", "created_at", "expires_at"],
+      "type": "object", "additionalProperties": false, "required": ["id", "type", "run_id", "decision_id", "body", "by", "created_at", "expires_at"],
       "properties": {
         "id": {"type": "string", "pattern": "^cmd_[a-z2-7]{16}$"},
         "type": {"$ref": "#/$defs/CommandType"},
         "run_id": {"type": ["string", "null"]},
         "decision_id": {"type": ["string", "null"]},
         "body": {"$ref": "#/$defs/CommandBody"},
-        "device": {"type": "string", "maxLength": 64},
+        "by": {"$ref": "#/$defs/Username"},
         "created_at": {"$ref": "#/$defs/Timestamp"},
         "expires_at": {"$ref": "#/$defs/NullableTimestamp"}
       }
@@ -275,15 +289,16 @@
       "properties": {"protocol": {"type": "integer"}, "min_protocol": {"type": "integer"}, "server_time": {"$ref": "#/$defs/Timestamp"}, "version": {"type": "string"}}
     },
     "HelloRequest": {
-      "type": "object", "additionalProperties": false, "required": ["protocol", "workspace_id", "session_id", "name", "path", "kit_version", "connector_version"],
+      "type": "object", "additionalProperties": false, "required": ["protocol", "workspace_id", "session_id", "name", "path", "kit_version", "connector_version", "upload"],
       "properties": {
-        "protocol": {"const": 1},
+        "protocol": {"const": 2},
         "workspace_id": {"$ref": "#/$defs/WorkspaceId"},
         "session_id": {"type": "string", "pattern": "^ses_[a-z2-7]{16}$"},
         "name": {"type": "string", "minLength": 1, "maxLength": 128},
         "path": {"type": "string", "maxLength": 1024},
         "kit_version": {"type": ["string", "null"], "maxLength": 64},
-        "connector_version": {"type": "string", "maxLength": 64}
+        "connector_version": {"type": "string", "maxLength": 64},
+        "upload": {"$ref": "#/$defs/UploadSettings"}
       }
     },
     "HelloResponse": {
@@ -297,6 +312,10 @@
         "document_hashes": {"type": "object", "description": "path -> sha256 of content", "additionalProperties": {"$ref": "#/$defs/Sha256"}},
         "snapshot_hash": {"type": ["string", "null"]}
       }
+    },
+    "UploadSettings": {
+      "type": "object", "additionalProperties": false, "required": ["documents", "diffs", "orchestrator_screen"],
+      "properties": {"documents": {"type": "boolean"}, "diffs": {"type": "boolean"}, "orchestrator_screen": {"type": "boolean"}}
     },
     "GoodbyeRequest": {
       "type": "object", "additionalProperties": false, "required": ["session_id", "reason"],
@@ -330,7 +349,7 @@
 
     "WorkspaceSummary": {
       "type": "object", "additionalProperties": false,
-      "required": ["id", "name", "path", "status", "last_seen_at", "kit_version", "kit_outdated", "open_decisions", "problems", "orchestrator_state", "active_run", "archived"],
+      "required": ["id", "name", "path", "status", "last_seen_at", "kit_version", "kit_outdated", "open_decisions", "problems", "orchestrator_state", "active_run", "archived", "upload", "orchestrator_last_activity_at", "computer_id", "computer_online"],
       "properties": {
         "id": {"$ref": "#/$defs/WorkspaceId"},
         "name": {"type": "string"},
@@ -342,9 +361,13 @@
         "open_decisions": {"type": "integer", "minimum": 0},
         "problems": {"type": "integer", "minimum": 0},
         "orchestrator_state": {"type": ["string", "null"], "enum": ["idle", "working", "blocked", "done", "unknown", "absent", null]},
-        "active_run": {"type": ["object", "null"], "additionalProperties": false, "required": ["run_id", "status"],
-          "properties": {"run_id": {"$ref": "#/$defs/RunId"}, "status": {"$ref": "#/$defs/RunStatus"}}},
-        "archived": {"type": "boolean"}
+        "active_run": {"type": ["object", "null"], "additionalProperties": false, "required": ["run_id", "status", "title"],
+          "properties": {"run_id": {"$ref": "#/$defs/RunId"}, "status": {"$ref": "#/$defs/RunStatus"}, "title": {"type": ["string", "null"]}}},
+        "archived": {"type": "boolean"},
+        "upload": {"anyOf": [{"$ref": "#/$defs/UploadSettings"}, {"type": "null"}]},
+        "orchestrator_last_activity_at": {"$ref": "#/$defs/NullableTimestamp"},
+        "computer_id": {"type": ["string", "null"], "pattern": "^c_[a-z2-7]{16}$"},
+        "computer_online": {"type": "boolean"}
       }
     },
     "HubDecision": {
@@ -361,7 +384,7 @@
     },
     "UserCommand": {
       "type": "object", "additionalProperties": false,
-      "required": ["id", "workspace_id", "type", "run_id", "decision_id", "body", "status", "status_reason", "device", "created_at", "delivered_at", "expires_at"],
+      "required": ["id", "workspace_id", "type", "run_id", "decision_id", "body", "status", "status_reason", "by", "created_at", "delivered_at", "expires_at"],
       "properties": {
         "id": {"type": "string"},
         "workspace_id": {"$ref": "#/$defs/WorkspaceId"},
@@ -371,7 +394,7 @@
         "body": {"$ref": "#/$defs/CommandBody"},
         "status": {"$ref": "#/$defs/CommandStatus"},
         "status_reason": {"type": ["string", "null"]},
-        "device": {"type": ["string", "null"]},
+        "by": {"type": ["string", "null"]},
         "created_at": {"$ref": "#/$defs/Timestamp"},
         "delivered_at": {"$ref": "#/$defs/NullableTimestamp"},
         "expires_at": {"$ref": "#/$defs/NullableTimestamp"}
@@ -421,7 +444,7 @@
     "HistoryItem": {
       "description": "type=answer: my answer (hub or chat). reply/prompt: text I sent from the hub. routine: Opus's own call (DECIDED_BY_OPUS).",
       "type": "object", "additionalProperties": false,
-      "required": ["id", "at", "type", "run_id", "decision_id", "title", "choice", "label", "text", "quote", "channel", "device", "status"],
+      "required": ["id", "at", "type", "run_id", "decision_id", "title", "choice", "label", "text", "quote", "channel", "by", "status"],
       "properties": {
         "id": {"type": "string"},
         "at": {"$ref": "#/$defs/Timestamp"},
@@ -434,25 +457,98 @@
         "text": {"type": ["string", "null"]},
         "quote": {"type": ["string", "null"]},
         "channel": {"type": ["string", "null"], "enum": ["chat", "hub", "opus", null]},
-        "device": {"type": ["string", "null"]},
+        "by": {"type": ["string", "null"]},
         "status": {"type": ["string", "null"]}
       }
     },
-    "Device": {
-      "type": "object", "additionalProperties": false, "required": ["id", "name", "created_at", "last_used_at", "current"],
+    "LoginRequest": {
+      "type": "object", "additionalProperties": false, "required": ["username", "password", "remember"],
+      "properties": {"username": {"$ref": "#/$defs/Username"}, "password": {"type": "string", "minLength": 1, "maxLength": 256}, "remember": {"type": "boolean"}}
+    },
+    "LoginResponse": {
+      "type": "object", "additionalProperties": false, "required": ["token", "expires_at", "username"],
+      "properties": {"token": {"type": "string", "minLength": 32}, "expires_at": {"$ref": "#/$defs/Timestamp"}, "username": {"$ref": "#/$defs/Username"}}
+    },
+    "PasswordChangeRequest": {
+      "type": "object", "additionalProperties": false, "required": ["current", "new"],
+      "properties": {"current": {"type": "string", "minLength": 1, "maxLength": 256}, "new": {"type": "string", "minLength": 12, "maxLength": 256}}
+    },
+    "Me": {
+      "type": "object", "additionalProperties": false, "required": ["username", "computers"],
+      "properties": {"username": {"$ref": "#/$defs/Username"}, "computers": {"type": "array", "items": {"$ref": "#/$defs/ComputerSummary"}}}
+    },
+    "ComputerSummary": {
+      "type": "object", "additionalProperties": false, "required": ["id", "name", "online", "last_seen_at"],
+      "properties": {"id": {"$ref": "#/$defs/ComputerId"}, "name": {"type": "string", "maxLength": 64}, "online": {"type": "boolean"}, "last_seen_at": {"$ref": "#/$defs/NullableTimestamp"}}
+    },
+    "AdminUserRequest": {
+      "type": "object", "additionalProperties": false, "required": ["username"],
+      "properties": {"username": {"$ref": "#/$defs/Username"}}
+    },
+    "AdminUserResponse": {
+      "type": "object", "additionalProperties": false, "required": ["username", "password"],
+      "properties": {"username": {"$ref": "#/$defs/Username"}, "password": {"type": "string", "minLength": 20, "maxLength": 64}}
+    },
+    "ComputerRegisterRequest": {
+      "type": "object", "additionalProperties": false, "required": ["username", "password", "name"],
+      "properties": {"username": {"$ref": "#/$defs/Username"}, "password": {"type": "string"}, "name": {"type": "string", "minLength": 1, "maxLength": 64}}
+    },
+    "ComputerRegisterResponse": {
+      "type": "object", "additionalProperties": false, "required": ["computer_id", "computer_key", "proxy_public_key", "username"],
+      "properties": {"computer_id": {"$ref": "#/$defs/ComputerId"}, "computer_key": {"type": "string", "minLength": 32}, "proxy_public_key": {"type": "string", "minLength": 43, "maxLength": 43, "pattern": "^[A-Za-z0-9_-]{43}$"}, "username": {"$ref": "#/$defs/Username"}}
+    },
+    "WorkspaceIndexEntry": {
+      "type": "object", "additionalProperties": false, "required": ["workspace_id", "name", "status", "last_seen_at"],
+      "properties": {"workspace_id": {"$ref": "#/$defs/WorkspaceId"}, "name": {"type": "string", "maxLength": 128}, "status": {"$ref": "#/$defs/WorkspaceStatus"}, "last_seen_at": {"$ref": "#/$defs/NullableTimestamp"}}
+    },
+    "RelayRequest": {
+      "type": "object", "additionalProperties": false, "required": ["type", "id", "method", "path", "query", "body", "assertion", "stream"],
       "properties": {
-        "id": {"type": "string"}, "name": {"type": "string", "maxLength": 64},
-        "created_at": {"$ref": "#/$defs/Timestamp"}, "last_used_at": {"$ref": "#/$defs/NullableTimestamp"},
-        "current": {"type": "boolean"}
+        "type": {"const": "req"}, "id": {"type": "string", "maxLength": 64},
+        "method": {"enum": ["GET", "POST", "PUT", "PATCH", "DELETE"]},
+        "path": {"type": "string", "maxLength": 1024, "pattern": "^/api/v1/"},
+        "query": {"type": "string", "maxLength": 2048, "pattern": "^[^?]*$"},
+        "body": {"type": ["object", "array", "string", "number", "integer", "boolean", "null"]},
+        "assertion": {"type": "string", "maxLength": 2048}, "stream": {"type": "boolean"}
       }
     },
-    "PairRequest": {
-      "type": "object", "additionalProperties": false, "required": ["code", "name"],
-      "properties": {"code": {"type": "string", "pattern": "^[A-Z2-9]{8}$"}, "name": {"type": "string", "minLength": 1, "maxLength": 64}}
+    "RelayResponse": {
+      "type": "object", "additionalProperties": false, "required": ["type", "id", "status", "body"],
+      "properties": {"type": {"const": "res"}, "id": {"type": "string", "maxLength": 64}, "status": {"type": "integer", "minimum": 100, "maximum": 599}, "body": {"type": ["object", "array", "string", "number", "integer", "boolean", "null"]}}
     },
-    "PairResponse": {
-      "type": "object", "additionalProperties": false, "required": ["token", "device"],
-      "properties": {"token": {"type": "string", "minLength": 32}, "device": {"$ref": "#/$defs/Device"}}
+    "RelayStreamChunk": {
+      "type": "object", "additionalProperties": false, "required": ["type", "id", "data"],
+      "properties": {"type": {"const": "chunk"}, "id": {"type": "string", "maxLength": 64}, "data": {"type": "string", "maxLength": 900000}}
+    },
+    "RelayStreamEnd": {
+      "type": "object", "additionalProperties": false, "required": ["type", "id", "status"],
+      "properties": {"type": {"const": "end"}, "id": {"type": "string", "maxLength": 64}, "status": {"type": "integer"}}
+    },
+    "RelayCancel": {
+      "type": "object", "additionalProperties": false, "required": ["type", "id"],
+      "properties": {"type": {"const": "cancel"}, "id": {"type": "string", "maxLength": 64}}
+    },
+    "RelayHello": {
+      "type": "object", "additionalProperties": false, "required": ["type", "protocol", "computer_id", "backend_version", "workspaces"],
+      "properties": {"type": {"const": "hello"}, "protocol": {"const": 2}, "computer_id": {"$ref": "#/$defs/ComputerId"}, "backend_version": {"type": "string", "maxLength": 64}, "workspaces": {"type": "array", "items": {"$ref": "#/$defs/WorkspaceIndexEntry"}, "maxItems": 200}}
+    },
+    "RelayWorkspaces": {
+      "type": "object", "additionalProperties": false, "required": ["type", "workspaces"],
+      "properties": {"type": {"const": "workspaces"}, "workspaces": {"type": "array", "items": {"$ref": "#/$defs/WorkspaceIndexEntry"}, "maxItems": 200}}
+    },
+    "RelayPing": {"type": "object", "additionalProperties": false, "required": ["type"], "properties": {"type": {"const": "ping"}}},
+    "RelayPong": {"type": "object", "additionalProperties": false, "required": ["type"], "properties": {"type": {"const": "pong"}}},
+    "RelayPollResponse": {
+      "type": "object", "additionalProperties": false, "required": ["frames"],
+      "properties": {"frames": {"type": "array", "items": {"type": "object"}, "maxItems": 50}}
+    },
+    "RelayFramesRequest": {
+      "type": "object", "additionalProperties": false, "required": ["frames"],
+      "properties": {"frames": {"type": "array", "items": {"type": "object"}, "maxItems": 50}}
+    },
+    "Assertion": {
+      "type": "object", "additionalProperties": false, "required": ["v", "sub", "cid", "rid", "exp"],
+      "properties": {"v": {"const": 1}, "sub": {"$ref": "#/$defs/Username"}, "cid": {"$ref": "#/$defs/ComputerId"}, "rid": {"type": "string", "maxLength": 64}, "exp": {"type": "integer"}}
     },
     "List": {
       "description": "Generic list envelope: items + next cursor (null = no more). Item type is per route.",

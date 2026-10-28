@@ -1,0 +1,1 @@
+{"id": "task1", "title": "Limit name length", "summary": "Keep user names within the documented character limit.", "status": "RUNNING", "worker": "worker-1", "depends_on": [], "major_repairs": 0, "max_repairs": 2, "known_issues": null}

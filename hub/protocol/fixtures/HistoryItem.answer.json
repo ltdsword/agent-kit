@@ -10,6 +10,6 @@
   "text": null,
   "quote": "A: Merge and push / main",
   "channel": "hub",
-  "device": "phone",
+  "by": "alice",
   "status": "APPLIED"
 }

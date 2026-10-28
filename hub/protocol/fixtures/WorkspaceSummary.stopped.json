@@ -10,5 +10,9 @@
   "problems": 0,
   "orchestrator_state": null,
   "active_run": null,
-  "archived": false
+  "archived": false,
+  "upload": null,
+  "orchestrator_last_activity_at": null,
+  "computer_id": null,
+  "computer_online": false
 }

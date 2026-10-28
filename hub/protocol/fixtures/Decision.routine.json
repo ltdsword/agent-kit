@@ -22,5 +22,8 @@
   },
   "consumed_by": "approved ./gradlew test at 2026-10-28T07:55:00Z",
   "opened_at": "2026-10-28T07:55:00Z",
-  "cancel_reason": null
+  "cancel_reason": null,
+  "evidence": [],
+  "note": "The approval is safe within the worker's assigned workspace.",
+  "approval": {"command": "./gradlew test", "cwd": "/repo", "why": ["Run the requested test suite."]}
 }

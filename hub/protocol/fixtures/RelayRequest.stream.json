@@ -1,0 +1,1 @@
+{"type": "req", "id": "req-002", "method": "GET", "path": "/api/v1/workspaces/ws_k3m7q2abcdefghij/documents/content", "query": "path=report.md", "body": null, "assertion": "eyJ2IjoxLCJzdWIiOiJhbGljZSJ9.signature", "stream": true}

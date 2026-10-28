@@ -1,6 +1,6 @@
 {
-  "protocol": 1,
-  "min_protocol": 1,
+  "protocol": 2,
+  "min_protocol": 2,
   "server_time": "2026-10-28T08:00:00Z",
   "version": "0.1.0"
 }

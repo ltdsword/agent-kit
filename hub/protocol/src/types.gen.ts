@@ -5,6 +5,8 @@ export type NullableTimestamp = string | null;
 export type WorkspaceId = string;
 export type RunId = string;
 export type TaskId = string;
+export type Username = string;
+export type ComputerId = string;
 export type DecisionId = string;
 export type Sha256 = string;
 export type OptionKey = string;
@@ -18,16 +20,24 @@ export type DecisionKind =
   "blocker" | "repair" | "scope_exception" | "abandon" | "worker_approval" | "question" | "finish";
 export type LocalDecisionStatus = "PENDING" | "ANSWERED" | "CANCELLED" | "DECIDED_BY_OPUS";
 export type HubDecisionStatus =
-  "OPEN" | "SENT" | "DELIVERED" | "APPLIED" | "ANSWERED_ELSEWHERE" | "REJECTED" | "CANCELLED" | "ROUTINE";
+  | "OPEN"
+  | "SENT"
+  | "REPLY_SENT"
+  | "DELIVERED"
+  | "APPLIED"
+  | "ANSWERED_ELSEWHERE"
+  | "REJECTED"
+  | "CANCELLED"
+  | "ROUTINE";
 export type AnswerChannel = "chat" | "hub" | "opus";
 export type CommandType = "answer" | "reply" | "prompt";
 export type CommandStatus = "QUEUED" | "HELD" | "DELIVERED" | "REJECTED" | "FAILED" | "EXPIRED";
 export type AckStatus = "DELIVERED" | "HELD" | "REJECTED" | "FAILED";
-export type DocumentKind = "final_report" | "final_diff" | "task_file" | "decision" | "research" | "review";
+export type DocumentKind = "final_report" | "final_diff" | "decision" | "research";
 export type DocumentFormat = "markdown" | "diff" | "text";
 
 /**
- * Single source of truth for the connector API (agentctl <-> backend) and the user API (web UI <-> backend). Uses only this JSON Schema subset so the stdlib Python validator can check it: type (string or list), enum, const, required, properties, additionalProperties (boolean or schema), items, minItems, maxItems, minLength, maxLength, pattern, minimum, maximum, $ref to #/$defs/*, anyOf (only for nullable refs). No oneOf/allOf/format.
+ * Single source of truth for the connector API (agentctl <-> backend), the browser API (web UI <-> proxy), and the relay frames (proxy <-> backend). Uses only this JSON Schema subset so the stdlib Python validator can check it: type (string or list), enum, const, required, properties, additionalProperties (boolean or schema), items, minItems, maxItems, minLength, maxLength, pattern, minimum, maximum, $ref to #/$defs/*, anyOf (only for nullable refs). No oneOf/allOf/format.
  */
 export interface ApiError {
   error: {
@@ -36,7 +46,7 @@ export interface ApiError {
   };
 }
 /**
- * The orchestrator. name = kitstart.agent_name(repo). screen = last lines of its pane (null when upload.agent_screens is off).
+ * The orchestrator. name = kitstart.agent_name(repo). screen = last lines of its pane (null when upload.orchestrator_screen is off).
  */
 export interface Agent {
   name: string;
@@ -62,10 +72,6 @@ export interface Worker {
   effort: string | null;
   herdr_state: AgentState;
   since: NullableTimestamp;
-  /**
-   * @maxItems 200
-   */
-  screen: string[] | null;
 }
 export interface ScoutRound {
   n: number;
@@ -92,6 +98,7 @@ export interface Scout {
 export interface Task {
   id: TaskId;
   title: string;
+  summary: string | null;
   status: TaskStatus;
   worker: string | null;
   /**
@@ -100,11 +107,6 @@ export interface Task {
   depends_on: TaskId[];
   major_repairs: number;
   max_repairs: number;
-  /**
-   * @maxItems 100
-   */
-  owned_paths: string[];
-  packet: string | null;
   known_issues: string | null;
 }
 export interface Problem {
@@ -124,6 +126,8 @@ export interface Finish {
 }
 export interface Run {
   run_id: RunId;
+  title: string | null;
+  goal: string | null;
   status: RunStatus;
   created_at: NullableTimestamp;
   base_branch: string | null;
@@ -147,7 +151,7 @@ export interface Run {
  * The whole live status of one workspace. Overwrites the previous one. Max 256 KB serialized.
  */
 export interface Snapshot {
-  protocol: 1;
+  protocol: 2;
   workspace_id: WorkspaceId;
   session_id: string;
   taken_at: Timestamp;
@@ -162,10 +166,25 @@ export interface Snapshot {
    * @maxItems 200
    */
   runs: Run[];
+  orchestrator_last_activity_at: NullableTimestamp;
 }
 export interface Option {
   key: OptionKey;
   label: string;
+  consequence: string | null;
+}
+export interface Evidence {
+  code: string;
+  note: string;
+  bad: boolean;
+}
+export interface Approval {
+  command: string;
+  cwd: string | null;
+  /**
+   * @maxItems 10
+   */
+  why: string[];
 }
 export interface FollowupOption {
   key: OptionKey;
@@ -229,6 +248,12 @@ export interface Decision {
   consumed_by: string | null;
   opened_at: Timestamp;
   cancel_reason: string | null;
+  /**
+   * @maxItems 20
+   */
+  evidence: Evidence[];
+  note: string | null;
+  approval: Approval | null;
 }
 /**
  * One state.json event. n = per-run increasing number (log_event).
@@ -269,7 +294,7 @@ export interface Command {
   run_id: string | null;
   decision_id: string | null;
   body: CommandBody;
-  device: string;
+  by: Username;
   created_at: Timestamp;
   expires_at: NullableTimestamp;
 }
@@ -280,13 +305,19 @@ export interface PingResponse {
   version: string;
 }
 export interface HelloRequest {
-  protocol: 1;
+  protocol: 2;
   workspace_id: WorkspaceId;
   session_id: string;
   name: string;
   path: string;
   kit_version: string | null;
   connector_version: string;
+  upload: UploadSettings;
+}
+export interface UploadSettings {
+  documents: boolean;
+  diffs: boolean;
+  orchestrator_screen: boolean;
 }
 /**
  * What the backend already has, so the connector sends only differences. All empty when known=false (new or wiped DB).
@@ -368,8 +399,13 @@ export interface WorkspaceSummary {
   active_run: {
     run_id: RunId;
     status: RunStatus;
+    title: string | null;
   } | null;
   archived: boolean;
+  upload: UploadSettings | null;
+  orchestrator_last_activity_at: NullableTimestamp;
+  computer_id: string | null;
+  computer_online: boolean;
 }
 /**
  * A decision as the UI sees it: the scheduler's view plus the hub's delivery state. pending_command = the latest answer/reply command for it, if any.
@@ -391,7 +427,7 @@ export interface UserCommand {
   body: CommandBody;
   status: CommandStatus;
   status_reason: string | null;
-  device: string | null;
+  by: string | null;
   created_at: Timestamp;
   delivered_at: NullableTimestamp;
   expires_at: NullableTimestamp;
@@ -447,23 +483,128 @@ export interface HistoryItem {
   text: string | null;
   quote: string | null;
   channel: "chat" | "hub" | "opus" | null;
-  device: string | null;
+  by: string | null;
   status: string | null;
 }
-export interface Device {
-  id: string;
-  name: string;
-  created_at: Timestamp;
-  last_used_at: NullableTimestamp;
-  current: boolean;
+export interface LoginRequest {
+  username: Username;
+  password: string;
+  remember: boolean;
 }
-export interface PairRequest {
-  code: string;
-  name: string;
-}
-export interface PairResponse {
+export interface LoginResponse {
   token: string;
-  device: Device;
+  expires_at: Timestamp;
+  username: Username;
+}
+export interface PasswordChangeRequest {
+  current: string;
+  new: string;
+}
+export interface Me {
+  username: Username;
+  computers: ComputerSummary[];
+}
+export interface ComputerSummary {
+  id: ComputerId;
+  name: string;
+  online: boolean;
+  last_seen_at: NullableTimestamp;
+}
+export interface AdminUserRequest {
+  username: Username;
+}
+export interface AdminUserResponse {
+  username: Username;
+  password: string;
+}
+export interface ComputerRegisterRequest {
+  username: Username;
+  password: string;
+  name: string;
+}
+export interface ComputerRegisterResponse {
+  computer_id: ComputerId;
+  computer_key: string;
+  proxy_public_key: string;
+  username: Username;
+}
+export interface WorkspaceIndexEntry {
+  workspace_id: WorkspaceId;
+  name: string;
+  status: WorkspaceStatus;
+  last_seen_at: NullableTimestamp;
+}
+export interface RelayRequest {
+  type: "req";
+  id: string;
+  method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
+  path: string;
+  query: string;
+  body: {} | unknown[] | string | number | boolean | null;
+  assertion: string;
+  stream: boolean;
+}
+export interface RelayResponse {
+  type: "res";
+  id: string;
+  status: number;
+  body: {} | unknown[] | string | number | boolean | null;
+}
+export interface RelayStreamChunk {
+  type: "chunk";
+  id: string;
+  data: string;
+}
+export interface RelayStreamEnd {
+  type: "end";
+  id: string;
+  status: number;
+}
+export interface RelayCancel {
+  type: "cancel";
+  id: string;
+}
+export interface RelayHello {
+  type: "hello";
+  protocol: 2;
+  computer_id: ComputerId;
+  backend_version: string;
+  /**
+   * @maxItems 200
+   */
+  workspaces: WorkspaceIndexEntry[];
+}
+export interface RelayWorkspaces {
+  type: "workspaces";
+  /**
+   * @maxItems 200
+   */
+  workspaces: WorkspaceIndexEntry[];
+}
+export interface RelayPing {
+  type: "ping";
+}
+export interface RelayPong {
+  type: "pong";
+}
+export interface RelayPollResponse {
+  /**
+   * @maxItems 50
+   */
+  frames: {}[];
+}
+export interface RelayFramesRequest {
+  /**
+   * @maxItems 50
+   */
+  frames: {}[];
+}
+export interface Assertion {
+  v: 1;
+  sub: Username;
+  cid: ComputerId;
+  rid: string;
+  exp: number;
 }
 /**
  * Generic list envelope: items + next cursor (null = no more). Item type is per route.

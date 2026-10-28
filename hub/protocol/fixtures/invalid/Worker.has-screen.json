@@ -1,0 +1,1 @@
+{"slot": "worker-1", "status": "IDLE", "status_reason": null, "run_id": null, "task_id": null, "agent_name": null, "kind": "codex", "model": "gpt-6-luna", "effort": "xhigh", "herdr_state": "absent", "since": null, "screen": null}

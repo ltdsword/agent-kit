@@ -1,0 +1,20 @@
+{
+  "run_id": "r4",
+  "decision_id": "D4",
+  "kind": "worker_approval",
+  "task_id": "T2",
+  "agent": "worker-2",
+  "title": "Run protocol tests",
+  "question": "",
+  "options": [],
+  "recommend": null,
+  "followup": null,
+  "local_status": "DECIDED_BY_OPUS",
+  "answer": null,
+  "consumed_by": null,
+  "opened_at": "2026-10-28T08:10:00Z",
+  "cancel_reason": null,
+  "evidence": [{"code": "task-scope", "note": "The command is within the assigned test scope.", "bad": false}],
+  "note": "The protocol suite is required for this change.",
+  "approval": {"command": "npm test -w @agent-hub/protocol", "cwd": "/repo/hub", "why": ["Verify the protocol contract."]}
+}
