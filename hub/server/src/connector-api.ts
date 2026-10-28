@@ -1,7 +1,6 @@
 import { createHash } from "node:crypto";
-import { API_PREFIX, CONNECTOR_ROUTES, LIMITS, MIN_PROTOCOL, PROTOCOL, USER_ROUTES, type AckRequest, type DecisionsBatch, type DocumentsBatch, type EventsBatch, type GoodbyeRequest, type HelloRequest, type Snapshot } from "@agent-hub/protocol";
+import { API_PREFIX, CONNECTOR_ROUTES, LIMITS, MIN_PROTOCOL, PROTOCOL, type AckRequest, type DecisionsBatch, type DocumentsBatch, type EventsBatch, type GoodbyeRequest, type HelloRequest, type Snapshot } from "@agent-hub/protocol";
 import type { Context, Hono } from "hono";
-import { streamSSE } from "hono/streaming";
 import type { HubDatabase } from "./db.ts";
 import type { ServerConfig } from "./config.ts";
 import { EventHub } from "./stream.ts";
@@ -168,42 +167,5 @@ export function mountConnectorApi(app: Hono, deps: ApiDependencies): void {
     publish("history", ws, id);
     if (command.type === "answer" && command.run_id && command.decision_id) publish("decision", ws, `${command.run_id}/${command.decision_id}`);
     return c.body(null, 204);
-  });
-
-  app.get(route(USER_ROUTES.stream.path), async (c) => {
-    const token = c.req.query("token");
-    if (!token) return apiError(c, "unauthorized", "a device token is required");
-    const device = db.findDeviceByToken(token, clock());
-    if (!device) {
-      if (db.isConnectorToken(token)) return apiError(c, "forbidden", "connector key cannot use user routes");
-      return apiError(c, "unauthorized", "invalid or revoked token");
-    }
-    return streamSSE(c, async (stream) => {
-      let closed = false;
-      const queue: import("@agent-hub/protocol").StreamEvent[] = [];
-      let wake: (() => void) | undefined;
-      const unsubscribe = events.subscribe((event) => { queue.push(event); wake?.(); });
-      stream.onAbort(() => { closed = true; wake?.(); });
-      let lastPing = clock();
-      try {
-        while (!closed) {
-          while (queue.length) {
-            const event = queue.shift()!;
-            await stream.writeSSE({ event: event.type, data: JSON.stringify(event) });
-          }
-          if (clock() - lastPing >= 15_000) {
-            await stream.write(": ping\n\n");
-            lastPing = clock();
-          }
-          await new Promise<void>((resolve) => {
-            const timeout = setTimeout(resolve, 500);
-            wake = () => { clearTimeout(timeout); resolve(); };
-          });
-          wake = undefined;
-        }
-      } finally {
-        unsubscribe();
-      }
-    });
   });
 }

@@ -1,10 +1,8 @@
-import { randomBytes } from "node:crypto";
-import { getConnInfo } from "@hono/node-server/conninfo";
-import { API_PREFIX, ERRORS, LIMITS, USER_ROUTES, type AnswerRequest, type PairRequest, type TextRequest } from "@agent-hub/protocol";
+import { API_PREFIX, ERRORS, LIMITS, USER_ROUTES, type AnswerRequest, type TextRequest } from "@agent-hub/protocol";
 import type { Context, Hono } from "hono";
 import type { HubDatabase, Row } from "./db.ts";
 import type { ServerConfig } from "./config.ts";
-import { deviceFrom, requireDevice } from "./auth.ts";
+import { assertionFrom, requireAssertion, verifyAssertion, type AssertionVerifier } from "./auth.ts";
 import { apiError, readBody, routePath } from "./http.ts";
 import { EventHub } from "./stream.ts";
 import { historyItems, hubDecision, workspaceDetail, workspaceSummary } from "./status.ts";
@@ -14,6 +12,7 @@ export interface UserApiDependencies {
   clock: () => number;
   config: ServerConfig;
   events: EventHub;
+  assertionVerifier?: AssertionVerifier;
 }
 
 type Sortable = { _sort: Array<string | number>; [key: string]: unknown };
@@ -46,60 +45,20 @@ function requireWorkspace(db: HubDatabase, c: Context, ws: string): Row | Respon
   const row = db.getWorkspace(ws);
   return row ?? apiError(c, "not_found", "workspace not found");
 }
-function deviceIp(c: Context): string {
-  try {
-    return getConnInfo(c).remote.address ?? "unknown";
-  } catch {
-    return (c.req.header("x-forwarded-for") || c.req.header("x-real-ip") || "unknown").split(",")[0].trim();
-  }
-}
-function newPairCode(): string {
-  const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
-  const bytes = randomBytes(8);
-  return [...bytes].map((byte) => alphabet[byte % alphabet.length]).join("");
-}
-
 export function mountUserApi(app: Hono, deps: UserApiDependencies): void {
   const { db, clock, config, events } = deps;
   const route = (path: string) => `${API_PREFIX}${routePath(path)}`;
-  const requireAuth = requireDevice(db, clock);
+  const verifier = deps.assertionVerifier ?? ((token, relayFrameId, now) => config.computer
+    ? verifyAssertion(token, config.computer, now, relayFrameId)
+    : null);
+  const requireAuth = requireAssertion(verifier, clock);
   const publish = (type: "workspace" | "command" | "decision" | "history", ws: string, ref: string | null) => events.publish({ type, workspace_id: ws, at: new Date(clock()).toISOString(), ref });
-  const failures = new Map<string, number[]>();
-
-  app.post(route(USER_ROUTES.pair.path), async (c) => {
-    const body = await readBody<PairRequest>(c, "PairRequest", 16 * 1024);
-    if ("response" in body) return body.response;
-    const ip = deviceIp(c);
-    const attempts = (failures.get(ip) ?? []).filter((time) => time > clock() - 60_000);
-    if (attempts.length >= 5) {
-      failures.set(ip, attempts);
-      return apiError(c, "rate_limited", "too many failed pairing attempts; try again in a minute");
-    }
-    const paired = db.consumePairCode(body.value.code, clock());
-    if (!paired) {
-      attempts.push(clock());
-      failures.set(ip, attempts);
-      return apiError(c, "unauthorized", "pairing code is invalid or expired");
-    }
-    failures.delete(ip);
-    return c.json({ token: paired.token, device: paired.device });
-  });
-
-  app.get(route(USER_ROUTES.devices.path), requireAuth, (c) => {
-    const items = db.listDevices(deviceFrom(c).id).map((device) => ({ ...device, _sort: [-Date.parse(device.created_at), device.id] }));
-    return c.json(page(items, c.req.query("cursor")));
-  });
-
-  app.delete(route(USER_ROUTES.revoke.path), requireAuth, (c) => {
-    const id = c.req.param("id") ?? "";
-    if (!db.revokeDevice(id, clock(), `device:${deviceFrom(c).id}`)) return apiError(c, "not_found", "device not found");
-    return c.body(null, 204);
-  });
 
   app.get(route(USER_ROUTES.workspaces.path), requireAuth, (c) => {
     const archived = c.req.query("archived") === "true";
     const cursor = c.req.query("cursor");
-    const items = db.listWorkspaces(archived).map((row) => {
+    const all = c.req.query("all") === "true";
+    const items = db.listWorkspaces(archived, clock(), config.recentDays ?? 15, all).map((row) => {
       const summary = workspaceSummary(db, row, config.kitVersion);
       return { ...summary, _sort: [summary.status === "ONLINE" ? 0 : 1, -(Date.parse(summary.last_seen_at ?? "1970-01-01T00:00:00Z")), summary.id] };
     });
@@ -127,7 +86,8 @@ export function mountUserApi(app: Hono, deps: UserApiDependencies): void {
       return apiError(c, "bad_request", "body must contain only an archived boolean");
     }
     const archived = (body as { archived: boolean }).archived;
-    if (db.updateArchived(ws, archived, clock())) db.audit(ws, `device:${deviceFrom(c).id}`, "workspace.archived", ws, { archived }, clock());
+    const assertion = assertionFrom(c);
+    if (db.updateArchived(ws, archived, clock())) db.audit(ws, assertion.sub, "workspace.archived", ws, { archived }, clock());
     publish("workspace", ws, ws);
     return c.json(workspaceSummary(db, db.getWorkspace(ws)!, config.kitVersion));
   });
@@ -185,13 +145,13 @@ export function mountUserApi(app: Hono, deps: UserApiDependencies): void {
     } else if (body.value.followup !== undefined || body.value.value !== undefined) {
       return apiError(c, "invalid_option", "followup is not available for this choice");
     }
-    const device = deviceFrom(c);
+    const assertion = assertionFrom(c);
     const commandBody: Record<string, string> = { choice: body.value.choice };
     if (body.value.note !== undefined) commandBody.note = body.value.note;
     if (body.value.followup !== undefined) commandBody.followup = body.value.followup;
     if (selectedFollowupValue !== undefined) commandBody.value = selectedFollowupValue;
-    const command = db.createCommand({ workspaceId: ws, type: "answer", runId, decisionId, body: commandBody, deviceId: device.id,
-      deviceName: device.name, now: clock(), expiresAt: null });
+    const command = db.createCommand({ workspaceId: ws, type: "answer", runId, decisionId, body: commandBody, by: assertion.sub,
+      now: clock(), expiresAt: null });
     publish("command", ws, command.id);
     publish("decision", ws, `${runId}/${decisionId}`);
     publish("history", ws, command.id);
@@ -211,9 +171,9 @@ export function mountUserApi(app: Hono, deps: UserApiDependencies): void {
     const state = hubDecision(db, ws, decision);
     if (!["OPEN", "SENT", "REJECTED"].includes(state.hub_status)) return apiError(c, "decision_not_answerable", "decision is not open, sent, or rejected");
     if (row.status !== "ONLINE") return apiError(c, "workspace_not_online", "workspace is not online");
-    const device = deviceFrom(c);
-    const command = db.createCommand({ workspaceId: ws, type: "reply", runId, decisionId, body: body.value, deviceId: device.id,
-      deviceName: device.name, now: clock(), expiresAt: null });
+    const assertion = assertionFrom(c);
+    const command = db.createCommand({ workspaceId: ws, type: "reply", runId, decisionId, body: body.value, by: assertion.sub,
+      now: clock(), expiresAt: null });
     publish("command", ws, command.id);
     publish("decision", ws, `${runId}/${decisionId}`);
     publish("history", ws, command.id);
@@ -227,9 +187,9 @@ export function mountUserApi(app: Hono, deps: UserApiDependencies): void {
     const body = await readBody<TextRequest>(c, "TextRequest", LIMITS.textChars * 4);
     if ("response" in body) return body.response;
     if (row.status !== "ONLINE") return apiError(c, "workspace_not_online", "workspace is not online");
-    const device = deviceFrom(c);
+    const assertion = assertionFrom(c);
     const command = db.createCommand({ workspaceId: ws, type: "prompt", runId: null, decisionId: null, body: body.value,
-      deviceId: device.id, deviceName: device.name, now: clock(), expiresAt: clock() + LIMITS.promptExpirySeconds * 1000 });
+      by: assertion.sub, now: clock(), expiresAt: clock() + LIMITS.promptExpirySeconds * 1000 });
     publish("command", ws, command.id);
     publish("history", ws, command.id);
     return c.json(command, 201);

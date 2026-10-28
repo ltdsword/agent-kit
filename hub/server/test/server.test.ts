@@ -1,23 +1,26 @@
-import { createHash } from "node:crypto";
+import { createHash, generateKeyPairSync, sign } from "node:crypto";
+import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import type { Duplex } from "node:stream";
 import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { serve } from "@hono/node-server";
-import { API_PREFIX, validate, type Decision } from "@agent-hub/protocol";
+import { Hono } from "hono";
+import { API_PREFIX, PROTOCOL_HEADER, validate, type RelayRequest } from "@agent-hub/protocol";
 import { createApp } from "../src/app.ts";
+import { verifyAssertion } from "../src/auth.ts";
 import { HubDatabase } from "../src/db.ts";
+import type { ComputerConfig, ServerConfig } from "../src/config.ts";
+import { RelayClient } from "../src/relay.ts";
 import { EventHub } from "../src/stream.ts";
-import { decisionStatus } from "../src/status.ts";
-import type { ServerConfig } from "../src/config.ts";
 
 const connector = "connector-test-token-with-enough-entropy";
 const ws = "ws_k3m7q2abcdefghij";
 const session = "ses_aaaabbbbccccdddd";
-const prefix = API_PREFIX;
-const protocolHeader = "X-Agent-Hub-Protocol";
 const fixtures = new URL("../../protocol/fixtures/", import.meta.url);
 const sha256 = (value: string) => createHash("sha256").update(value).digest("hex");
+const computerId = "c_abcdefghijklmnop";
+const testAssertion = "test-assertion";
 async function fixture<T>(name: string): Promise<T> { return JSON.parse(await readFile(new URL(name, fixtures), "utf8")) as T; }
 function valid(def: Parameters<typeof validate>[0], value: unknown): void { expect(validate(def, value)).toEqual({ ok: true }); }
 
@@ -27,305 +30,400 @@ let db: HubDatabase;
 let app: ReturnType<typeof createApp>;
 let events: EventHub;
 let config: ServerConfig;
+let relayClients: RelayClient[];
 
 beforeEach(async () => {
   temp = await mkdtemp(join(tmpdir(), "hub-server-test-"));
   now = Date.parse("2026-10-28T08:00:00Z");
   await mkdir(join(temp, "data"), { recursive: true });
-  config = { port: 7420, host: "127.0.0.1", dataDir: join(temp, "data"), configDir: join(temp, "config"), dbPath: join(temp, "data/hub.db"), connectorKeyPath: join(temp, "config/connector.key"), connectorKeyHash: sha256(connector), origins: ["https://hub.example.test"], kitVersion: "b1741ff" };
+  const computer: ComputerConfig = { proxy_url: "http://127.0.0.1:9999", computer_id: computerId, computer_key: "computer-key-with-enough-entropy-123456", proxy_public_key: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", username: "alice" };
+  config = { port: 7420, host: "127.0.0.1", dataDir: join(temp, "data"), configDir: join(temp, "config"), dbPath: join(temp, "data/hub.db"), connectorKeyPath: join(temp, "config/connector.key"), connectorKeyHash: sha256(connector), origins: ["https://hub.example.test"], kitVersion: "b1741ff", computer, recentDays: 15, runRetentionDays: 60 };
   db = new HubDatabase(config.dbPath, config.connectorKeyHash);
   events = new EventHub();
-  app = createApp({ db, config, clock: () => now, events });
+  app = createApp({ db, config, clock: () => now, events, assertionVerifier: (token, relayFrameId, at) => token === testAssertion
+    ? { v: 1, sub: "alice", cid: computerId, rid: relayFrameId ?? "direct-test", exp: Math.floor(at / 1000) + 60 }
+    : null });
+  relayClients = [];
 });
-afterEach(async () => { db?.close(); await rm(temp, { recursive: true, force: true }); });
+afterEach(async () => {
+  for (const relay of relayClients) await relay.stop();
+  db?.close();
+  await rm(temp, { recursive: true, force: true });
+});
 
-async function req(path: string, options: { method?: string; token?: string; body?: unknown; protocol?: string | null; origin?: string } = {}): Promise<Response> {
+async function req(path: string, options: { method?: string; token?: string; assertion?: string | null; body?: unknown; protocol?: string | null; origin?: string } = {}): Promise<Response> {
   const headers: Record<string, string> = {};
   if (options.token) headers.Authorization = `Bearer ${options.token}`;
+  if (options.assertion !== null) headers["X-Hub-Assertion"] = options.assertion ?? testAssertion;
   if (options.body !== undefined) headers["Content-Type"] = "application/json";
-  if (options.protocol !== null) headers[protocolHeader] = options.protocol ?? "1";
+  if (options.protocol !== null) headers[PROTOCOL_HEADER] = options.protocol ?? "2";
   if (options.origin) headers.Origin = options.origin;
-  return app.request(`http://127.0.0.1${prefix}${path}`, { method: options.method ?? "GET", headers, body: options.body === undefined ? undefined : JSON.stringify(options.body) });
+  return app.request(`http://127.0.0.1${API_PREFIX}${path}`, { method: options.method ?? "GET", headers, body: options.body === undefined ? undefined : JSON.stringify(options.body) });
 }
-async function pair(code = "A2BC3D4E"): Promise<string> {
-  db.createPairCode(code, "phone", now, now + 600_000);
-  const response = await req("/pair", { method: "POST", body: { code, name: "phone" } });
-  expect(response.status).toBe(200);
-  const value = await response.json();
-  valid("PairResponse", value);
-  return value.token;
-}
+
 async function doHello(body?: unknown): Promise<{ response: Response; value?: any }> {
   const response = await req("/agent/hello", { method: "POST", token: connector, body: body ?? await fixture("HelloRequest.json") });
   return { response, value: response.status === 200 ? await response.json() : undefined };
 }
+
 async function seed(): Promise<void> {
   const hello = await doHello();
   expect(hello.response.status).toBe(200);
   valid("HelloResponse", hello.value);
-  for (const file of ["Snapshot.idle-new-workspace.json", "Snapshot.running.json"]) {
-    const response = await req(`/agent/workspaces/${ws}/snapshot`, { method: "PUT", token: connector, body: await fixture(file) });
-    expect(response.status).toBe(204);
-  }
+  const snapshot = await fixture("Snapshot.running.json");
+  expect((await req(`/agent/workspaces/${ws}/snapshot`, { method: "PUT", token: connector, body: snapshot })).status).toBe(204);
   expect((await req(`/agent/workspaces/${ws}/decisions`, { method: "PUT", token: connector, body: await fixture("DecisionsBatch.json") })).status).toBe(204);
 }
 
-it("handles protocol version, auth kinds, revocation, bad bodies, and pair rate limiting", async () => {
-  let response = await req("/agent/ping", { token: connector, protocol: null });
-  expect(response.status).toBe(200); valid("PingResponse", await response.json());
-  response = await req("/agent/ping", { token: connector, origin: "http://127.0.0.1:7420" });
-  expect(response.headers.get("Access-Control-Allow-Origin")).toBe("http://127.0.0.1:7420");
-  response = await req("/agent/ping", { token: connector, protocol: "0" });
-  expect(response.status).toBe(426);
-  response = await req("/agent/ping"); expect(response.status).toBe(401);
-  const token = await pair();
-  expect((await req("/agent/ping", { token })).status).toBe(403);
-  expect((await req("/devices", { token: connector })).status).toBe(403);
-  response = await req("/agent/hello", { method: "POST", token: connector, body: {} });
-  expect(response.status).toBe(400);
-
-  response = await req("/devices", { token });
-  const listed = await response.json();
-  valid("List", listed); valid("Device", listed.items[0]);
-  expect(listed.items[0].current).toBe(true);
-  expect((await req(`/devices/${listed.items[0].id}`, { method: "DELETE", token })).status).toBe(204);
-  expect((await req("/devices", { token })).status).toBe(401);
-
-  db.createPairCode("EXPIRED9", "phone", now - 700_000, now - 1);
-  response = await req("/pair", { method: "POST", body: { code: "EXPIRED9", name: "phone" }, origin: "https://hub.example.test" });
-  expect(response.status).toBe(401);
-  expect(response.headers.get("Access-Control-Allow-Origin")).toBe("https://hub.example.test");
-  for (let i = 2; i < 6; i++) expect((await req("/pair", { method: "POST", body: { code: `BADCODE${i}`, name: "phone" } })).status).toBe(401);
-  expect((await req("/pair", { method: "POST", body: { code: "BADCODE7", name: "phone" } })).status).toBe(429);
+it("requires protocol 2 and assertion auth, and has no pairing, device, or URL-token routes", async () => {
+  expect((await req("/agent/ping", { token: connector, protocol: null })).status).toBe(426);
+  const ping = await req("/agent/ping", { token: connector });
+  expect(ping.status).toBe(200); valid("PingResponse", await ping.json());
+  expect((await req("/agent/ping", { token: connector, protocol: "1" })).status).toBe(426);
+  expect((await req("/agent/ping")).status).toBe(401);
+  expect((await req("/workspaces", { assertion: null })).status).toBe(401);
+  expect((await req("/workspaces", { token: connector, assertion: null })).status).toBe(401);
+  for (const path of ["/pair", "/devices", `/stream?token=${encodeURIComponent(testAssertion)}`]) {
+    expect((await req(path, { assertion: null })).status).toBe(404);
+  }
+  expect((await req("/agent/ping", { token: connector, origin: "http://127.0.0.1:7420" })).headers.get("Access-Control-Allow-Origin")).toBe("http://127.0.0.1:7420");
 });
 
-it("requires the right credential on every protected route", async () => {
-  const token = await pair("F2GH3J4K");
-  const connectorRoutes: Array<[string, string]> = [
-    ["GET", "/agent/ping"], ["POST", "/agent/hello"], ["POST", `/agent/workspaces/${ws}/goodbye`],
-    ["PUT", `/agent/workspaces/${ws}/snapshot`], ["POST", `/agent/workspaces/${ws}/heartbeat`],
-    ["PUT", `/agent/workspaces/${ws}/decisions`], ["POST", `/agent/workspaces/${ws}/events`],
-    ["PUT", `/agent/workspaces/${ws}/documents`], ["DELETE", `/agent/workspaces/${ws}/documents?path=x`],
-    ["GET", `/agent/workspaces/${ws}/commands`], ["POST", `/agent/workspaces/${ws}/commands/cmd_aaaaaaaaaaaaaaaa/ack`],
-  ];
-  const userRoutes: Array<[string, string]> = [
-    ["GET", "/devices"], ["DELETE", "/devices/dev_aaaaaaaa"], ["GET", "/workspaces"], ["GET", `/workspaces/${ws}`],
-    ["PATCH", `/workspaces/${ws}`], ["GET", `/workspaces/${ws}/decisions`], ["GET", `/workspaces/${ws}/decisions/r4/D3`],
-    ["POST", `/workspaces/${ws}/decisions/r4/D3/answer`], ["POST", `/workspaces/${ws}/decisions/r4/D3/reply`],
-    ["POST", `/workspaces/${ws}/prompts`], ["GET", `/workspaces/${ws}/commands`], ["GET", `/workspaces/${ws}/documents`],
-    ["GET", `/workspaces/${ws}/documents/content?path=x`], ["GET", `/workspaces/${ws}/history`],
-  ];
-  for (const [method, path] of connectorRoutes) {
-    expect((await req(path, { method })).status, `${method} ${path} without auth`).toBe(401);
-    expect((await req(path, { method, token })).status, `${method} ${path} with device token`).toBe(403);
-  }
-  for (const [method, path] of userRoutes) {
-    expect((await req(path, { method })).status, `${method} ${path} without auth`).toBe(401);
-    expect((await req(path, { method, token: connector })).status, `${method} ${path} with connector key`).toBe(403);
-  }
-  expect((await req("/stream")).status).toBe(401);
-  expect((await req("/stream?token=" + encodeURIComponent(connector))).status).toBe(403);
-  // Revoke the paired token's device by resolving its stable test record.
-  const device = db.listDevices().find((entry) => entry.name === "phone");
-  expect(device).toBeTruthy();
-  db.revokeDevice(device!.id, now);
-  for (const [method, path] of userRoutes) expect((await req(path, { method, token })).status, `${method} ${path} revoked`).toBe(401);
-  expect((await req(`/stream?token=${encodeURIComponent(token)}`)).status).toBe(401);
-});
-
-it("replays connector fixtures and exercises each connector and user route with schema checks", async () => {
+it("validates protocol-2 connector and user responses and attributes commands to the assertion owner", async () => {
   const ping = await req("/agent/ping", { token: connector }); valid("PingResponse", await ping.json());
   const hello = await doHello(); expect(hello.response.status).toBe(200); valid("HelloResponse", hello.value);
-  const known = await doHello(); expect(known.response.status).toBe(200); expect(known.value.known).toBe(true); valid("HelloResponse", known.value);
-  for (const file of ["Snapshot.idle-new-workspace.json", "Snapshot.running.json"]) {
-    const body = await fixture(file); valid("Snapshot", body);
+  for (const name of ["Snapshot.idle-new-workspace.json", "Snapshot.running.json"]) {
+    const body = await fixture(name); valid("Snapshot", body);
     expect((await req(`/agent/workspaces/${ws}/snapshot`, { method: "PUT", token: connector, body })).status).toBe(204);
   }
-  const wrongSnapshot = await fixture<any>("Snapshot.running.json"); wrongSnapshot.workspace_id = "ws_p4x2d6abcdefghij";
-  expect((await req(`/agent/workspaces/${ws}/snapshot`, { method: "PUT", token: connector, body: wrongSnapshot })).status).toBe(400);
-  const oversizedSnapshot = await fixture<any>("Snapshot.running.json"); oversizedSnapshot.orchestrator.name = "x".repeat(300_000);
-  expect((await req(`/agent/workspaces/${ws}/snapshot`, { method: "PUT", token: connector, body: oversizedSnapshot })).status).toBe(413);
-  expect((await req(`/agent/workspaces/${ws}/heartbeat`, { method: "POST", token: connector })).status).toBe(204);
   const decisions = await fixture("DecisionsBatch.json"); valid("DecisionsBatch", decisions);
   expect((await req(`/agent/workspaces/${ws}/decisions`, { method: "PUT", token: connector, body: decisions })).status).toBe(204);
   const batch = await fixture("EventsBatch.json"); valid("EventsBatch", batch);
-  let response = await req(`/agent/workspaces/${ws}/events`, { method: "POST", token: connector, body: batch });
-  expect(response.status).toBe(200); const cursor = await response.json(); valid("EventsResponse", cursor); expect(cursor.cursor).toBe(41);
-  response = await req(`/agent/workspaces/${ws}/events`, { method: "POST", token: connector, body: batch });
-  expect((await response.json()).cursor).toBe(41);
-  const docs = await fixture<any>("DocumentsBatch.json"); valid("DocumentsBatch", docs);
-  const badDocuments = JSON.parse(JSON.stringify(docs)); badDocuments.documents[0].sha256 = "0".repeat(64);
-  expect((await req(`/agent/workspaces/${ws}/documents`, { method: "PUT", token: connector, body: badDocuments })).status).toBe(400);
-  expect((await req(`/agent/workspaces/${ws}/documents`, { method: "PUT", token: connector, body: docs })).status).toBe(204);
-  response = await req(`/agent/workspaces/${ws}/commands?wait=0`, { token: connector });
-  expect(response.status).toBe(200); valid("CommandsResponse", await response.json());
+  const eventsResponse = await req(`/agent/workspaces/${ws}/events`, { method: "POST", token: connector, body: batch });
+  valid("EventsResponse", await eventsResponse.json());
+  const documents = await fixture<any>("DocumentsBatch.json"); valid("DocumentsBatch", documents);
+  expect((await req(`/agent/workspaces/${ws}/documents`, { method: "PUT", token: connector, body: documents })).status).toBe(204);
+  const commands = await req(`/agent/workspaces/${ws}/commands?wait=0`, { token: connector }); valid("CommandsResponse", await commands.json());
 
-  const token = await pair("B2CD3E4F");
-  response = await req("/workspaces", { token }); const workspaces = await response.json();
-  valid("List", workspaces); valid("WorkspaceSummary", workspaces.items[0]);
-  response = await req(`/workspaces/${ws}`, { token }); const detail = await response.json();
-  valid("WorkspaceDetail", detail); expect(detail.snapshot.runs.length).toBe(2); valid("HubDecision", detail.decisions_open[0]);
-  response = await req(`/workspaces/${ws}/decisions`, { token }); const decisionList = await response.json();
-  valid("List", decisionList); decisionList.items.forEach((item: unknown) => valid("HubDecision", item));
-  response = await req(`/workspaces/${ws}/decisions/r4/D3`, { token }); valid("HubDecision", await response.json());
-  response = await req(`/workspaces/${ws}/documents`, { token }); const documentList = await response.json();
-  valid("List", documentList); documentList.items.forEach((item: unknown) => valid("DocumentMeta", item));
-  response = await req(`/workspaces/${ws}/documents/content?path=${encodeURIComponent(docs.documents[0].path)}`, { token });
-  valid("DocumentContent", await response.json());
-  response = await req(`/workspaces/${ws}/history`, { token }); const history = await response.json();
-  valid("List", history); history.items.forEach((item: unknown) => valid("HistoryItem", item));
-  expect(history.items.some((item: { type: string }) => item.type === "routine")).toBe(true);
+  const workspaces = await req("/workspaces"); const workspaceList = await workspaces.json();
+  valid("List", workspaceList); valid("WorkspaceSummary", workspaceList.items[0]);
+  expect(workspaceList.items[0]).toMatchObject({ computer_id: null, computer_online: true, upload: { documents: true, diffs: true, orchestrator_screen: true } });
+  const detailResponse = await req(`/workspaces/${ws}`); const detail = await detailResponse.json();
+  valid("WorkspaceDetail", detail); expect(detail.snapshot.runs).toHaveLength(2); valid("Run", detail.snapshot.runs[0]);
+  valid("HubDecision", detail.decisions_open[0]);
+  const decisionResponse = await req(`/workspaces/${ws}/decisions/r4/D3`); valid("HubDecision", await decisionResponse.json());
+  const documentList = await (await req(`/workspaces/${ws}/documents`)).json(); valid("List", documentList); valid("DocumentMeta", documentList.items[0]);
+  const document = await req(`/workspaces/${ws}/documents/content?path=${encodeURIComponent(documents.documents[0].path)}`);
+  valid("DocumentContent", await document.json());
+  const history = await (await req(`/workspaces/${ws}/history`)).json(); valid("List", history);
+  history.items.forEach((item: unknown) => valid("HistoryItem", item));
 
-  response = await req(`/workspaces/${ws}/prompts`, { method: "POST", token, body: { text: "look at this" } });
-  expect(response.status).toBe(201); const prompt = await response.json(); valid("UserCommand", prompt);
-  response = await req(`/workspaces/${ws}/commands`, { token }); const commands = await response.json();
-  valid("List", commands); commands.items.forEach((item: unknown) => valid("UserCommand", item));
-  response = await req(`/workspaces/${ws}/decisions/r4/D3/answer`, { method: "POST", token, body: { choice: "A" } });
-  expect(response.status).toBe(201); valid("UserCommand", await response.json());
-  now += 1;
-  const reply = await req(`/workspaces/${ws}/decisions/r4/D3/reply`, { method: "POST", token, body: { text: "I suggest A" } });
-  expect(reply.status).toBe(201); valid("UserCommand", await reply.json());
-  response = await req(`/workspaces/${ws}/decisions/r4/D3`, { token });
-  const sentWithReply = await response.json();
-  expect(sentWithReply.hub_status).toBe("SENT");
-  expect(sentWithReply.pending_command.type).toBe("reply");
-  expect((await req(`/workspaces/${ws}/decisions/r4/D3/answer`, { method: "POST", token, body: { choice: "A" } })).status).toBe(409);
-
-  response = await req(`/workspaces/${ws}`, { method: "PATCH", token, body: { archived: true } });
-  expect(response.status).toBe(200); valid("WorkspaceSummary", await response.json());
-  response = await req("/workspaces?archived=true", { token }); expect((await response.json()).items).toHaveLength(1);
-  expect((await req(`/workspaces/${ws}`, { method: "PATCH", token, body: { archived: false } })).status).toBe(200);
-  const deleteDoc = await req(`/agent/workspaces/${ws}/documents?path=${encodeURIComponent(docs.documents[0].path)}`, { method: "DELETE", token: connector });
-  expect(deleteDoc.status).toBe(204);
-  const goodbye = await req(`/agent/workspaces/${ws}/goodbye`, { method: "POST", token: connector, body: await fixture("GoodbyeRequest.json") });
-  expect(goodbye.status).toBe(204);
+  const prompt = await req(`/workspaces/${ws}/prompts`, { method: "POST", body: { text: "look at this" } });
+  expect(prompt.status).toBe(201); const created = await prompt.json(); valid("UserCommand", created); expect(created.by).toBe("alice");
+  const poll = await (await req(`/agent/workspaces/${ws}/commands?wait=0`, { token: connector })).json();
+  valid("CommandsResponse", poll); valid("Command", poll.commands[0]); expect(poll.commands[0].by).toBe("alice");
+  const answer = await req(`/workspaces/${ws}/decisions/r4/D3/answer`, { method: "POST", body: { choice: "A" } });
+  expect(answer.status).toBe(201); const answerCommand = await answer.json(); valid("UserCommand", answerCommand); expect(answerCommand.by).toBe("alice");
+  const archive = await req(`/workspaces/${ws}`, { method: "PATCH", body: { archived: true } });
+  valid("WorkspaceSummary", await archive.json());
+  expect((await req("/workspaces?archived=true")).status).toBe(200);
 });
 
-it("validates fixtures and exercises answer followups, rejection retries, delivery, HELD retry, and prompt expiry", async () => {
-  await seed();
-  const token = await pair("C2DE3F4G");
-  let response = await req(`/workspaces/${ws}/decisions/r4/D3/answer`, { method: "POST", token, body: { choice: "A" } });
-  expect(response.status).toBe(201); const answer = await response.json(); valid("UserCommand", answer);
-  response = await req(`/agent/workspaces/${ws}/commands?wait=0`, { token: connector });
-  const poll = await response.json(); valid("CommandsResponse", poll); valid("Command", poll.commands[0]);
-  expect((await req(`/agent/workspaces/${ws}/commands/${answer.id}/ack`, { method: "POST", token: connector, body: { status: "HELD", reason: "waiting" } })).status).toBe(204);
-  expect((await (await req(`/agent/workspaces/${ws}/commands?wait=0`, { token: connector })).json()).commands).toHaveLength(0);
-  now += 5001;
-  expect((await (await req(`/agent/workspaces/${ws}/commands?wait=0`, { token: connector })).json()).commands[0].id).toBe(answer.id);
-  expect((await req(`/agent/workspaces/${ws}/commands/${answer.id}/ack`, { method: "POST", token: connector, body: { status: "DELIVERED", reason: null } })).status).toBe(204);
-
-  const batch = await fixture<any>("DecisionsBatch.json");
-  const decision = batch.decisions[0] as Decision;
-  decision.local_status = "ANSWERED";
-  decision.answer = { choice: "A", label: decision.options[0].label, note: "", channel: "hub", by: "phone", at: new Date(now).toISOString(), quote: null, followup: null };
-  await req(`/agent/workspaces/${ws}/decisions`, { method: "PUT", token: connector, body: { decisions: [decision] } });
-  response = await req(`/workspaces/${ws}/decisions/r4/D3`, { token });
-  expect((await response.json()).hub_status).toBe("DELIVERED");
-  decision.consumed_by = "consumed";
-  await req(`/agent/workspaces/${ws}/decisions`, { method: "PUT", token: connector, body: { decisions: [decision] } });
-  expect((await (await req(`/workspaces/${ws}/decisions/r4/D3`, { token })).json()).hub_status).toBe("APPLIED");
-
-  const finish = await fixture<Decision>("Decision.finish-answered-hub.json");
-  finish.local_status = "PENDING"; finish.answer = null; finish.consumed_by = null;
-  await req(`/agent/workspaces/${ws}/decisions`, { method: "PUT", token: connector, body: { decisions: [finish] } });
-  response = await req(`/workspaces/${ws}/decisions/r3/D2/answer`, { method: "POST", token, body: { choice: "A", followup: "B" } });
-  expect(response.status).toBe(422);
-  response = await req(`/workspaces/${ws}/decisions/r3/D2/answer`, { method: "POST", token, body: { choice: "A", followup: "A", value: "bad" } });
-  expect(response.status).toBe(422);
-  response = await req(`/workspaces/${ws}/decisions/r3/D2/answer`, { method: "POST", token, body: { choice: "A", followup: "B", value: "feature/r3" } });
-  expect(response.status).toBe(201); const branchAnswer = await response.json();
-  expect(branchAnswer.body.value).toBe("feature/r3");
-  await req(`/agent/workspaces/${ws}/commands/${branchAnswer.id}/ack`, { method: "POST", token: connector, body: { status: "REJECTED", reason: "invalid branch" } });
-  expect((await (await req(`/workspaces/${ws}/decisions/r3/D2`, { token })).json()).hub_status).toBe("REJECTED");
-  response = await req(`/workspaces/${ws}/decisions/r3/D2/answer`, { method: "POST", token, body: { choice: "A", followup: "A" } });
-  expect(response.status).toBe(201); expect((await response.json()).body.value).toBe("main");
-
-  response = await req(`/workspaces/${ws}/prompts`, { method: "POST", token, body: { text: "expire" } });
-  const prompt = await response.json(); valid("UserCommand", prompt);
-  now += 30 * 60_000;
-  const polled = await req(`/agent/workspaces/${ws}/commands?wait=0`, { token: connector });
-  expect((await polled.json()).commands.some((command: { id: string }) => command.id === prompt.id)).toBe(false);
-  expect(db.getUserCommand(ws, prompt.id)?.status).toBe("EXPIRED");
-});
-
-it("derives every hub status and handles offline, stopped, duplicate, wiped, and isolated workspaces", async () => {
-  const base = await fixture<Decision>("Decision.repair-open.json");
-  const cases: Array<[Partial<Decision>, any, string, string | null]> = [
-    [{ local_status: "DECIDED_BY_OPUS" }, undefined, "ROUTINE", null],
-    [{ local_status: "CANCELLED", cancel_reason: "withdrawn" }, undefined, "CANCELLED", "withdrawn"],
-    [{ local_status: "ANSWERED", consumed_by: "x" }, undefined, "APPLIED", null],
-    [{ local_status: "ANSWERED", answer: { ...base.answer, channel: "hub" } as any }, undefined, "DELIVERED", null],
-    [{ local_status: "ANSWERED", answer: { ...base.answer, channel: "chat" } as any }, undefined, "ANSWERED_ELSEWHERE", null],
-    [{ local_status: "PENDING" }, { type: "answer", status: "QUEUED" }, "SENT", null],
-    [{ local_status: "PENDING" }, { type: "answer", status: "HELD", status_reason: "busy" }, "SENT", "busy"],
-    [{ local_status: "PENDING" }, { type: "answer", status: "DELIVERED" }, "SENT", null],
-    [{ local_status: "PENDING" }, { type: "answer", status: "REJECTED", status_reason: "no" }, "REJECTED", "no"],
-    [{ local_status: "PENDING" }, { type: "reply", status: "DELIVERED" }, "OPEN", null],
+it("verifies Ed25519 assertions, expiry, owner, computer, and relay-frame binding", async () => {
+  const { publicKey, privateKey } = generateKeyPairSync("ed25519");
+  const rawKey = publicKey.export({ format: "der", type: "spki" }).subarray(-32).toString("base64url");
+  const computer: ComputerConfig = { ...config.computer!, proxy_public_key: rawKey };
+  const timestamp = Math.floor(now / 1000);
+  const tokenFor = (payload: object) => {
+    const encoded = Buffer.from(JSON.stringify(payload)).toString("base64url");
+    return `${encoded}.${sign(null, Buffer.from(encoded, "ascii"), privateKey).toString("base64url")}`;
+  };
+  const base = { v: 1, sub: "alice", cid: computerId, rid: "req-1", exp: timestamp + 60 };
+  const good = tokenFor(base);
+  expect(verifyAssertion(good, computer, now, "req-1")?.sub).toBe("alice");
+  expect(verifyAssertion(good, computer, now, null)).toBeNull();
+  const secured = createApp({ db, config: { ...config, computer }, clock: () => now, events });
+  const directReplay = await secured.request(`http://127.0.0.1${API_PREFIX}/workspaces`, {
+    headers: { "X-Agent-Hub-Protocol": "2", "X-Hub-Assertion": good, "X-Hub-Relay-Id": "req-1" },
+  });
+  expect(directReplay.status).toBe(401);
+  const invalid = [
+    `${Buffer.from(JSON.stringify(base)).toString("base64url")}.${Buffer.alloc(64).toString("base64url")}`,
+    tokenFor({ ...base, exp: timestamp - 1 }),
+    tokenFor({ ...base, cid: "c_bcdefghijklmnopq" }),
+    tokenFor({ ...base, sub: "bob" }),
+    tokenFor({ ...base, rid: "req-2" }),
   ];
-  for (const [change, latest, expected, reason] of cases) expect(decisionStatus({ ...base, ...change } as Decision, latest as any)).toEqual({ status: expected, reason });
-
-  const hello = await doHello(); expect(hello.value.known).toBe(false);
-  const otherSession = await fixture<any>("HelloRequest.json"); otherSession.session_id = "ses_eeeeffffgggghhhh";
-  expect((await doHello(otherSession)).response.status).toBe(409);
-  now += 90_000; expect(db.markOffline(now)).toContain(ws);
-  expect(db.getWorkspace(ws)?.status).toBe("OFFLINE");
-  expect((await req(`/agent/workspaces/${ws}/heartbeat`, { method: "POST", token: connector })).status).toBe(204);
-  expect(db.getWorkspace(ws)?.status).toBe("ONLINE");
-  expect((await req(`/agent/workspaces/${ws}/goodbye`, { method: "POST", token: connector, body: await fixture("GoodbyeRequest.json") })).status).toBe(204);
-  expect(db.getWorkspace(ws)?.status).toBe("STOPPED");
-
-  const snapshot = await fixture<any>("Snapshot.running.json");
-  await req(`/agent/workspaces/${ws}/snapshot`, { method: "PUT", token: connector, body: snapshot });
-  await req(`/agent/workspaces/${ws}/decisions`, { method: "PUT", token: connector, body: await fixture("DecisionsBatch.json") });
-
-  const other = await fixture<any>("HelloRequest.json"); other.workspace_id = "ws_p4x2d6abcdefghij"; other.session_id = "ses_eeeeffffgggghhhh";
-  expect((await doHello(other)).value.known).toBe(false);
-  const token = await pair("D2EF3G4H");
-  const isolated = await req(`/workspaces/${other.workspace_id}/decisions`, { token });
-  expect((await isolated.json()).items).toHaveLength(0);
-  const freshDir = join(temp, "wiped"); await mkdir(freshDir, { recursive: true });
-  const fresh = new HubDatabase(join(freshDir, "hub.db"), config.connectorKeyHash);
-  try {
-    const freshApp = createApp({ db: fresh, config: { ...config, dbPath: join(freshDir, "hub.db") }, clock: () => now });
-    const response = await freshApp.request(`http://127.0.0.1${prefix}/agent/hello`, { method: "POST", headers: { Authorization: `Bearer ${connector}`, "Content-Type": "application/json", [protocolHeader]: "1" }, body: JSON.stringify(await fixture("HelloRequest.json")) });
-    expect((await response.json()).known).toBe(false);
-  } finally { fresh.close(); }
+  for (const token of invalid) expect(verifyAssertion(token, computer, now, "req-1")).toBeNull();
 });
 
-it("wakes a real long poll and sends a schema-valid SSE decision event", async () => {
+it("derives REPLY_SENT only after a delivered reply while the local decision is still pending", async () => {
   await seed();
-  const token = await pair("E2FG3H4J");
-  let port = 0;
-  const server = serve({ fetch: app.fetch, hostname: "127.0.0.1", port: 0 }, (info) => { port = info.port; });
-  const until = Date.now() + 3000;
-  while (!port && Date.now() < until) await new Promise((resolve) => setTimeout(resolve, 10));
-  expect(port).toBeGreaterThan(0);
-  const root = `http://127.0.0.1:${port}${prefix}`;
-  const connectorHeaders = { Authorization: `Bearer ${connector}`, [protocolHeader]: "1" };
-  const started = Date.now();
-  const pollPromise = fetch(`${root}/agent/workspaces/${ws}/commands?wait=25`, { headers: connectorHeaders });
-  await new Promise((resolve) => setTimeout(resolve, 80));
-  const prompt = await fetch(`${root}/workspaces/${ws}/prompts`, { method: "POST", headers: { Authorization: `Bearer ${token}`, [protocolHeader]: "1", "Content-Type": "application/json" }, body: JSON.stringify({ text: "wake" }) });
-  expect(prompt.status).toBe(201);
-  const poll = await pollPromise;
-  expect(Date.now() - started).toBeLessThan(2000);
-  const commands = await poll.json(); valid("CommandsResponse", commands); expect(commands.commands).toHaveLength(1);
+  const response = await req(`/workspaces/${ws}/decisions/r4/D3/reply`, { method: "POST", body: { text: "I suggest A" } });
+  expect(response.status).toBe(201); const command = await response.json(); valid("UserCommand", command); expect(command.by).toBe("alice");
+  expect((await (await req(`/workspaces/${ws}/decisions/r4/D3`)).json()).hub_status).toBe("OPEN");
+  expect((await req(`/agent/workspaces/${ws}/commands/${command.id}/ack`, { method: "POST", token: connector, body: { status: "DELIVERED", reason: null } })).status).toBe(204);
+  const decision = await (await req(`/workspaces/${ws}/decisions/r4/D3`)).json();
+  expect(decision.hub_status).toBe("REPLY_SENT"); valid("HubDecision", decision);
+});
 
-  const controller = new AbortController();
-  const stream = await fetch(`${root}/stream?token=${encodeURIComponent(token)}`, { headers: { [protocolHeader]: "1" }, signal: controller.signal });
-  expect(stream.status).toBe(200);
-  const reader = stream.body!.getReader();
-  await new Promise((resolve) => setTimeout(resolve, 50));
-  const decisions = await fixture<any>("DecisionsBatch.json");
-  decisions.decisions[0].question += " updated";
-  const response = await fetch(`${root}/agent/workspaces/${ws}/decisions`, { method: "PUT", headers: { ...connectorHeaders, "Content-Type": "application/json" }, body: JSON.stringify(decisions) });
-  expect(response.status).toBe(204);
-  const result = await Promise.race([reader.read(), new Promise<never>((_resolve, reject) => setTimeout(() => reject(new Error("SSE timeout")), 3000))]);
-  const chunk = new TextDecoder().decode(result.value);
-  expect(chunk).toContain("event: decision");
-  const dataLine = chunk.match(/data: (\{[^\n]+\})/);
-  expect(dataLine).toBeTruthy();
-  const data = JSON.parse(dataLine![1]); valid("StreamEvent", data);
-  controller.abort(); await reader.cancel().catch(() => undefined);
-  await new Promise<void>((resolve) => server.close(() => resolve()));
+it("upserts runs across snapshots and sweeps old finished-run data with the injected clock", async () => {
+  const hello = await doHello(); expect(hello.response.status).toBe(200);
+  const snapshot = await fixture<any>("Snapshot.running.json");
+  db.saveSnapshot(ws, snapshot, now);
+  const nextSnapshot = { ...snapshot, runs: [snapshot.runs[0]] };
+  db.saveSnapshot(ws, nextSnapshot, now + 1);
+  expect(db.getSnapshot(ws)?.runs.map((run) => run.run_id)).toEqual(["r4", "r3"]);
+
+  const staleDone = { ...snapshot.runs[1], run_id: "old-finished", created_at: "2020-01-01T00:00:00Z", finish: { ...snapshot.runs[1].finish, at: "2020-01-02T00:00:00Z" } };
+  const staleNoFinish = { ...snapshot.runs[1], run_id: "old-no-finish", status: "FAILED", created_at: "2020-01-01T00:00:00Z", finish: null };
+  db.saveSnapshot(ws, { ...snapshot, runs: [snapshot.runs[0], staleDone, staleNoFinish] }, now + 2);
+  const decision = await fixture<any>("Decision.repair-open.json"); decision.run_id = "old-finished";
+  db.upsertDecisions(ws, [decision], now);
+  const batch = await fixture<any>("EventsBatch.json"); batch.run_id = "old-finished";
+  db.insertEvents(ws, batch, now);
+  const document = await fixture<any>("DocumentsBatch.json"); document.documents[0].run_id = "old-finished";
+  db.upsertDocuments(ws, document.documents, now);
+  expect(db.sweepFinishedRuns(now, 60)).toBe(2);
+  expect(db.listRuns(ws).map((run) => run.run_id)).toContain("r4");
+  expect(db.listRuns(ws).map((run) => run.run_id)).not.toContain("old-finished");
+  expect(Number(db.sql.prepare("SELECT COUNT(*) AS n FROM decisions WHERE run_id='old-finished'").get()?.n)).toBe(0);
+  expect(Number(db.sql.prepare("SELECT COUNT(*) AS n FROM events WHERE run_id='old-finished'").get()?.n)).toBe(0);
+  expect(Number(db.sql.prepare("SELECT COUNT(*) AS n FROM documents WHERE run_id='old-finished'").get()?.n)).toBe(0);
+});
+
+it("lists online and recent workspaces, with all=true bypassing the recent cutoff", async () => {
+  await doHello();
+  const second = await fixture<any>("HelloRequest.json"); second.workspace_id = "ws_p4x2d6abcdefghij"; second.session_id = "ses_eeeeffffgggghhhh";
+  await doHello(second);
+  const third = { ...second, workspace_id: "ws_abcd2345efgh6727", session_id: "ses_2222333344445555" };
+  await doHello(third);
+  db.sql.prepare("UPDATE workspaces SET last_seen_at=?,status='ONLINE' WHERE id=?").run("2026-01-01T00:00:00.000Z", ws);
+  db.sql.prepare("UPDATE workspaces SET last_seen_at=?,status='OFFLINE' WHERE id=?").run(new Date(now - 86_400_000).toISOString(), second.workspace_id);
+  db.sql.prepare("UPDATE workspaces SET last_seen_at=?,status='STOPPED' WHERE id=?").run(new Date(now - 16 * 86_400_000).toISOString(), third.workspace_id);
+  const recent = await (await req("/workspaces")).json();
+  expect(recent.items.map((item: { id: string }) => item.id).sort()).toEqual([ws, second.workspace_id].sort());
+  const all = await (await req("/workspaces?all=true")).json();
+  expect(all.items.map((item: { id: string }) => item.id)).toContain(third.workspace_id);
+});
+
+function serverFrame(value: unknown): Buffer {
+  const payload = Buffer.from(JSON.stringify(value));
+  if (payload.length < 126) return Buffer.concat([Buffer.from([0x81, payload.length]), payload]);
+  if (payload.length < 65_536) { const head = Buffer.alloc(4); head[0] = 0x81; head[1] = 126; head.writeUInt16BE(payload.length, 2); return Buffer.concat([head, payload]); }
+  const head = Buffer.alloc(10); head[0] = 0x81; head[1] = 127; head.writeBigUInt64BE(BigInt(payload.length), 2); return Buffer.concat([head, payload]);
+}
+
+function parseClientFrames(socket: Duplex, onFrame: (frame: unknown) => void, initial = Buffer.alloc(0)): void {
+  let buffer = initial;
+  socket.on("data", (chunk) => {
+    buffer = Buffer.concat([buffer, chunk]);
+    while (buffer.length >= 2) {
+      const opcode = buffer[0] & 0x0f;
+      const masked = (buffer[1] & 0x80) !== 0;
+      let length = buffer[1] & 0x7f;
+      let offset = 2;
+      if (length === 126) { if (buffer.length < 4) return; length = buffer.readUInt16BE(2); offset = 4; }
+      else if (length === 127) { if (buffer.length < 10) return; length = Number(buffer.readBigUInt64BE(2)); offset = 10; }
+      const maskBytes = masked ? 4 : 0;
+      if (buffer.length < offset + maskBytes + length) return;
+      const mask = masked ? buffer.subarray(offset, offset + 4) : undefined;
+      offset += maskBytes;
+      const body = Buffer.from(buffer.subarray(offset, offset + length));
+      buffer = buffer.subarray(offset + length);
+      if (mask) for (let index = 0; index < body.length; index++) body[index] ^= mask[index % 4];
+      if (opcode === 1) { try { onFrame(JSON.parse(body.toString("utf8"))); } catch {} }
+      if (opcode === 8) socket.end();
+    }
+  });
+  socket.on("error", () => undefined);
+}
+
+class FakeProxy {
+  readonly messages: any[] = [];
+  readonly sockets = new Set<Duplex>();
+  readonly queued: unknown[] = [];
+  readonly paths: string[] = [];
+  readonly server = createServer((request, response) => { void this.http(request, response); });
+  port = 0;
+  websocket = true;
+  failPolls = false;
+  websocketAttempts = 0;
+  authHeaders: string[] = [];
+  private waiters: Array<{ predicate: (frame: any) => boolean; resolve: (frame: any) => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout> }> = [];
+
+  async listen(): Promise<void> {
+    this.server.on("upgrade", (request, socket, head) => {
+      this.websocketAttempts++;
+      if (!this.websocket) { socket.end("HTTP/1.1 426 Upgrade Required\r\nConnection: close\r\n\r\n"); return; }
+      this.authHeaders.push(String(request.headers.authorization ?? ""));
+      const key = request.headers["sec-websocket-key"];
+      if (!key) { socket.destroy(); return; }
+      const accept = createHash("sha1").update(`${key}258EAFA5-E914-47DA-95CA-C5AB0DC85B11`).digest("base64");
+      socket.write(`HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ${accept}\r\n\r\n`);
+      this.sockets.add(socket);
+      socket.on("close", () => this.sockets.delete(socket));
+      parseClientFrames(socket, (frame) => this.capture(frame), head);
+    });
+    await new Promise<void>((resolve) => this.server.listen(0, "127.0.0.1", resolve));
+    this.port = (this.server.address() as { port: number }).port;
+  }
+
+  private capture(frame: any): void {
+    this.messages.push(frame);
+    this.waiters = this.waiters.filter((waiter) => {
+      if (!waiter.predicate(frame)) return true;
+      clearTimeout(waiter.timer); waiter.resolve(frame); return false;
+    });
+  }
+
+  waitFor(predicate: (frame: any) => boolean, timeout = 5000): Promise<any> {
+    const match = this.messages.find(predicate);
+    if (match) return Promise.resolve(match);
+    return new Promise((resolve, reject) => {
+      const waiter = { predicate, resolve, reject, timer: setTimeout(() => {
+        this.waiters = this.waiters.filter((candidate) => candidate !== waiter);
+        reject(new Error(`fake proxy frame timed out; frames=${this.messages.map((frame) => frame.type).join(",")}; paths=${[...new Set(this.paths)].join(",")}`));
+      }, timeout) };
+      this.waiters.push(waiter);
+    });
+  }
+
+  send(frame: unknown): void {
+    const socket = [...this.sockets].find((candidate) => !candidate.destroyed);
+    if (socket) socket.write(serverFrame(frame));
+    else this.queued.push(frame);
+  }
+
+  closeSockets(): void { for (const socket of this.sockets) socket.destroy(); this.sockets.clear(); }
+
+  private async http(request: IncomingMessage, response: ServerResponse): Promise<void> {
+    const path = new URL(request.url ?? "/", `http://${request.headers.host}`).pathname;
+    this.paths.push(path);
+    this.authHeaders.push(String(request.headers.authorization ?? ""));
+    if (path.endsWith("/connect")) { response.writeHead(426).end(); return; }
+    if (path.endsWith("/poll")) {
+      if (this.failPolls) { response.writeHead(503).end(); return; }
+      const frame = this.queued.shift();
+      setTimeout(() => response.end(JSON.stringify({ frames: frame === undefined ? [] : [frame] })), 20);
+      return;
+    }
+    if (path.endsWith("/frames")) {
+      if (this.failPolls) { response.writeHead(503).end(); return; }
+      const chunks: Buffer[] = [];
+      for await (const chunk of request) chunks.push(Buffer.from(chunk));
+      try { for (const frame of JSON.parse(Buffer.concat(chunks).toString("utf8")).frames) this.capture(frame); } catch {}
+      response.writeHead(204).end(); return;
+    }
+    response.writeHead(404).end();
+  }
+
+  async close(): Promise<void> {
+    this.closeSockets();
+    this.server.closeAllConnections();
+    await new Promise<void>((resolve) => this.server.close(() => resolve()));
+  }
+}
+
+function newRelayRequest(id: string, path: string, stream = false): RelayRequest {
+  return { type: "req", id, method: "GET", path, query: "", body: null, assertion: testAssertion, stream };
+}
+
+function relayApp(signals: { cancelled: boolean; started: boolean }): Hono {
+  const relayApp = new Hono();
+  relayApp.get("/api/v1/test/ok", (c) => c.json({ ok: true }));
+  relayApp.get("/api/v1/test/sse", () => new Response("data: first\n\ndata: second\n\n", { headers: { "Content-Type": "text/event-stream" } }));
+  relayApp.get("/api/v1/test/cancellable", (c) => new Promise<Response>((resolve) => {
+    signals.started = true;
+    c.req.raw.signal.addEventListener("abort", () => { signals.cancelled = true; resolve(new Response("cancelled")); }, { once: true });
+  }));
+  relayApp.get("/api/v1/test/large", (c) => c.json({ value: "x".repeat(950_000) }));
+  relayApp.get("/api/v1/workspaces/:ws/documents/content", (c) => c.json({ meta: { path: "big", bytes: 950_000 }, content: "z".repeat(950_000) }));
+  return relayApp;
+}
+
+async function startRelay(proxy: FakeProxy, relayAppInstance: Hono, dbInstance = db): Promise<RelayClient> {
+  const relayConfig = { ...config, port: proxy.port, computer: { ...config.computer!, proxy_url: `http://127.0.0.1:${proxy.port}` } };
+  const relay = new RelayClient(relayAppInstance, dbInstance, relayConfig, relayConfig.computer!, events, () => now);
+  relayClients.push(relay);
+  relay.start();
+  return relay;
+}
+
+describe("relay client", () => {
+  it("sends hello, routes requests, streams, cancels, bounds frames, updates workspaces, and reconnects", async () => {
+    const proxy = new FakeProxy(); await proxy.listen();
+    const signals = { cancelled: false, started: false };
+    try {
+      await doHello();
+      const client = await startRelay(proxy, relayApp(signals));
+      const hello = await proxy.waitFor((frame) => frame.type === "hello");
+      valid("RelayHello", hello); expect(hello.workspaces).toHaveLength(1);
+      expect(proxy.authHeaders).toContain(`Bearer ${config.computer!.computer_key}`);
+
+      proxy.send(newRelayRequest("ok-1", "/api/v1/test/ok"));
+      const roundTrip = await proxy.waitFor((frame) => frame.type === "res" && frame.id === "ok-1");
+      expect(roundTrip).toMatchObject({ status: 200, body: { ok: true } }); valid("RelayResponse", roundTrip);
+
+      proxy.send(newRelayRequest("sse-1", "/api/v1/test/sse", true));
+      const streamStart = await proxy.waitFor((frame) => frame.type === "res" && frame.id === "sse-1");
+      expect(streamStart.body).toBeNull();
+      const chunks = await proxy.waitFor((frame) => frame.type === "end" && frame.id === "sse-1");
+      const streamData = proxy.messages.filter((frame) => frame.type === "chunk" && frame.id === "sse-1").map((frame) => frame.data).join("");
+      expect(streamData).toContain("data: first"); expect(chunks.status).toBe(200); valid("RelayStreamEnd", chunks);
+
+      proxy.send(newRelayRequest("cancel-1", "/api/v1/test/cancellable", true));
+      await new Promise<void>((resolve) => {
+        const until = Date.now() + 3000;
+        const poll = () => signals.started ? resolve() : Date.now() >= until ? resolve() : setTimeout(poll, 10);
+        poll();
+      });
+      proxy.send({ type: "cancel", id: "cancel-1" });
+      await new Promise<void>((resolve) => {
+        const until = Date.now() + 3000;
+        const poll = () => signals.cancelled ? resolve() : Date.now() >= until ? resolve() : setTimeout(poll, 10);
+        poll();
+      });
+      expect(signals.cancelled).toBe(true);
+      expect(proxy.messages.some((frame) => frame.type === "res" && frame.id === "cancel-1")).toBe(false);
+
+      proxy.send(newRelayRequest("large-1", "/api/v1/test/large"));
+      const oversized = await proxy.waitFor((frame) => frame.type === "res" && frame.id === "large-1");
+      expect(oversized.status).toBe(413); expect(oversized.body.error.code).toBe("payload_too_large");
+
+      proxy.send(newRelayRequest("doc-1", `/api/v1/workspaces/${ws}/documents/content?path=big`, true));
+      await proxy.waitFor((frame) => frame.type === "end" && frame.id === "doc-1");
+      const documentChunks = proxy.messages.filter((frame) => frame.type === "chunk" && frame.id === "doc-1");
+      expect(documentChunks.length).toBeGreaterThan(1);
+      expect(documentChunks.map((frame) => frame.data).join("")).toContain("\"content\":\"z");
+      documentChunks.forEach((frame) => valid("RelayStreamChunk", frame));
+
+      const other = await fixture<any>("HelloRequest.json"); other.workspace_id = "ws_p4x2d6abcdefghij"; other.session_id = "ses_eeeeffffgggghhhh";
+      await doHello(other); events.publish({ type: "workspace", workspace_id: other.workspace_id, at: new Date(now).toISOString(), ref: other.workspace_id });
+      const workspaces = await proxy.waitFor((frame) => frame.type === "workspaces" && frame.workspaces.length === 2, 5000);
+      valid("RelayWorkspaces", workspaces);
+
+      const firstConnectedAt = Date.now();
+      const initialWebsocketAttempts = proxy.websocketAttempts;
+      proxy.closeSockets(); proxy.failPolls = true;
+      const reconnect = await proxy.waitFor((frame) => frame.type === "hello" && proxy.websocketAttempts > initialWebsocketAttempts, 5000);
+      expect(Date.now() - firstConnectedAt).toBeGreaterThanOrEqual(900);
+      valid("RelayHello", reconnect);
+      await client.stop();
+    } finally { await proxy.close(); }
+  });
+
+  it("uses HTTPS long-poll fallback after the WebSocket upgrade fails", async () => {
+    const proxy = new FakeProxy(); proxy.websocket = false; await proxy.listen();
+    try {
+      const client = await startRelay(proxy, relayApp({ cancelled: false, started: false }));
+      const hello = await proxy.waitFor((frame) => frame.type === "hello", 3000);
+      valid("RelayHello", hello);
+      proxy.send(newRelayRequest("poll-1", "/api/v1/test/ok"));
+      const response = await proxy.waitFor((frame) => frame.type === "res" && frame.id === "poll-1");
+      valid("RelayResponse", response); expect(response.body).toEqual({ ok: true });
+      expect(client.status().transport).toBe("long-poll-direct");
+      await client.stop();
+    } finally { await proxy.close(); }
+  }, 15000);
 });

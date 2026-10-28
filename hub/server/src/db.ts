@@ -7,12 +7,13 @@ import type {
   AckRequest,
   Command,
   Decision,
-  Device,
   Document,
   EventsBatch,
   HelloRequest,
+  Run,
   Snapshot,
   UserCommand,
+  WorkspaceIndexEntry,
 } from "@agent-hub/protocol";
 
 export type Row = Record<string, string | number | null>;
@@ -67,63 +68,6 @@ export class HubDatabase {
     return this.sql.prepare("SELECT 1 FROM connector_keys WHERE token_hash = ?").get(hash(token)) !== undefined;
   }
 
-  isDeviceToken(token: string): boolean {
-    return this.sql.prepare("SELECT 1 FROM devices WHERE token_hash = ? AND revoked_at IS NULL").get(hash(token)) !== undefined;
-  }
-
-  findDeviceByToken(token: string, now: number): Device | undefined {
-    const row = this.sql.prepare("SELECT * FROM devices WHERE token_hash = ?").get(hash(token)) as Row | undefined;
-    if (!row || row.revoked_at) return undefined;
-    this.sql.prepare("UPDATE devices SET last_used_at = ? WHERE id = ?").run(iso(now), row.id);
-    return this.device(row, true);
-  }
-
-  createPairCode(code: string, name: string, now: number, expiresAt: number): void {
-    this.sql.prepare("INSERT INTO pair_codes (code_hash, name, created_at, expires_at) VALUES (?, ?, ?, ?)")
-      .run(hash(code), name, iso(now), iso(expiresAt));
-  }
-
-  consumePairCode(code: string, now: number): { token: string; device: Device } | undefined {
-    const row = this.sql.prepare("SELECT * FROM pair_codes WHERE code_hash = ? AND used_at IS NULL AND expires_at > ?")
-      .get(hash(code), iso(now)) as Row | undefined;
-    if (!row) return undefined;
-    const token = randomBytes(32).toString("base64url");
-    const id = `dev_${randomBytes(8).toString("hex")}`;
-    const createdAt = iso(now);
-    this.sql.exec("BEGIN");
-    try {
-      const used = this.sql.prepare("UPDATE pair_codes SET used_at = ? WHERE code_hash = ? AND used_at IS NULL")
-        .run(createdAt, String(row.code_hash));
-      if (Number(used.changes) !== 1) {
-        this.sql.exec("ROLLBACK");
-        return undefined;
-      }
-      this.sql.prepare("INSERT INTO devices (id, name, token_hash, created_at, last_used_at) VALUES (?, ?, ?, ?, ?)")
-        .run(id, row.name, hash(token), createdAt, createdAt);
-      this.audit(null, "system", "device.paired", id, { name: String(row.name) }, now);
-      this.sql.exec("COMMIT");
-    } catch (error) {
-      this.sql.exec("ROLLBACK");
-      throw error;
-    }
-    return { token, device: { id, name: String(row.name), created_at: createdAt, last_used_at: createdAt, current: true } };
-  }
-
-  listDevices(currentId?: string): Device[] {
-    return (this.sql.prepare("SELECT * FROM devices WHERE revoked_at IS NULL ORDER BY created_at DESC").all() as Row[])
-      .map((row) => this.device(row, row.id === currentId));
-  }
-
-  revokeDevice(id: string, now: number, actor = "system"): boolean {
-    const result = this.sql.prepare("UPDATE devices SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL").run(iso(now), id);
-    if (Number(result.changes)) this.audit(null, actor, "device.revoked", id, null, now);
-    return Number(result.changes) > 0;
-  }
-
-  private device(row: Row, current: boolean): Device {
-    return { id: String(row.id), name: String(row.name), created_at: String(row.created_at), last_used_at: row.last_used_at as string | null, current };
-  }
-
   hello(request: HelloRequest, now: number): { known: boolean; event_cursors: Record<string, number>; decision_hashes: Record<string, string>; document_hashes: Record<string, string>; snapshot_hash: string | null } {
     const previous = this.getWorkspace(request.workspace_id);
     const lastSeen = previous?.last_seen_at ? Date.parse(String(previous.last_seen_at)) : 0;
@@ -133,10 +77,10 @@ export class HubDatabase {
       throw Object.assign(new Error("another live session already holds this workspace"), { code: "duplicate_workspace" });
     }
     const timestamp = iso(now);
-    this.sql.prepare(`INSERT INTO workspaces (id,name,path,kit_version,status,first_seen_at,last_seen_at,archived_at)
-      VALUES (?,?,?,?, 'ONLINE',?,?,NULL)
-      ON CONFLICT(id) DO UPDATE SET name=excluded.name,path=excluded.path,kit_version=excluded.kit_version,status='ONLINE',last_seen_at=excluded.last_seen_at,archived_at=NULL`)
-      .run(request.workspace_id, request.name, request.path, request.kit_version, timestamp, timestamp);
+    this.sql.prepare(`INSERT INTO workspaces (id,name,path,kit_version,status,first_seen_at,last_seen_at,archived_at,upload)
+      VALUES (?,?,?,?, 'ONLINE',?,?,NULL,?)
+      ON CONFLICT(id) DO UPDATE SET name=excluded.name,path=excluded.path,kit_version=excluded.kit_version,status='ONLINE',last_seen_at=excluded.last_seen_at,archived_at=NULL,upload=excluded.upload`)
+      .run(request.workspace_id, request.name, request.path, request.kit_version, timestamp, timestamp, JSON.stringify(request.upload));
     this.sql.prepare("UPDATE workspace_sessions SET ended_at = ?, end_reason = 'replaced' WHERE workspace_id = ? AND ended_at IS NULL AND id <> ?")
       .run(timestamp, request.workspace_id, request.session_id);
     this.sql.prepare(`INSERT INTO workspace_sessions (id,workspace_id,started_at) VALUES (?,?,?)
@@ -156,8 +100,16 @@ export class HubDatabase {
     return this.sql.prepare("SELECT * FROM workspaces WHERE id = ?").get(id) as Row | undefined;
   }
 
-  listWorkspaces(archived: boolean): Row[] {
-    return this.sql.prepare(`SELECT * FROM workspaces WHERE ${archived ? "archived_at IS NOT NULL" : "archived_at IS NULL"}`).all() as Row[];
+  listWorkspaces(archived: boolean, now: number, recentDays: number, all = false): Row[] {
+    const archiveFilter = archived ? "archived_at IS NOT NULL" : "archived_at IS NULL";
+    const visibility = all ? "1=1" : "(status = 'ONLINE' OR last_seen_at >= ?)";
+    const args = all ? [] : [iso(now - recentDays * 86_400_000)];
+    return this.sql.prepare(`SELECT * FROM workspaces WHERE ${archiveFilter} AND ${visibility}`).all(...args) as Row[];
+  }
+
+  workspaceIndex(): WorkspaceIndexEntry[] {
+    return (this.sql.prepare("SELECT id,name,status,last_seen_at FROM workspaces ORDER BY id").all() as Row[])
+      .map((row) => ({ workspace_id: String(row.id), name: String(row.name), status: row.status as WorkspaceIndexEntry["status"], last_seen_at: row.last_seen_at as string | null }));
   }
 
   markWorkspaceSeen(id: string, now: number): boolean {
@@ -199,16 +151,50 @@ export class HubDatabase {
     this.sql.prepare(`INSERT INTO snapshots (workspace_id,body,hash,received_at) VALUES (?,?,?,?)
       ON CONFLICT(workspace_id) DO UPDATE SET body=excluded.body,hash=excluded.hash,received_at=excluded.received_at`)
       .run(workspaceId, body, digest, iso(now));
-    this.sql.prepare("DELETE FROM runs WHERE workspace_id = ?").run(workspaceId);
-    const insert = this.sql.prepare("INSERT INTO runs (workspace_id,run_id,status,created_at,finished_at,finish_result,body) VALUES (?,?,?,?,?,?,?)");
-    for (const run of snapshot.runs) insert.run(workspaceId, run.run_id, run.status, run.created_at, run.finish?.at ?? null, run.finish?.result ?? null, JSON.stringify(run));
+    const upsert = this.sql.prepare(`INSERT INTO runs (workspace_id,run_id,status,created_at,finished_at,finish_result,body,title,goal) VALUES (?,?,?,?,?,?,?,?,?)
+      ON CONFLICT(workspace_id,run_id) DO UPDATE SET status=excluded.status,created_at=excluded.created_at,finished_at=excluded.finished_at,
+      finish_result=excluded.finish_result,body=excluded.body,title=excluded.title,goal=excluded.goal`);
+    for (const run of snapshot.runs) upsert.run(workspaceId, run.run_id, run.status, run.created_at, run.finish?.at ?? null, run.finish?.result ?? null,
+      JSON.stringify(run), run.title, run.goal);
+    this.sql.prepare("UPDATE workspaces SET orchestrator_last_activity_at=? WHERE id=?")
+      .run(snapshot.orchestrator_last_activity_at, workspaceId);
     this.audit(workspaceId, "connector", "snapshot.updated", workspaceId, { runs: snapshot.runs.length }, now);
     return digest;
   }
 
   getSnapshot(workspaceId: string): Snapshot | null {
     const row = this.sql.prepare("SELECT body FROM snapshots WHERE workspace_id = ?").get(workspaceId) as Row | undefined;
-    return row ? JSON.parse(String(row.body)) as Snapshot : null;
+    if (!row) return null;
+    const snapshot = JSON.parse(String(row.body)) as Snapshot;
+    snapshot.runs = this.listRuns(workspaceId);
+    return snapshot;
+  }
+
+  listRuns(workspaceId: string): Run[] {
+    return (this.sql.prepare("SELECT body FROM runs WHERE workspace_id=? ORDER BY created_at DESC,run_id DESC LIMIT 200").all(workspaceId) as Row[])
+      .map((row) => JSON.parse(String(row.body)) as Run);
+  }
+
+  sweepFinishedRuns(now: number, retentionDays: number): number {
+    const cutoff = iso(now - retentionDays * 86_400_000);
+    const expired = this.sql.prepare(`SELECT workspace_id,run_id FROM runs WHERE status IN ('DONE','FAILED')
+      AND ((finished_at IS NOT NULL AND finished_at <= ?) OR (finished_at IS NULL AND created_at IS NOT NULL AND created_at <= ?))`).all(cutoff, cutoff) as Row[];
+    this.sql.exec("BEGIN");
+    try {
+      for (const row of expired) {
+        const workspaceId = String(row.workspace_id);
+        const runId = String(row.run_id);
+        this.sql.prepare("DELETE FROM decisions WHERE workspace_id=? AND run_id=?").run(workspaceId, runId);
+        this.sql.prepare("DELETE FROM events WHERE workspace_id=? AND run_id=?").run(workspaceId, runId);
+        this.sql.prepare("DELETE FROM documents WHERE workspace_id=? AND run_id=?").run(workspaceId, runId);
+        this.sql.prepare("DELETE FROM runs WHERE workspace_id=? AND run_id=?").run(workspaceId, runId);
+      }
+      this.sql.exec("COMMIT");
+    } catch (error) {
+      this.sql.exec("ROLLBACK");
+      throw error;
+    }
+    return expired.length;
   }
 
   getSnapshotHash(workspaceId: string): string | null {
@@ -287,15 +273,15 @@ export class HubDatabase {
     return this.sql.prepare("SELECT * FROM documents WHERE workspace_id=? AND path=? AND deleted=0").get(workspaceId, path) as Row | undefined;
   }
 
-  createCommand(input: { workspaceId: string; type: Command["type"]; runId: string | null; decisionId: string | null; body: object; deviceId: string; deviceName: string; now: number; expiresAt: number | null }): UserCommand {
+  createCommand(input: { workspaceId: string; type: Command["type"]; runId: string | null; decisionId: string | null; body: object; by: string; now: number; expiresAt: number | null }): UserCommand {
     const id = `cmd_${id16()}`;
     const createdAt = iso(input.now);
     const expiresAt = input.expiresAt === null ? null : iso(input.expiresAt);
-    this.sql.prepare("INSERT INTO commands (id,workspace_id,type,run_id,decision_id,body,status,device_id,device_name,created_at,expires_at) VALUES (?,?,?,?,?,?,'QUEUED',?,?,?,?)")
-      .run(id, input.workspaceId, input.type, input.runId, input.decisionId, JSON.stringify(input.body), input.deviceId, input.deviceName, createdAt, expiresAt);
-    this.audit(input.workspaceId, `device:${input.deviceId}`, "command.created", id, { type: input.type, run_id: input.runId, decision_id: input.decisionId }, input.now);
+    this.sql.prepare("INSERT INTO commands (id,workspace_id,type,run_id,decision_id,body,status,by,created_at,expires_at) VALUES (?,?,?,?,?,?,'QUEUED',?,?,?)")
+      .run(id, input.workspaceId, input.type, input.runId, input.decisionId, JSON.stringify(input.body), input.by, createdAt, expiresAt);
+    this.audit(input.workspaceId, input.by, "command.created", id, { type: input.type, run_id: input.runId, decision_id: input.decisionId }, input.now);
     return { id, workspace_id: input.workspaceId, type: input.type, run_id: input.runId, decision_id: input.decisionId,
-      body: input.body, status: "QUEUED", status_reason: null, device: input.deviceName, created_at: createdAt, delivered_at: null, expires_at: expiresAt };
+      body: input.body, status: "QUEUED", status_reason: null, by: input.by, created_at: createdAt, delivered_at: null, expires_at: expiresAt };
   }
 
   listCommands(workspaceId: string): UserCommand[] {
@@ -324,7 +310,7 @@ export class HubDatabase {
       AND (status='QUEUED' OR (status='HELD' AND last_ack_at < ?)) ORDER BY created_at,id LIMIT 50`)
       .all(workspaceId, iso(now), iso(now - 5_000)) as Row[];
     return rows.map((row) => ({ id: String(row.id), type: row.type as Command["type"], run_id: row.run_id as string | null,
-      decision_id: row.decision_id as string | null, body: JSON.parse(String(row.body)), device: String(row.device_name ?? ""),
+      decision_id: row.decision_id as string | null, body: JSON.parse(String(row.body)), by: String(row.by ?? "unknown"),
       created_at: String(row.created_at), expires_at: row.expires_at as string | null }));
   }
 
@@ -356,7 +342,7 @@ export class HubDatabase {
   private userCommand(row: Row): UserCommand {
     return { id: String(row.id), workspace_id: String(row.workspace_id), type: row.type as UserCommand["type"], run_id: row.run_id as string | null,
       decision_id: row.decision_id as string | null, body: JSON.parse(String(row.body)), status: row.status as UserCommand["status"],
-      status_reason: row.status_reason as string | null, device: row.device_name as string | null, created_at: String(row.created_at),
+      status_reason: row.status_reason as string | null, by: row.by as string | null, created_at: String(row.created_at),
       delivered_at: row.delivered_at as string | null, expires_at: row.expires_at as string | null };
   }
 }

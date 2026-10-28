@@ -1,7 +1,11 @@
 import type { Decision, HistoryItem, HubDecision, WorkspaceSummary, WorkspaceStatus } from "@agent-hub/protocol";
 import type { HubDatabase, Row } from "./db.ts";
 
-export function decisionStatus(decision: Decision, latest: ReturnType<HubDatabase["latestDecisionCommand"]>): { status: HubDecision["hub_status"]; reason: string | null } {
+export function decisionStatus(
+  decision: Decision,
+  latest: ReturnType<HubDatabase["latestDecisionCommand"]>,
+  latestAnswer: ReturnType<HubDatabase["latestAnswerCommand"]> = latest?.type === "answer" ? latest : undefined,
+): { status: HubDecision["hub_status"]; reason: string | null } {
   if (decision.local_status === "DECIDED_BY_OPUS") return { status: "ROUTINE", reason: null };
   if (decision.local_status === "CANCELLED") return { status: "CANCELLED", reason: decision.cancel_reason };
   if (decision.local_status === "ANSWERED") {
@@ -10,9 +14,12 @@ export function decisionStatus(decision: Decision, latest: ReturnType<HubDatabas
     if (decision.answer?.channel === "chat") return { status: "ANSWERED_ELSEWHERE", reason: null };
     return { status: "APPLIED", reason: null };
   }
-  if (latest?.type === "answer") {
-    if (["QUEUED", "HELD", "DELIVERED"].includes(latest.status)) return { status: "SENT", reason: latest.status === "HELD" ? latest.status_reason : null };
-    if (latest.status === "REJECTED") return { status: "REJECTED", reason: latest.status_reason };
+  if (decision.answer === null && decision.local_status === "PENDING" && latest?.type === "reply" && latest.status === "DELIVERED") {
+    return { status: "REPLY_SENT", reason: null };
+  }
+  if (latestAnswer) {
+    if (["QUEUED", "HELD", "DELIVERED"].includes(latestAnswer.status)) return { status: "SENT", reason: latestAnswer.status === "HELD" ? latestAnswer.status_reason : null };
+    if (latestAnswer.status === "REJECTED") return { status: "REJECTED", reason: latestAnswer.status_reason };
   }
   return { status: "OPEN", reason: null };
 }
@@ -20,7 +27,7 @@ export function decisionStatus(decision: Decision, latest: ReturnType<HubDatabas
 export function hubDecision(db: HubDatabase, workspaceId: string, decision: Decision): HubDecision {
   const latest = db.latestDecisionCommand(workspaceId, decision.run_id, decision.decision_id);
   const latestAnswer = db.latestAnswerCommand(workspaceId, decision.run_id, decision.decision_id);
-  const derived = decisionStatus(decision, latestAnswer);
+  const derived = decisionStatus(decision, latest, latestAnswer);
   return {
     workspace_id: workspaceId,
     hub_status: derived.status,
@@ -48,8 +55,12 @@ export function workspaceSummary(db: HubDatabase, row: Row, kitVersion?: string)
     open_decisions: open,
     problems: active?.problems.length ?? 0,
     orchestrator_state: snapshot?.orchestrator.herdr_state ?? null,
-    active_run: active ? { run_id: active.run_id, status: active.status } : null,
+    active_run: active ? { run_id: active.run_id, status: active.status, title: active.title } : null,
     archived: row.archived_at !== null,
+    upload: row.upload ? JSON.parse(String(row.upload)) : null,
+    orchestrator_last_activity_at: row.orchestrator_last_activity_at as string | null,
+    computer_id: null,
+    computer_online: true,
   };
 }
 
@@ -68,19 +79,19 @@ export function historyItems(db: HubDatabase, workspaceId: string): HistoryItem[
     if (decision.local_status === "DECIDED_BY_OPUS") {
       items.push({ id: `h_${decision.run_id}_${decision.decision_id}`, at: decision.opened_at, type: "routine", run_id: decision.run_id,
         decision_id: decision.decision_id, title: decision.title, choice: null, label: null, text: decision.answer?.note || decision.cancel_reason,
-        quote: null, channel: "opus", device: null, status: state.hub_status });
+        quote: null, channel: "opus", by: null, status: state.hub_status });
     } else if (decision.answer && ["hub", "chat"].includes(decision.answer.channel)) {
       const option = decision.options.find((candidate) => candidate.key === decision.answer?.choice);
       items.push({ id: `h_${decision.run_id}_${decision.decision_id}`, at: decision.answer.at, type: "answer", run_id: decision.run_id,
         decision_id: decision.decision_id, title: decision.title, choice: decision.answer.choice, label: option?.label ?? decision.answer.label,
-        text: decision.answer.note || null, quote: decision.answer.quote, channel: decision.answer.channel, device: decision.answer.by, status: state.hub_status });
+        text: decision.answer.note || null, quote: decision.answer.quote, channel: decision.answer.channel, by: decision.answer.by, status: state.hub_status });
     }
   }
   for (const command of db.listCommands(workspaceId)) {
     if (command.type !== "reply" && command.type !== "prompt") continue;
     items.push({ id: `h_${command.id}`, at: command.created_at, type: command.type, run_id: command.run_id, decision_id: command.decision_id,
       title: null, choice: null, label: null, text: typeof command.body.text === "string" ? command.body.text : null, quote: null,
-      channel: "hub", device: command.device, status: command.status });
+      channel: "hub", by: command.by, status: command.status });
   }
   return items.sort((a, b) => b.at.localeCompare(a.at) || b.id.localeCompare(a.id));
 }

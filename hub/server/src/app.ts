@@ -11,12 +11,14 @@ import { apiError } from "./http.ts";
 import { EventHub } from "./stream.ts";
 import { mountConnectorApi } from "./connector-api.ts";
 import { mountUserApi } from "./user-api.ts";
+import type { AssertionVerifier } from "./auth.ts";
 
 export interface AppDependencies {
   db: HubDatabase;
   clock?: () => number;
   config: ServerConfig;
   events?: EventHub;
+  assertionVerifier?: AssertionVerifier;
 }
 
 const mimeTypes: Record<string, string> = {
@@ -61,14 +63,14 @@ export function createApp(deps: AppDependencies): Hono {
   });
   app.use(`${API_PREFIX}/agent/*`, connectorAuth);
 
-  const apiDeps = { db: deps.db, clock, config: deps.config, events };
+  const apiDeps = { db: deps.db, clock, config: deps.config, events, assertionVerifier: deps.assertionVerifier };
   mountConnectorApi(app, apiDeps);
   mountUserApi(app, apiDeps);
 
   app.onError((error, c) => {
     const code = (error as { code?: keyof typeof ERRORS }).code;
     if (code && code in ERRORS) return apiError(c, code, error.message);
-    return c.json({ error: { code: "bad_request", message: "internal server error" } }, 500);
+    return c.json({ error: { code: "internal_error", message: "internal server error" } }, 500);
   });
 
   app.notFound((c) => {

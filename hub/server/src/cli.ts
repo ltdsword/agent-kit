@@ -1,20 +1,15 @@
 #!/usr/bin/env node
-import { randomBytes } from "node:crypto";
 import { mkdir, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { serve } from "@hono/node-server";
-import { DEFAULT_PORT, LIMITS } from "@agent-hub/protocol";
+import { DEFAULT_PORT } from "@agent-hub/protocol";
 import { createApp } from "./app.ts";
 import { loadConfig } from "./config.ts";
 import { HubDatabase } from "./db.ts";
+import { createRelayClient, readRelayStatus } from "./relay.ts";
 import { EventHub } from "./stream.ts";
-
-function code(): string {
-  const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
-  return [...randomBytes(8)].map((value) => alphabet[value % alphabet.length]).join("");
-}
 
 async function openDatabase() {
   const config = await loadConfig(process.env, { allowExternalHost: process.argv.includes("--i-know") });
@@ -26,6 +21,12 @@ async function serveHub(): Promise<void> {
   const { config, db } = await openDatabase();
   const events = new EventHub();
   const app = createApp({ db, config, events });
+  const relay = createRelayClient(app, db, config, events, Date.now);
+  db.sweepFinishedRuns(Date.now(), config.runRetentionDays ?? 60);
+  if (relay) {
+    relay.start();
+    process.stdout.write("For a TLS-inspecting company proxy, enable system CAs with NODE_USE_SYSTEM_CA=1 or --use-system-ca.\n");
+  } else process.stdout.write("Agent Hub relay off: computer.json is missing.\n");
   const server = serve({ fetch: app.fetch, hostname: config.host, port: config.port }, (info) => {
     process.stdout.write(`Agent Hub listening on http://${info.address}:${info.port}\n`);
   });
@@ -39,39 +40,34 @@ async function serveHub(): Promise<void> {
       events.publish({ type: "history", workspace_id: command.workspaceId, at, ref: command.id });
     }
   }, 10_000);
+  const retentionTimer = setInterval(() => db.sweepFinishedRuns(Date.now(), config.runRetentionDays ?? 60), 60 * 60_000);
+  let closing = false;
   const close = () => {
+    if (closing) return;
+    closing = true;
     clearInterval(offlineTimer);
-    server.close();
-    db.close();
+    clearInterval(retentionTimer);
+    const finish = () => server.close(() => db.close());
+    if (relay) void relay.stop().finally(finish);
+    else finish();
   };
   process.once("SIGINT", close);
   process.once("SIGTERM", close);
 }
 
-async function pair(name: string): Promise<void> {
-  const { config, db } = await openDatabase();
-  try {
-    const pairingCode = code();
-    db.createPairCode(pairingCode, name, Date.now(), Date.now() + LIMITS.pairCodeSeconds * 1000);
-    process.stdout.write(`${pairingCode}\nhttp://127.0.0.1:${DEFAULT_PORT}/#pair=${pairingCode}\n`);
-  } finally { db.close(); }
-}
-
-async function devices(args: string[]): Promise<void> {
-  const { db } = await openDatabase();
-  try {
-    if (args[0] === "revoke" && args[1]) {
-      if (!db.revokeDevice(args[1], Date.now())) throw new Error(`device not found: ${args[1]}`);
-      process.stdout.write(`Revoked ${args[1]}\n`);
-      return;
-    }
-    for (const device of db.listDevices()) process.stdout.write(`${device.id}\t${device.name}\t${device.created_at}\n`);
-  } finally { db.close(); }
+async function status(): Promise<void> {
+  const config = await loadConfig(process.env, { readOnly: true });
+  if (!config.computer) {
+    process.stdout.write("Relay transport: off\nConnected: no\nOwner: not configured\n");
+    return;
+  }
+  const relay = await readRelayStatus(config);
+  const connected = relay?.connected === true && relay.owner === config.computer.username;
+  process.stdout.write(`Relay transport: ${relay?.transport ?? "not connected"}\nConnected: ${connected ? "yes" : "no"}\nOwner: ${config.computer.username}\n`);
 }
 
 async function installService(): Promise<void> {
-  const configHome = process.env.XDG_CONFIG_HOME || join(homedir(), ".config");
-  const serviceDir = join(configHome, "systemd/user");
+  const serviceDir = join(homedir(), ".config/systemd/user");
   await mkdir(serviceDir, { recursive: true, mode: 0o700 });
   const cliPath = fileURLToPath(import.meta.url);
   const body = `[Unit]\nDescription=Agent Hub backend\nAfter=network.target\n\n[Service]\nType=simple\nExecStart=${process.execPath} ${cliPath} serve\nRestart=always\nRestartSec=2\n\n[Install]\nWantedBy=default.target\n`;
@@ -80,17 +76,11 @@ async function installService(): Promise<void> {
 }
 
 async function main(): Promise<void> {
-  const [command, ...args] = process.argv.slice(2);
+  const [command] = process.argv.slice(2);
   if (command === "serve") return serveHub();
-  if (command === "pair") {
-    const nameIndex = args.indexOf("--name");
-    const name = nameIndex >= 0 ? args[nameIndex + 1] : undefined;
-    if (!name) throw new Error("usage: agent-hub pair --name <device>");
-    return pair(name);
-  }
-  if (command === "devices") return devices(args);
+  if (command === "status") return status();
   if (command === "install-service") return installService();
-  process.stderr.write("Usage: agent-hub serve | pair --name N | devices [revoke ID] | install-service\n");
+  process.stderr.write(`Usage: agent-hub serve | status | install-service (default port ${DEFAULT_PORT})\n`);
   process.exitCode = 2;
 }
 
