@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Agent Hub v1 connector for an agent-kit workspace (stdlib only)."""
+"""Agent Hub v2 connector for an agent-kit workspace (stdlib only)."""
 from __future__ import annotations
 
 import argparse
@@ -25,7 +25,7 @@ import kitstart  # noqa: E402
 import scheduler as S  # noqa: E402
 
 CONNECTOR_VERSION = "0.1.0"
-PROTOCOL_VERSION = 1
+PROTOCOL_VERSION = 2
 ID_ALPHABET = "abcdefghijklmnopqrstuvwxyz234567"
 MAX_DOCUMENT_BYTES = 1024 * 1024
 MAX_SNAPSHOT_BYTES = 256 * 1024
@@ -134,7 +134,15 @@ def atomic_write(path: Path, content: str) -> None:
 
 
 def load_config(ws: Path) -> dict:
-    return S.load_config(ws)
+    cfg = S.load_config(ws)
+    hub = cfg.get("hub")
+    if isinstance(hub, dict):
+        upload = hub.get("upload")
+        if isinstance(upload, dict) and "agent_screens" in upload:
+            upload.setdefault("orchestrator_screen", upload["agent_screens"])
+            del upload["agent_screens"]
+            save_config(ws, cfg)
+    return cfg
 
 
 def save_config(ws: Path, cfg: dict) -> None:
@@ -147,6 +155,10 @@ def config_hub(cfg: dict) -> dict:
     hub = cfg.get("hub") or {}
     if not isinstance(hub, dict):
         raise ValueError("hub config must be an object")
+    upload = hub.get("upload")
+    if isinstance(upload, dict) and "agent_screens" in upload:
+        upload.setdefault("orchestrator_screen", upload["agent_screens"])
+        del upload["agent_screens"]
     return hub
 
 
@@ -188,11 +200,14 @@ def http_request(url: str, method="GET", body=None, key=None, timeout=10):
 def ping(url: str, key=None, timeout=10) -> dict:
     """Check the backend and validate its PingResponse."""
     _, response = http_request(url.rstrip("/") + "/api/v1/agent/ping", key=key, timeout=timeout)
-    return validate("PingResponse", response)
+    response = validate("PingResponse", response)
+    if not response["min_protocol"] <= PROTOCOL_VERSION <= response["protocol"]:
+        raise RuntimeError(f"Agent Hub protocol 2 is required; update agent-kit (server supports {response['protocol']})")
+    return response
 
 
 class HubClient:
-    """Small typed client for the v1 connector routes."""
+    """Small typed client for the v2 connector routes."""
 
     def __init__(self, url: str, key: str, workspace_id: str, timeout=10):
         self.base = url.rstrip("/") + "/api/v1/agent"
@@ -299,11 +314,11 @@ def _run_snapshot(state: dict, ws: Path, cfg: dict) -> dict:
     tasks = []
     for task in sorted((state.get("tasks") or {}).values(), key=lambda item: item.get("id", "")):
         tasks.append({
-            "id": task.get("id", ""), "title": task.get("title", ""), "status": task.get("status", "PENDING"),
+            "id": task.get("id", ""), "title": task.get("title", ""),
+            "summary": task.get("summary"), "status": task.get("status", "PENDING"),
             "worker": task.get("worker"), "depends_on": task.get("depends_on", []),
             "major_repairs": task.get("major_repairs", 0),
             "max_repairs": cfg.get("limits", {}).get("max_major_repairs", 2),
-            "owned_paths": task.get("owned_paths", []), "packet": task.get("packet"),
             "known_issues": task.get("known_issues")
         })
     verification = state.get("verify") or {}
@@ -335,7 +350,8 @@ def _run_snapshot(state: dict, ws: Path, cfg: dict) -> dict:
         finish = None
     report = ws / ".orchestrator" / "runs" / run_id / "final-report.md"
     return {
-        "run_id": run_id, "status": state.get("status", "RUNNING"), "created_at": state.get("created_at"),
+        "run_id": run_id, "title": state.get("title"), "goal": state.get("goal"),
+        "status": state.get("status", "RUNNING"), "created_at": state.get("created_at"),
         "base_branch": state.get("base_branch"), "integration_branch": state.get("integration_branch", ""),
         "gate": {"status": gate_status, "at": verification.get("at")}, "tasks": tasks,
         "problems": problems[:50], "report_path": relative_path(ws, report) if report.is_file() else None,
@@ -367,7 +383,7 @@ def make_snapshot(ws: Path, cfg: dict, session_id: str, runner=subprocess.run) -
     orch_name = kitstart.agent_name(repo_name)
     orch_record, orch_state = _herdr_record(orch_name, runner)
     upload = config_hub(cfg).get("upload", {})
-    screen_on = bool(upload.get("agent_screens", True))
+    screen_on = bool(upload.get("orchestrator_screen", True))
     screen_lines = config_hub(cfg).get("screen_lines", 40)
     orch_screen = _screen(orch_name, screen_lines, runner) if screen_on else None
     orch_session = ((orch_record or {}).get("agent_session") or {}).get("value")
@@ -381,7 +397,6 @@ def make_snapshot(ws: Path, cfg: dict, session_id: str, runner=subprocess.run) -
         worker = worker_states.get(slot, {})
         agent_name = worker.get("agent_name")
         record, herdr_state = _herdr_record(agent_name, runner)
-        screen = _screen(agent_name, screen_lines, runner) if screen_on else None
         worker_items.append({
             "slot": slot, "status": worker.get("status", "IDLE"),
             "status_reason": str(worker.get("status_reason") or "")[:500] or None,
@@ -390,9 +405,10 @@ def make_snapshot(ws: Path, cfg: dict, session_id: str, runner=subprocess.run) -
             "kind": cfg.get("worker", {}).get("kind", "codex"),
             "model": cfg.get("worker", {}).get("model", ""),
             "effort": cfg.get("worker", {}).get("reasoning_effort"),
-            "herdr_state": herdr_state, "since": _newest_worker_since(newest, slot, worker) if newest else None,
-            "screen": screen
+            "herdr_state": herdr_state, "since": _newest_worker_since(newest, slot, worker) if newest else None
         })
+    newest_activity = max((event.get("at") for state in runs for event in state.get("events", [])
+                           if isinstance(event.get("at"), str)), default=None)
     snapshot = {
         "protocol": PROTOCOL_VERSION, "workspace_id": config_hub(cfg).get("workspace_id"),
         "session_id": session_id, "taken_at": now(),
@@ -401,7 +417,8 @@ def make_snapshot(ws: Path, cfg: dict, session_id: str, runner=subprocess.run) -
                          "effort": orch.get("effort"), "herdr_state": orch_state,
                          "session_id": orch_session, "screen": orch_screen},
         "workers": worker_items, "scout": _scout_snapshot(newest),
-        "runs": [_run_snapshot(state, ws, cfg) for state in runs]
+        "runs": [_run_snapshot(state, ws, cfg) for state in runs],
+        "orchestrator_last_activity_at": newest_activity
     }
     snapshot = scrub(snapshot)
     return trim_snapshot(snapshot)
@@ -421,8 +438,6 @@ def trim_snapshot(snapshot: dict) -> dict:
         return len(canonical_bytes(snapshot))
     if size() > MAX_SNAPSHOT_BYTES:
         snapshot["orchestrator"]["screen"] = None
-        for worker in snapshot["workers"]:
-            worker["screen"] = None
     while size() > MAX_SNAPSHOT_BYTES and snapshot["runs"]:
         snapshot["runs"].pop()
     if size() > MAX_SNAPSHOT_BYTES:
@@ -459,11 +474,21 @@ def make_decisions(runs: list[dict]) -> list[dict]:
             decision = {
                 "run_id": run_id, "decision_id": decision_id, "kind": item.get("kind", "question"),
                 "task_id": task_id, "agent": agent, "title": item.get("title", ""),
-                "question": item.get("question", ""), "options": item.get("options", []),
+                "question": item.get("question", ""),
+                "options": [{"key": option.get("key", ""), "label": option.get("label", ""),
+                             "consequence": option.get("consequence")}
+                            for option in item.get("options", [])],
                 "recommend": item.get("recommend"), "followup": _decision_followup(item.get("followup")),
                 "local_status": item.get("status", "PENDING"), "answer": answer,
                 "consumed_by": item.get("consumed_by"), "opened_at": item.get("created_at"),
-                "cancel_reason": item.get("cancel_reason")
+                "cancel_reason": item.get("cancel_reason"),
+                "evidence": [{"code": evidence.get("code", ""), "note": evidence.get("note", ""),
+                              "bad": bool(evidence.get("bad", False))}
+                             for evidence in item.get("evidence", [])],
+                "note": item.get("note"),
+                "approval": (None if item.get("approval") is None else {
+                    "command": item["approval"].get("command", ""),
+                    "cwd": item["approval"].get("cwd"), "why": item["approval"].get("why", [])})
             }
             result.append(scrub(decision))
     return result
@@ -515,20 +540,6 @@ def document_refs(ws: Path, runs: list[dict]) -> dict[str, tuple[str | None, str
         run_dir = f".orchestrator/runs/{run_id}"
         refs[f"{run_dir}/final-report.md"] = (run_id, "final_report")
         refs[f"{run_dir}/final.diff"] = (run_id, "final_diff")
-        for task in (state.get("tasks") or {}).values():
-            packet = task.get("packet")
-            if packet:
-                refs.setdefault(packet, (run_id, "task_file"))
-                packet_path = safe_document_path(ws, packet)
-                if packet_path:
-                    try:
-                        packet_text = packet_path.read_text(encoding="utf-8", errors="replace")
-                    except OSError:
-                        packet_text = ""
-                    for repair in re.findall(r"- Fix file: `([^`]+)`", packet_text):
-                        refs.setdefault(repair, (run_id, "task_file"))
-                    for repair in packet_path.parent.glob(packet_path.stem + "-repair*.md"):
-                        refs.setdefault(relative_path(ws, repair), (run_id, "task_file"))
         for decision_id in (state.get("decisions") or {}):
             refs.setdefault(f"{run_dir}/decisions/{decision_id}.md", (run_id, "decision"))
         for item in (state.get("research") or {}).get("rounds", []):
@@ -548,8 +559,6 @@ def managed_document_kind(path: str) -> str | None:
         return "decision"
     if "/research/" in path:
         return "research"
-    if path.startswith("gen-tasks/") and path.endswith(".md"):
-        return "task_file"
     return None
 
 
@@ -619,6 +628,9 @@ def make_documents(ws: Path, runs: list[dict], cfg: dict, document_hashes: dict 
     for raw_path in remote:
         if raw_path in refs or raw_path in deleted or secret_path(raw_path):
             continue
+        if raw_path.startswith("gen-tasks/") and raw_path.endswith(".md"):
+            deleted.append(raw_path)
+            continue
         kind = managed_document_kind(raw_path)
         enabled = kind == "final_report" or (kind == "final_diff" and upload.get("diffs", True)) or \
             (kind is not None and kind not in ("final_report", "final_diff") and upload.get("documents", True))
@@ -634,9 +646,13 @@ def make_hello(ws: Path, cfg: dict, session_id: str) -> dict:
     if not isinstance(workspace_id, str):
         raise ValueError("hub.workspace_id is missing; run `agentctl enable` first")
     repo = S.project_root_for(ws, cfg)
+    upload = hub.get("upload") or {}
     hello = {"protocol": PROTOCOL_VERSION, "workspace_id": workspace_id, "session_id": session_id,
              "name": repo.name[:128], "path": str(ws.resolve())[:1024], "kit_version": kit_version(ws),
-             "connector_version": CONNECTOR_VERSION}
+             "connector_version": CONNECTOR_VERSION,
+             "upload": {"documents": bool(upload.get("documents", True)),
+                        "diffs": bool(upload.get("diffs", True)),
+                        "orchestrator_screen": bool(upload.get("orchestrator_screen", True))}}
     return validate("HelloRequest", scrub(hello))
 
 
@@ -923,7 +939,7 @@ def command_enable(ws: Path, url: str | None) -> int:
     hub["url"] = url or hub.get("url") or "http://127.0.0.1:7420"
     if not hub.get("workspace_id"):
         hub["workspace_id"] = new_id("ws_")
-    hub.setdefault("upload", {"documents": True, "diffs": True, "agent_screens": True})
+    hub.setdefault("upload", {"documents": True, "diffs": True, "orchestrator_screen": True})
     hub.setdefault("screen_lines", 40)
     cfg["hub"] = hub
     save_config(ws, cfg)

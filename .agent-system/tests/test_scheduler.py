@@ -9,6 +9,8 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from contextlib import redirect_stderr
+from io import StringIO
 from pathlib import Path
 from unittest import mock
 
@@ -126,7 +128,9 @@ class Base(unittest.TestCase):
 
     @staticmethod
     def task(tid, deps=(), trivial=False, owned=None):
-        return {"id": tid, "title": f"task {tid}", "depends_on": list(deps),
+        return {"id": tid, "title": f"Task {tid}",
+                "summary": f"Implement and validate the requested change for {tid}.",
+                "depends_on": list(deps),
                 "owned_paths": owned or [f"{tid.lower()}/"], "acceptance": [f"{tid} file exists"],
                 "packet": f"packets/{tid}.md", "trivial": trivial}
 
@@ -176,6 +180,60 @@ class Base(unittest.TestCase):
 
 
 class TestDag(Base):
+    def test_run_create_requires_object_title_goal_and_tasks(self):
+        system = self.repo / ".agent-system"
+        system.mkdir(exist_ok=True)
+        (system / "config.json").write_text(json.dumps(self.cfg))
+        tasks_file = Path(self.tmp.name) / "run-input.json"
+        cases = (({"tasks": [self.task("T1")]}, "title, goal"),
+                 ([self.task("T1")], "title, goal, tasks"))
+        for content, message in cases:
+            tasks_file.write_text(json.dumps(content))
+            error = StringIO()
+            with redirect_stderr(error):
+                code = S.main(["--workspace-root", str(self.repo), "run", "create", "--run", "r1",
+                               "--tasks", str(tasks_file)])
+            self.assertEqual(code, 1)
+            self.assertIn(message, error.getvalue())
+
+    def test_run_and_task_protocol2_rules(self):
+        with self.assertRaisesRegex(S.SchedulerError, "run id must match"):
+            self.s.create_run("R1", [self.task("T1")], title="Run", goal="Goal")
+        with self.assertRaisesRegex(S.SchedulerError, "run title must be 1..80"):
+            self.s.create_run("r1", [self.task("T1")], title="", goal="Goal")
+        with self.assertRaisesRegex(S.SchedulerError, "run title must be 1..80"):
+            self.s.create_run("r1", [self.task("T1")], title=None, goal="Goal")
+        with self.assertRaisesRegex(S.SchedulerError, "run goal must be 1..500"):
+            self.s.create_run("r1", [self.task("T1")], title="Run", goal="")
+        bad = self.task("T1")
+        bad["id"] = "T0"
+        with self.assertRaisesRegex(S.SchedulerError, "invalid task id"):
+            S.validate_tasks([bad], 3)
+        for title in ("lowercase title", "Title.", "T" * 61):
+            bad = self.task("T1")
+            bad["title"] = title
+            with self.assertRaisesRegex(S.SchedulerError, "title must be"):
+                S.validate_tasks([bad], 3)
+        for summary in ("x" * 19, "x" * 301):
+            bad = self.task("T1")
+            bad["summary"] = summary
+            with self.assertRaisesRegex(S.SchedulerError, "summary must be 20..300"):
+                S.validate_tasks([bad], 3)
+
+    def test_new_metadata_is_stored_and_old_state_loads(self):
+        state = self.s.create_run("r1", [self.task("T1")], title="Register users", goal="Validate new users.")
+        self.assertEqual((state["title"], state["goal"]), ("Register users", "Validate new users."))
+        self.assertEqual(state["tasks"]["T1"]["summary"], self.task("T1")["summary"])
+        path = self.s.store.state_path("r1")
+        legacy = json.loads(path.read_text())
+        legacy.pop("title")
+        legacy.pop("goal")
+        legacy["tasks"]["T1"].pop("summary")
+        path.write_text(json.dumps(legacy))
+        loaded = self.s.store.load("r1")
+        self.assertNotIn("title", loaded)
+        self.assertNotIn("summary", loaded["tasks"]["T1"])
+
     def test_cycle_missing_duplicate_self(self):
         with self.assertRaisesRegex(S.SchedulerError, "cycle"):
             S.validate_tasks([self.task("T1", ["T2"]), self.task("T2", ["T1"])], 3)
@@ -369,7 +427,7 @@ class TestRepairAndMerge(Base):
         self.s.report("r1", "done")
         rep = (self.s.store.run_dir("r1") / "final-report.md").read_text()
         self.assertIn("- T1: edge case Y still unhandled", rep)
-        self.assertIn("| T1 | task T1 | MERGED | 2 |", rep)
+        self.assertIn("| T1 | Task T1 | MERGED | 2 |", rep)
 
     def test_post_merge_failure_after_last_fix_round_blocks(self):
         self.cfg["gate"]["post_merge_check"] = PY_FAIL
@@ -676,6 +734,32 @@ class TestTaskFiles(Base):
 
 
 class TestDecisions(Base):
+    def test_decision_details_are_saved_and_shown(self):
+        self.s.create_run("r1", [self.task("T1")])
+        args = S.build_parser().parse_args([
+            "decision", "ask", "--run", "r1", "--kind", "worker_approval", "--task", "T1",
+            "--title", "Run the formatter?", "--question", "The worker requests formatting.",
+            "--option", "A=Allow :: formats the files", "--option", "B=Decline :: formatting remains undone",
+            "--evidence", "!src/tool.py:2 :: command changes files", "--evidence", "test log :: formatter is required",
+            "--note", "The task acceptance requires consistent formatting.",
+            "--approval-command", "python3 -m formatter", "--approval-cwd", "src",
+            "--approval-why", "The task's files need formatting.", "--approval-why", "The command stays in scope."])
+        result = S._decision_cli(self.s, args)
+        did = result["decision"]
+        decision = self.s.store.load("r1")["decisions"][did]
+        self.assertEqual(decision["options"][0]["consequence"], "formats the files")
+        self.assertEqual(decision["evidence"][0], {"code": "src/tool.py:2", "note": "command changes files", "bad": True})
+        self.assertEqual(decision["note"], "The task acceptance requires consistent formatting.")
+        self.assertEqual(decision["approval"]["cwd"], "src")
+        self.assertIn("consequence: formats the files", result["next"])
+        self.assertIn("Evidence:", result["next"])
+        self.assertIn("Recommendation note:", result["next"])
+        self.assertIn("Worker approval command:", result["next"])
+        markdown = (self.s.store.run_dir("r1") / "decisions" / f"{did}.md").read_text()
+        for text in ("consequence: formats the files", "## Evidence", "## Recommendation note",
+                     "## Worker approval", "The command stays in scope."):
+            self.assertIn(text, markdown)
+
     def blocked_task(self):
         self.s.create_run("r1", [self.task("T1", trivial=True)])
         self.s.dispatch_ready("r1", launch="none")
@@ -882,7 +966,7 @@ class TestHubScheduler(Base):
     def test_validate_config_and_doctor_hub_checks(self):
         self.cfg["hub"] = {"enabled": True, "url": "http://127.0.0.1:7420",
                            "workspace_id": "ws_abcdefghijklmnop",
-                           "upload": {"documents": True, "diffs": True, "agent_screens": True},
+                           "upload": {"documents": True, "diffs": True, "orchestrator_screen": True},
                            "screen_lines": 40}
         self.assertEqual(S.validate_config(self.cfg), [])
         (self.repo / ".agent-system").mkdir(exist_ok=True)

@@ -26,6 +26,7 @@ User request -> orchestrator: configured program + model (default Claude Code, O
 | `kitconfig.py` | `agent-kit config`: choose program/model/effort per role (flags, or interactive on a terminal) |
 | `kitstart.py` | `agent-kit start` / `continue`: open Herdr and launch the orchestrator with its program/model/effort, or resume its last chat |
 | `agentctl.py` | Agent Hub connector: enable the workspace, preview a sync, watch status and documents, and manage the connector |
+| `hubctl.py` | Agent Hub account, computer registration, local backend and proxy-setup commands |
 | `scripts/record-session.py` | Claude Code hook (SessionStart, UserPromptSubmit): saves the workspace's active chat id to `.orchestrator/orchestrator.json` |
 | `WORKER-RULES.md` | Rules every worker reads, whatever its program (the worker prompt points to it) |
 | `templates/ORCHESTRATOR.section.md` | Orchestrator rules, written into the workspace's `CLAUDE.md` and `AGENTS.md` |
@@ -61,8 +62,12 @@ Prefix every command with `python3 .agent-system/scheduler.py`. Add `--json` bef
 |---|---|
 | `doctor` | Validate config, tools, scout agent, Codex profile, cached model catalog |
 | `agentctl enable [--url URL]` / `sync --dry-run [--json]` / `watch [--interval 5] [--no-orchestrator]` / `status` / `stop` / `reset-id` | Configure and inspect the optional Agent Hub connector (`python3 .agent-system/agentctl.py <command>`) |
+| `agent-kit create-user --name=<u>` / `reset-password --name=<u>` | Admin-only account setup; prints the generated password once |
+| `agent-kit hub-login --name=<u> [--url=<proxy>] [--computer-name=<n>]` | Register this computer and enable the connector in the current workspace |
+| `agent-kit hub start\|stop\|status` | Start, stop or inspect the local Agent Hub backend |
+| `agent-kit proxy-setup [--rotate-admin-key] [--origins ...]` | Provision the shared Agent Hub proxy |
 | `pool init` / `pool show` | Create the worktree root, show slot paths/state; show per-slot model resolution |
-| `run create --run ID --tasks FILE [--base REF] [--request-id ID]` | Validate the task DAG (1..`max_tasks_per_request`), create `agent/integration-ID` worktree |
+| `run create --run ID --tasks FILE [--base REF] [--request-id ID]` | Validate run title/goal and task DAG (1..`max_tasks_per_request`), create `agent/integration-ID` worktree |
 | `run status --run ID` / `run list` / `run close --run ID --status BLOCKED\|FAILED --reason ...` | Inspect or close runs |
 | `research round --run ID --evidence FILE --question Q...` | Register a scout dossier (rejects a 4th round per request) |
 | `task new --name "<name>" [--date dd-mm-yy]` | Create `gen-tasks/<name>-<dd-mm-yy>.md` from the template (`-2`, `-3` on collision) |
@@ -70,7 +75,7 @@ Prefix every command with `python3 .agent-system/scheduler.py`. Add `--json` bef
 | `research readiness --run ID --status READY\|NOT_READY --preserve .. --contracts .. --interactions .. --testing .. --assumptions .. [--missing ..]` | Record the gate after each round |
 | `dispatch-ready --run ID [--launch herdr\|none] [--dry-run]` | Lease READY tasks to IDLE slots, create branches, start Codex in Herdr |
 | `relaunch --run ID --task T` | Restart a lost session for a RUNNING task (same worktree) |
-| `decision ask --run ID --kind K [--task T] --title .. --question .. --option A=.. --option B=.. [--recommend A]` | Opus asks the user (kinds: blocker, repair, scope_exception, abandon, worker_approval, question) |
+| `decision ask --run ID --kind K [--task T] --title .. --question .. --option 'A=label :: consequence' --option 'B=label :: consequence' [--evidence 'code :: note'] [--note ..]` | Opus asks the user with evidence and consequences; worker approvals also accept `--approval-command`, `--approval-cwd`, `--approval-why` |
 | `decision wait --run ID --id D1` / `decision list [--all]` / `decision cancel` | Wait for / list / withdraw decisions |
 | `decision record --run ID --id D<n> --choice K --quote "<user's reply>" [--followup K --value V]` | Record the user's answer (clicked or typed) with their exact words |
 | `decision routine --run ID --kind K [--task T] --action ".." --reason ".."` | Record a routine call Opus made itself, e.g. approving a worker's in-worktree command |
@@ -92,8 +97,8 @@ Prefix every command with `python3 .agent-system/scheduler.py`. Add `--json` bef
 ### tasks.json
 
 ```json
-{"tasks": [
-  {"id": "T1", "title": "Add email validation to registerUser", "depends_on": [],
+{"title": "Register email validation", "goal": "Reject invalid email addresses in registration.", "tasks": [
+  {"id": "T1", "title": "Add email validation to registerUser", "summary": "Reject malformed email addresses before creating a user and cover the response with a unit test.", "depends_on": [],
    "owned_paths": ["src/main/java/org/example/user/server/", "src/test/java/"],
    "acceptance": ["invalid email -> error response", "unit test covers it"],
    "packet": "gen-tasks/email-validation-16-10-26.md", "trivial": false}

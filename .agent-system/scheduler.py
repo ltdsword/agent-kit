@@ -63,7 +63,7 @@ REVIEW_VERDICTS = ("PASS", "MINOR_FIX", "MAJOR_FIX", "BLOCKED", "FAIL")
 READINESS_CHECKLIST = ("preserve", "contracts", "interactions", "testing", "assumptions")
 REQUIRED_REPORT_KEYS = ("task_id", "status", "base_sha", "head_sha", "commits",
                         "files_changed", "test_results", "risks", "not_done")
-REQUIRED_TASK_KEYS = ("id", "title", "depends_on", "owned_paths", "acceptance", "packet")
+REQUIRED_TASK_KEYS = ("id", "title", "summary", "depends_on", "owned_paths", "acceptance", "packet")
 FORBIDDEN_CONFIG_KEYS = ("fallback", "downgrade")
 SECRET_PATTERNS = (".env", ".env.*", "*.pem", "*.key", "*.p12", "*.pfx", "id_rsa*",
                    "id_ed25519*", "credentials*", "*.keystore", "auth.json")
@@ -82,9 +82,10 @@ MAX_WORKERS = 10
 # Never granted to workers through worker.writable_dirs.
 SENSITIVE_DIR_NAMES = {".ssh", ".gnupg", ".aws", ".codex", ".claude", ".config", ".git"}
 
-TASK_ID_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]{0,15}$")
+TASK_ID_RE = re.compile(r"^T[1-9][0-9]{0,2}$")
 # Lowercase so it can be embedded in branch names and herdr agent names (<=32 chars).
-RUN_ID_RE = re.compile(r"^[a-z][a-z0-9-]{0,19}$")
+RUN_ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]{1,39}$")
+_UNSET = object()
 
 
 def fix_round_summary(text: str) -> list[str]:
@@ -298,20 +299,30 @@ def is_worktree(path: Path) -> bool:
 
 # --------------------------------------------------------------------------- task DAG
 
-def validate_tasks(tasks: list, max_tasks: int) -> dict:
+def validate_tasks(tasks: list, max_tasks: int, allow_legacy: bool = False) -> dict:
     """Return {id: task} or raise. Rejects duplicates, unknown/self deps, cycles."""
     if not isinstance(tasks, list) or not 1 <= len(tasks) <= max_tasks:
         raise SchedulerError(f"a run needs 1..{max_tasks} tasks")
     by_id = {}
     for t in tasks:
-        missing = [k for k in REQUIRED_TASK_KEYS if k not in t]
+        if not isinstance(t, dict):
+            raise SchedulerError("each task must be an object")
+        required = tuple(k for k in REQUIRED_TASK_KEYS if not (allow_legacy and k == "summary"))
+        missing = [k for k in required if k not in t]
         if missing:
             raise SchedulerError(f"task {t.get('id', '?')} missing keys: {missing}")
         tid = t["id"]
-        if not isinstance(tid, str) or not TASK_ID_RE.match(tid):
+        if not allow_legacy and (not isinstance(tid, str) or not TASK_ID_RE.fullmatch(tid)):
             raise SchedulerError(f"invalid task id {tid!r}")
         if tid in by_id:
             raise SchedulerError(f"duplicate task id {tid}")
+        if not allow_legacy:
+            title = t["title"]
+            if not isinstance(title, str) or not 1 <= len(title) <= 60 or not title[0].isupper() or title.endswith("."):
+                raise SchedulerError(f"task {tid}: title must be 1..60 characters, start with an uppercase letter, and not end with a period")
+            summary = t.get("summary")
+            if not isinstance(summary, str) or not 20 <= len(summary) <= 300:
+                raise SchedulerError(f"task {tid}: summary must be 20..300 characters")
         if not isinstance(t["depends_on"], list) or not isinstance(t["owned_paths"], list):
             raise SchedulerError(f"task {tid}: depends_on and owned_paths must be lists")
         if not t["acceptance"]:
@@ -380,7 +391,8 @@ def validate_state(state: dict) -> None:
     if state.get("status") not in RUN_STATES:
         raise SchedulerError(f"invalid run status {state.get('status')}")
     tasks, workers = state["tasks"], state["workers"]
-    validate_tasks(list(tasks.values()), len(tasks))  # re-check DAG integrity
+    legacy = "title" not in state or "goal" not in state or any("summary" not in task for task in tasks.values())
+    validate_tasks(list(tasks.values()), len(tasks), allow_legacy=legacy)  # re-check DAG integrity
     for tid, t in tasks.items():
         if t["status"] not in TASK_STATES:
             raise SchedulerError(f"task {tid} has invalid status {t['status']}")
@@ -788,9 +800,16 @@ class Scheduler:
             self.store.save(state)
 
     # ---- run lifecycle
-    def create_run(self, run_id: str, tasks: list, base: str = "HEAD", request_id: str | None = None) -> dict:
-        if not RUN_ID_RE.match(run_id):
-            raise SchedulerError("run id must match [a-z][a-z0-9-]{0,19}")
+    def create_run(self, run_id: str, tasks: list, base: str = "HEAD", request_id: str | None = None,
+                   title=_UNSET, goal=_UNSET) -> dict:
+        if not isinstance(run_id, str) or not RUN_ID_RE.fullmatch(run_id):
+            raise SchedulerError("run id must match ^[a-z0-9][a-z0-9-]{1,39}$")
+        if title is not _UNSET and (not isinstance(title, str) or not 1 <= len(title) <= 80):
+            raise SchedulerError("run title must be 1..80 characters")
+        if goal is not _UNSET and (not isinstance(goal, str) or not 1 <= len(goal) <= 500):
+            raise SchedulerError("run goal must be 1..500 characters")
+        stored_title = None if title is _UNSET else title
+        stored_goal = None if goal is _UNSET else goal
         by_id = validate_tasks(tasks, self.cfg["limits"]["max_tasks_per_request"])
         with self.store.lock():
             if self.store.state_path(run_id).exists():
@@ -826,7 +845,8 @@ class Scheduler:
                                                             "architecture_ready")})
                 research["inherited_from"] = sorted(r["run_id"] for r in prior)
             state = {
-                "schema_version": SCHEMA_VERSION, "run_id": run_id, "request_id": request_id,
+                "schema_version": SCHEMA_VERSION, "run_id": run_id, "title": stored_title, "goal": stored_goal,
+                "request_id": request_id,
                 "status": "RUNNING", "created_at": now(), "workspace_root": str(self.workspace_root),
                 "project_root": str(self.project_root),
                 "base_sha": base_sha, "base_branch": base_branch,
@@ -834,7 +854,8 @@ class Scheduler:
                 "integration_base_sha": base_sha, "integration_sha": base_sha,
                 "research": research,
                 "tasks": {tid: {"id": tid, "title": t["title"], "status": "PENDING",
-                                "depends_on": list(t["depends_on"]), "owned_paths": list(t["owned_paths"]),
+                                "summary": t["summary"], "depends_on": list(t["depends_on"]),
+                                "owned_paths": list(t["owned_paths"]),
                                 "acceptance": list(t["acceptance"]), "packet": t["packet"],
                                 "trivial": bool(t.get("trivial", False)), "worker": None, "branch": None,
                                 "worktree": None, "base_sha": None, "head_sha": None, "commits": [],
@@ -1731,27 +1752,47 @@ class Scheduler:
 
     # ---- user-held decisions
     def decision_ask(self, run_id: str, kind: str, title: str, question: str, options: list[str],
-                     task: str | None = None, recommend: str | None = None, followup: dict | None = None) -> dict:
+                     task: str | None = None, recommend: str | None = None, followup: dict | None = None,
+                     evidence: list[str] | None = None, note: str | None = None,
+                     approval_command: str | None = None, approval_cwd: str | None = None,
+                     approval_why: list[str] | None = None) -> dict:
         """Open a decision for the USER. Opus asks in chat and records only the user's own reply."""
         if kind not in DECISION_KINDS:
             raise SchedulerError(f"kind must be one of {DECISION_KINDS}")
         parsed = []
         for o in options:
             key, sep, label = o.partition("=")
+            label, consequence_sep, consequence = label.partition("::")
             if not sep or not re.match(r"^[A-Za-z0-9]{1,8}$", key.strip()) or not label.strip():
                 raise SchedulerError(f"option {o!r} must look like KEY=description (KEY: 1-8 letters/digits)")
-            parsed.append({"key": key.strip(), "label": label.strip()})
+            parsed.append({"key": key.strip(), "label": label.strip(),
+                           "consequence": consequence.strip() if consequence_sep else None})
         if len(parsed) < 2 or len({o["key"] for o in parsed}) != len(parsed):
             raise SchedulerError("give at least 2 options with unique keys")
         if recommend and recommend not in {o["key"] for o in parsed}:
             raise SchedulerError(f"--recommend {recommend!r} is not an option key")
+        parsed_evidence = []
+        for item in evidence or []:
+            code, sep, detail = item.partition("::")
+            if not sep or not code.strip() or not detail.strip():
+                raise SchedulerError(f"evidence {item!r} must look like code :: note")
+            code = code.strip()
+            bad = code.startswith("!")
+            parsed_evidence.append({"code": code[1:].strip() if bad else code,
+                                    "note": detail.strip(), "bad": bad})
+        approval = None
+        if kind == "worker_approval" and any((approval_command is not None, approval_cwd is not None,
+                                               approval_why)):
+            approval = {"command": approval_command or "", "cwd": approval_cwd,
+                        "why": list(approval_why or [])}
         with self.txn(run_id) as state:
             if task and task not in state["tasks"]:
                 raise SchedulerError(f"unknown task {task}")
             decisions = state.setdefault("decisions", {})
             did = f"D{len(decisions) + 1}"
             d = {"id": did, "kind": kind, "task": task, "title": title, "question": question,
-                 "options": parsed, "recommend": recommend, "status": "PENDING", "created_at": now(),
+                 "options": parsed, "recommend": recommend, "evidence": parsed_evidence,
+                 "note": note, "approval": approval, "status": "PENDING", "created_at": now(),
                  "answer": None, "consumed_by": None, "followup": followup}
             decisions[did] = d
             path = self._write_decision_file(run_id, d)
@@ -1763,19 +1804,36 @@ class Scheduler:
                     "", "Waiting for the user's answer in chat."])
             log_event(state, "decision_opened", id=did, decision_kind=kind, task=task)
         hub_online = self._hub_online_hint()
+        lines = [f"{o['key']}: {o['label']}" +
+                 (f" — consequence: {o['consequence']}" if o["consequence"] else "") for o in parsed]
+        recommendation = next((o["label"] for o in parsed if o["key"] == recommend), None)
+        decision_text = (f"{title}\n{question}\n\n" + "\n".join(lines) + "\n\n"
+                         + self._decision_details_text(parsed_evidence, note, approval)
+                         + (f"Recommendation: {recommend}: {recommendation}.\n" if recommendation else ""))
         if hub_online:
-            lines = [f"{o['key']}: {o['label']}" for o in parsed]
-            recommendation = next((o["label"] for o in parsed if o["key"] == recommend), None)
             next_text = ("Ask in plain chat, then end your turn (do not use AskUserQuestion):\n\n"
-                         f"{title}\n{question}\n\n" + "\n".join(lines) + "\n\n"
-                         + (f"Recommendation: {recommend}: {recommendation}.\n" if recommendation else "")
+                         + decision_text
                          + f"Answer on the hub or reply here ({did} A/B/... or your own words).")
         else:
-            next_text = ("ask the user in chat (question, options, your recommendation) and end your turn; "
-                         "when they reply, record their exact words with `decision record --run "
+            next_text = ("ask the user in chat and end your turn;\n\n" + decision_text
+                         + "when they reply, record their exact words with `decision record --run "
                          f"{run_id} --id {did} --choice <KEY> --quote \"...\"`")
         return {"decision": did, "status": "PENDING", "file": self.rel(path), "hub": "online" if hub_online else "offline",
                 "next": next_text}
+
+    @staticmethod
+    def _decision_details_text(evidence: list[dict], note: str | None, approval: dict | None) -> str:
+        lines = []
+        if evidence:
+            lines.extend(["Evidence:"] + [f"- {'!' if item['bad'] else ''}{item['code']} :: {item['note']}"
+                                           for item in evidence])
+        if note:
+            lines.append(f"Recommendation note: {note}")
+        if approval:
+            lines.extend([f"Worker approval command: {approval['command']}",
+                          f"Worker approval cwd: {approval['cwd'] or '(current directory)'}"])
+            lines.extend(f"- Why: {why}" for why in approval["why"])
+        return "\n".join(lines) + ("\n\n" if lines else "")
 
     def _hub_online_hint(self) -> bool:
         """Read the connector's short-lived status hint without making decisions depend on it."""
@@ -1901,8 +1959,24 @@ class Scheduler:
         lines = [f"# {d['id']} ({d['kind']}): {d['title']}", "",
                  f"- Run: {run_id}" + (f" / task {d['task']}" if d["task"] else ""),
                  f"- Status: {d['status']}", f"- Opened: {d['created_at']}", "", d["question"], ""]
-        lines += [f"- `{o['key']}`: {o['label']}" + (" (recommended)" if o["key"] == d["recommend"] else "")
-                  for o in d["options"]]
+        for option in d["options"]:
+            line = f"- `{option['key']}`: {option['label']}"
+            if option["key"] == d["recommend"]:
+                line += " (recommended)"
+            if option.get("consequence"):
+                line += f" — consequence: {option['consequence']}"
+            lines.append(line)
+        if d.get("evidence"):
+            lines += ["", "## Evidence"]
+            lines += [f"- {'!' if item.get('bad') else ''}{item.get('code', '')} :: {item.get('note', '')}"
+                      for item in d["evidence"]]
+        if d.get("note"):
+            lines += ["", "## Recommendation note", d["note"]]
+        if d.get("approval"):
+            approval = d["approval"]
+            lines += ["", "## Worker approval", f"- Command: `{approval.get('command', '')}`",
+                      f"- Cwd: `{approval.get('cwd') or '(current directory)'}`"]
+            lines += [f"- Why: {why}" for why in approval.get("why", [])]
         if d.get("followup"):
             fu = d["followup"]
             lines += ["", f"If {' or '.join(fu['when'])}: {fu['question']}"]
@@ -2301,7 +2375,8 @@ def build_parser() -> argparse.ArgumentParser:
     rs = run.add_subparsers(dest="action", required=True)
     c = rs.add_parser("create", help="validate the task DAG (1..limits.max_tasks_per_request) and create the integration worktree")
     c.add_argument("--run", required=True)
-    c.add_argument("--tasks", required=True, type=Path, help='JSON file: {"tasks": [...]}')
+    c.add_argument("--tasks", required=True, type=Path,
+                   help='JSON file: {"title": "...", "goal": "...", "tasks": [...]}')
     c.add_argument("--base", default="HEAD")
     c.add_argument("--request-id", help="same id => same 3-round scout budget (default: run id)")
     s = rs.add_parser("status")
@@ -2354,8 +2429,14 @@ def build_parser() -> argparse.ArgumentParser:
     da.add_argument("--task")
     da.add_argument("--title", required=True)
     da.add_argument("--question", required=True, help="context: what happened, evidence, consequences")
-    da.add_argument("--option", action="append", default=[], required=True, help="KEY=description (repeat)")
+    da.add_argument("--option", action="append", default=[], required=True,
+                    help="KEY=label [:: consequence] (repeat)")
     da.add_argument("--recommend", help="option key Opus recommends")
+    da.add_argument("--evidence", action="append", default=[], help="code :: note; prefix code with ! for bad evidence (repeat)")
+    da.add_argument("--note", help="why Opus recommends its option")
+    da.add_argument("--approval-command", help="command requested by a worker")
+    da.add_argument("--approval-cwd", help="working directory for a worker command")
+    da.add_argument("--approval-why", action="append", default=[], help="why the worker needs the command (repeat)")
     dw = des.add_parser("wait", help="block until the user answers (run it in the background)")
     dw.add_argument("--run", required=True)
     dw.add_argument("--id", required=True)
@@ -2450,7 +2531,10 @@ def build_parser() -> argparse.ArgumentParser:
 
 def _decision_cli(s: "Scheduler", a) -> dict:
     if a.action == "ask":
-        return s.decision_ask(a.run, a.kind, a.title, a.question, a.option, a.task, a.recommend)
+        return s.decision_ask(a.run, a.kind, a.title, a.question, a.option, a.task, a.recommend,
+                              evidence=a.evidence, note=a.note,
+                              approval_command=a.approval_command, approval_cwd=a.approval_cwd,
+                              approval_why=a.approval_why)
     if a.action == "wait":
         return s.decision_wait(a.run, a.id, a.timeout)
     if a.action == "cancel":
@@ -2482,7 +2566,15 @@ def main(argv=None) -> int:
         elif a.cmd == "run":
             if a.action == "create":
                 data = json.loads(a.tasks.read_text())
-                st = s.create_run(a.run, data.get("tasks", data), a.base, a.request_id)
+                required = ("title", "goal", "tasks")
+                if not isinstance(data, dict):
+                    missing = list(required)
+                else:
+                    missing = [key for key in required if key not in data]
+                if missing:
+                    raise SchedulerError(f"run input missing keys: {', '.join(missing)}")
+                st = s.create_run(a.run, data["tasks"], a.base, a.request_id,
+                                  title=data["title"], goal=data["goal"])
                 out = s.status(st["run_id"])
             elif a.action == "status":
                 out = s.status(a.run)

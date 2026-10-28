@@ -4,6 +4,7 @@
       "Edit(.orchestrator/**/state.json)",
       "Edit(.orchestrator/**/decisions/**)",
       "Read(~/.config/agent-hub/**)",
+      "Read(~/.config/.wrangler/**)",
       "Edit(~/.config/agent-hub/**)",
       "Read(~/.local/share/agent-hub/**)",
       "Edit(~/.local/share/agent-hub/**)"

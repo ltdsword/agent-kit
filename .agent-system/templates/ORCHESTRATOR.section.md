@@ -25,8 +25,9 @@ How to operate (details: `.agent-system/GUIDE.md`, `.agent-system/README.md`):
    steps naming file + symbol + exact change, files to read, Boundaries (may/must not edit, may/must
    not run, what to do when blocked), exact commands. The worker implements well but should not
    have to reason about design (see the template's guidance).
-   Then write tasks.json (`"packet": "gen-tasks/..."`), `run create`, `dispatch-ready`. The worker
-   gets a short prompt: read that file, key facts, cautions.
+   Then write tasks.json as `{"title":"...","goal":"...","tasks":[...]}`. Run title/goal are 1..80/1..500 chars;
+   each task uses `T1`..`T999`, a 1..60 character capitalized title without a final period, and a 20..300 character summary.
+   Keep the packet, owned paths and acceptance fields; then `run create`, `dispatch-ready`.
 4. `scheduler.py wait --run <run>` until a report appears, then `collect`: it saves the worker's full
    diff to `.orchestrator/runs/<run>/reports/<T>.diff` and appends a "Worker result" section (with
    the diff) to the task file. Review per `prompts/review-checklist.md`, write the review report to
@@ -81,7 +82,9 @@ Only critical decisions go to the user; decide routine ones yourself (above). Fo
 (the user clicks an answer; Herdr, or Claude Remote Control, notifies them):
 1. `scheduler.py decision ask --run <run> --kind blocker|repair|scope_exception|abandon|worker_approval|question
    [--task T] --title "..." --question "<what happened, evidence, consequence of each option>"
-   --option A="..." --option B="..." --recommend A`.
+   --option "A=label :: consequence" --option "B=label :: consequence" --evidence "code :: note"
+   --note "why I recommend it" --recommend A`. Repeat evidence as needed; prefix a code with `!` for bad evidence.
+   For worker approvals, include `--approval-command`, `--approval-cwd` and repeatable `--approval-why`.
 2. **Asking:** use your program's multiple-choice question tool (Claude Code: AskUserQuestion; Codex:
    its multiple-choice question). Header `D<n>`, the question = what happened in 2-3 phone-sized
    lines, one option per decision option labelled "<KEY>: <label>" with a one-line consequence, your

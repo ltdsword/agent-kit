@@ -5,6 +5,8 @@
 #   agent-kit config [--folder=<repo>] [model options] [--show] [--list]
 #   agent-kit start  [--folder=<repo>] [--dry-run] [--no-attach]   open Herdr + launch the orchestrator
 #   agent-kit continue [--folder=<repo>] [--session=ID] [--force] [--dry-run] [--no-attach]
+#   agent-kit create-user|reset-password --name=<u> | hub-login --name=<u> [--url=<proxy>] [--computer-name=<n>]
+#   agent-kit hub start|stop|status | proxy-setup [--rotate-admin-key] [--origins ...]
 #                     restart the orchestrator with the current config, in its last chat
 #   model options: --model-orchestrator=M --effort-orchestrator=E --model-scout=M --effort-scout=E
 #                  --model-worker=M --effort-worker=E  (M: model or alias, or <program>/<model>)
@@ -26,8 +28,16 @@ SRC="$(cd "$(dirname "$SELF")/../.." && pwd -P)"   # kit home: holds .agent-syst
 usage() { sed -n '2,21p' "$SELF" | sed 's/^# \{0,1\}//'; }
 die() { echo "error: $*" >&2; exit 1; }
 
-CMD=""; DRY=0; FORCE_AGENT=0; FOLDER=""; TARGET=""; MODEL_ARGS=(); NO_ATTACH=0; FORCE=0; SESSION=""; INIT_GIT=0; SHOW_VERSION=0
+CMD=""; DRY=0; FORCE_AGENT=0; FOLDER=""; TARGET=""; MODEL_ARGS=(); NEW_ARGS=(); NO_ATTACH=0; FORCE=0; SESSION=""; INIT_GIT=0; SHOW_VERSION=0
+is_hub_command() {
+  case "$1" in
+    create-user|reset-password|hub-login|hub|proxy-setup) return 0 ;;
+    *) return 1 ;;
+  esac
+}
 while [ $# -gt 0 ]; do
+  if [ "$1" = --dry-run ]; then DRY=1; shift; continue; fi
+  if [ -n "$CMD" ] && is_hub_command "$CMD"; then NEW_ARGS+=("$1"); shift; continue; fi
   case "$1" in
     --model-*=*|--effort-*=*|--num-worker=*) MODEL_ARGS+=("$1") ;;
     --model-*|--effort-*|--num-worker) [ $# -ge 2 ] || die "$1 needs a value"; MODEL_ARGS+=("$1=$2"); shift ;;
@@ -45,7 +55,7 @@ while [ $# -gt 0 ]; do
     --version|-V) SHOW_VERSION=1 ;;
     -*) echo "unknown option: $1" >&2; usage >&2; exit 2 ;;
     *)
-      if [ -z "$CMD$TARGET" ] && { [ "$1" = create ] || [ "$1" = update ] || [ "$1" = config ] || [ "$1" = start ] || [ "$1" = continue ]; }; then CMD="$1"
+      if [ -z "$CMD$TARGET" ] && { [ "$1" = create ] || [ "$1" = update ] || [ "$1" = config ] || [ "$1" = start ] || [ "$1" = continue ] || is_hub_command "$1"; }; then CMD="$1"
       elif [ -z "$CMD$TARGET" ]; then TARGET="$1"
       else echo "unexpected argument: $1" >&2; exit 2
       fi ;;
@@ -91,7 +101,7 @@ cmd_version() {  # agent-kit --version [--folder=<repo>]
 
 copy_kit() {  # copy_kit <dest>: kit code, docs, prompts, scripts, tests, templates (never config.json)
   do_ mkdir -p "$1/.agent-system" "$1/.claude/agents"
-  for item in scheduler.py models.py kitconfig.py kitstart.py agentctl.py hubschema.py hub-protocol.schema.json WORKER-RULES.md README.md GUIDE.md docs prompts scripts tests templates; do
+  for item in scheduler.py models.py kitconfig.py kitstart.py agentctl.py hubctl.py hubschema.py hub-protocol.schema.json WORKER-RULES.md README.md GUIDE.md docs prompts scripts tests templates; do
     [ -e "$SRC/.agent-system/$item" ] || continue
     do_ rm -rf "$1/.agent-system/$item"
     do_ cp -r "$SRC/.agent-system/$item" "$1/.agent-system/$item"
@@ -440,8 +450,19 @@ cmd_start() {
   PYTHONDONTWRITEBYTECODE=1 exec python3 "$dest/.agent-system/kitstart.py" --workspace "$dest" ${args[@]+"${args[@]}"}
 }
 
+cmd_hubctl() {
+  if [ $DRY -eq 1 ]; then
+    printf '[dry-run] python3 %q --source %q' "$SRC/.agent-system/hubctl.py" "$SRC"
+    printf ' %q' "$CMD" "${NEW_ARGS[@]}"
+    printf '\n'
+  else
+    PYTHONDONTWRITEBYTECODE=1 python3 "$SRC/.agent-system/hubctl.py" --source "$SRC" "$CMD" "${NEW_ARGS[@]}"
+  fi
+}
+
 if [ $SHOW_VERSION -eq 1 ]; then cmd_version; exit 0; fi
 case "$CMD" in
+  create-user|reset-password|hub-login|hub|proxy-setup) cmd_hubctl ;;
   create) cmd_create ;;
   start|continue) cmd_start ;;
   update) cmd_update ;;
