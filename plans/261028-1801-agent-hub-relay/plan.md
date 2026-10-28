@@ -22,6 +22,8 @@ inputs: plans/reports/review-261028-1652-hub-ui-vs-backend.md, docs/agent-hub-we
 | D-8 | Run gets `title` + `goal`; run id rule. Task ids `T1, T2, ...`, `title` (short, imperative), `summary` (1-2 sentences). |
 | D-9 | For subagents the hub gets state + task id/title/summary only: **no worker screens, no `task_file` documents**. Orchestrator screen, decisions, research, final report and diff still go. Task content stays local (task file, reports, commits). |
 | D-10 | UI: the React design in `docs/agent-hub-web/` becomes `hub/web/`. |
+| D-11 | Relay: WebSocket first, automatic HTTPS long-poll fallback (company proxy intercepts TLS and drops upgrades). |
+| D-12 | Passwords: PBKDF2-SHA256, **20,000** iterations (fits the free plan's 10 ms CPU); `pw_iter` stored per user, re-hash on login if the default rises. |
 
 ## 2. Architecture
 
@@ -68,8 +70,7 @@ Routes:
 - `POST /api/v1/computers/register {username, password, name}` → `{computer_id, computer_key, proxy_public_key}` (hub-login).
 - `GET /api/v1/computers/:c/connect` (WebSocket upgrade, `Bearer <computer key>`) → DO.
 - `GET /api/v1/workspaces`, `/api/v1/workspaces/:ws/**`, `/api/v1/computers/:c/stream` (session token).
-- Passwords: PBKDF2-SHA256 via WebCrypto; iterations chosen by the P0 measurement to fit the free
-  plan's 10 ms CPU (target ≥ 100k if it fits; never < 20k; strict rate limit compensates).
+- Passwords: PBKDF2-SHA256 via WebCrypto, 20,000 iterations (D-12), 16-byte salt; login rate limit 5/min.
 
 Portability (`agent-kit proxy-setup`, runs `hub/proxy/scripts/setup.ts` with wrangler):
 create/find D1 `agent-hub`, write the gitignored `wrangler.local.jsonc` with its id, apply migrations,

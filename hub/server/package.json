@@ -14,7 +14,8 @@
   "dependencies": {
     "@agent-hub/protocol": "1.0.0",
     "@hono/node-server": "^2.1.5",
-    "hono": "^4.13.14"
+    "hono": "^4.13.14",
+    "undici": "^7.30.1"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",
