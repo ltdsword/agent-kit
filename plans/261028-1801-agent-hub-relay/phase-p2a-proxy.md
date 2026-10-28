@@ -8,7 +8,7 @@ Read first: `docs/hub-api.md` (v2: the contract), `hub/protocol/src/api.ts` (rou
 `hub/protocol/schemas/protocol.schema.json`, `plan.md` sections 2, 3, 10; the current `hub/proxy` spike.
 
 ## Files you own
-`hub/proxy/**`, `hub/package-lock.json` (only for your deps).
+`hub/proxy/**` (deps are pre-installed by the lead; no package.json/lockfile edits).
 
 ## Work
 

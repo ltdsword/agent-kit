@@ -8,7 +8,7 @@ Read first: `docs/hub-api.md` (v2), `hub/protocol/src/api.ts`, the schema, `plan
 the current `hub/server/src/*` and its test.
 
 ## Files you own
-`hub/server/**`, `hub/package-lock.json` (only for your deps).
+`hub/server/**` (`undici` is already a dependency; no package.json/lockfile edits).
 
 ## Work
 
