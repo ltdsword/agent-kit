@@ -138,3 +138,7 @@ Verdict: **PASS**
 
 - `.agent-system/scripts/verify.sh` exit 0 on agent/integration-hub2 at 9b7e8d378fb6 (log `.orchestrator/runs/hub2/logs/verify-1793199176.log`)
 - Task MERGED; run DONE
+
+## Finished (28/10/26 21:55)
+
+- merged into hub/plan (decision D1)

@@ -121,8 +121,8 @@ worker screens, pairing text, `review` docs. Deploy to Vercel with `VITE_HUB_URL
 
 | Step | Owner | Depends on | Status |
 |---|---|---|---|
-| P0 proxy spike: Worker + DO relay echo + D1 + PBKDF2 timing, local tests | codex | none | todo |
-| P0-deploy: `wrangler deploy` to ltdsword, measure CPU, pick iterations, WS through HTTPS_PROXY | lead + user OK | P0 | todo |
+| P0 proxy spike: Worker + DO relay echo + D1 + PBKDF2 timing, local tests | codex | none | done 2026-10-28 (run hub2, PASS) |
+| P0-deploy: `wrangler deploy` to ltdsword, measure CPU, pick iterations, WS through HTTPS_PROXY | lead + user OK | P0 | done 2026-10-28 (see 10) |
 | P1 protocol v2 + `docs/hub-api.md` v2 | lead | P0-deploy | todo |
 | P2a proxy full (auth, admin, register, routing, relay, setup script) | codex | P1 | todo |
 | P2b backend: relay client, assertion, remove pairing, runs upsert/retention, 15 d | codex | P1 | todo |
@@ -141,3 +141,17 @@ P2a, P2b, P2c, P3 run in parallel (disjoint paths). Old step A2 (command deliver
 | Corporate proxy blocks outbound WebSocket | P0-deploy test from this machine through `HTTPS_PROXY`; fallback: long-poll relay over HTTPS |
 | Proxy compromise exposes traffic in transit | accepted (proxy owner trusted); no bodies logged; assertion + owner check limit blast radius |
 | Free-plan request budget (100k/day) | stream instead of polling; adapter refetches only what changed |
+
+## 10. P0-deploy results (2026-10-28, https://agent-hub.ltdsword.workers.dev)
+
+| Check | Result |
+|---|---|
+| Durable Object (SQLite class) + D1 on the free plan | accepted at deploy; D1 insert works (2 ms CPU) |
+| PBKDF2-SHA256 CPU per request | 10k: 4 ms; 20k: 12 ms; 50k: 23 ms; 100k: 20-58 ms. All `ok` (free plan didn't kill > 10 ms, but that's not guaranteed) |
+| Relay round trip, direct internet | WebSocket connects, 4/4 relays 200, 0.4-1.1 s from this machine |
+| Relay through the company proxy | **fails**: the proxy intercepts TLS (cert issuer "ZaloGroup Proxy EC CA") and drops the WebSocket upgrade (Worker sees no Upgrade → 426). Plain HTTPS through it works. |
+
+Consequences for P1/P2:
+- Relay client: WebSocket first; automatic fallback to an **HTTPS long-poll relay** (`GET /computers/:c/poll` held ≤ 25 s, `POST /computers/:c/reply`) when the upgrade fails. Works through TLS-intercepting proxies. ~3.5k requests/day per idle computer.
+- Password hash: store iterations per user (`pw_iter`); default per the user's choice, re-hash on login when the default rises.
+- Note: traffic sent through a TLS-intercepting proxy is readable by its operator; prefer direct or WebSocket when available.
