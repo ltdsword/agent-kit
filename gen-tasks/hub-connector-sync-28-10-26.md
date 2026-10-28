@@ -67,3 +67,44 @@ the reason. Everything else: just do it.
 
 ---
 <!-- Do not edit above this line after dispatch. scheduler.py appends: Worker result, Review, Integration, Final gate. -->
+
+## Worker result - attempt 1 (28/10/26 15:33)
+
+- Status: **blocked** (worker worker-1, branch `agent/hub1-t1`)
+- Commits: none, changes left uncommitted (orchestrator commits after review)
+- Files: none
+- Scope: OK
+- Tests reported:
+  - `python3 -m unittest discover -s .agent-system/tests` -> exit 0
+  - `python3 -m unittest discover -s .agent-system/tests -p test_hubschema.py -v` -> exit 0
+- Risks:
+  - Blocked: the phase requires uploading review reports passed to mark-reviewed and says to find the paths recorded by the scheduler. In scheduler.py, mark_reviewed accepts report text only; the CLI reads --report and passes its contents, while state records verdict/notes and appends the text to the task packet. No review report path is stored in run state, so the requested review-document source cannot be derived without changing scheduler behavior beyond the plan.
+- Not done:
+  - Stopped before implementation as required by the task rules for a code/spec mismatch. Worker since derivation and sync mappings were not implemented; the spec identifies research evidence via research.rounds[].evidence_path and decision agent via tasks[task_id].worker, otherwise orchestrator.
+- Full diff: `.orchestrator/runs/hub1/reports/T1.diff`
+
+## Decision D1 needed (blocker) (28/10/26 15:33)
+
+**T1 blocked: spec asks for review-report files the scheduler doesn't store**
+
+Worker stopped before coding: phase A1 says upload review reports from paths recorded by mark-reviewed, but mark-reviewed stores only the text (appended to the task file). Fix: drop the separate review source (review text already ships inside task_file documents) and define worker since = time of the slot's last worker transition event; then relaunch T1 unchanged otherwise.
+
+- `A`: Clarify spec as proposed and relaunch T1 (recommended)
+- `B`: Stop T1, I'll rethink the spec
+
+Waiting for the user's answer in chat.
+
+## Decision D1 answered by the user (28/10/26 15:34)
+
+- Choice: **A**: Clarify spec as proposed and relaunch T1
+- User's words (chat): "A: Clarify spec, relaunch (Recommended)"
+
+## Clarification after block (decision D1: user chose A, 28/10/26)
+
+This overrides the phase file where they differ:
+- **Review documents:** drop the separate `review` source. `mark-reviewed` stores no report path;
+  the review text is appended to the task file, which is already uploaded as `task_file`. Never
+  produce `kind: "review"` documents. Don't change `mark-reviewed`.
+- **Worker `since`:** the `at` of the newest event in that run's `events` with `kind == "worker"`
+  and `worker == <slot>`. If there is none, use the slot's `session_started_at`, else `null`.
+- Everything else in the task file and the phase file stands. Start the implementation now.

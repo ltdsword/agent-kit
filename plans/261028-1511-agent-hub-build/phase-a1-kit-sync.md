@@ -69,9 +69,11 @@ Read first:
      `{n, at, kind, data: <the other keys>}`, in batches of 200.
    - **Documents** (plan section 9, `Document` $def):
      - Kinds: `final_report`, `final_diff`, `task_file` (the `packet` files of the run's tasks
-       and their repair files), `decision` (`decisions/D*.md`), `research` (evidence paths of
-       research rounds), `review` (review report paths recorded by `mark-reviewed`; find where the
-       scheduler stores them).
+       and their repair files; review text is appended inside them), `decision` (`decisions/D*.md`),
+       `research` (evidence paths of research rounds). No `review` documents: `mark-reviewed`
+       stores no report path (decision D1).
+     - Worker `since`: the `at` of the newest `kind == "worker"` event for that slot in the run;
+       else the slot's `session_started_at`; else null.
      - Respect `upload.*`.
      - Paths are workspace-relative; title = the first Markdown heading or the file name.
      - Format: `.diff` → `diff`, `.md` → `markdown`, else `text`.
