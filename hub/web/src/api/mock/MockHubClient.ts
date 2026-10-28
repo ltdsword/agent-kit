@@ -1,4 +1,4 @@
-import { decisionKey, PROMPT_LIMIT_BYTES, type HubClient, type Simulator } from '../client';
+import { decisionKey, PROMPT_LIMIT_CHARS, type HubClient, type Simulator } from '../client';
 import type {
   Answer, AnswerInput, Decision, HistoryEntry, HubSnapshot, Workspace,
 } from '../types';
@@ -8,8 +8,7 @@ import {
 
 /**
  * In-memory stand-in for `agent-hub serve` + the connector + the scheduler.
- * It reproduces the state machine of plan section 7.4 (Sent → Delivered → Applied,
- * waiting / rejected / cancelled / superseded / answered elsewhere) and section 8 (prompt delivery).
+ * It reproduces the protocol v2 decision and command state machines for development and demos.
  */
 export interface MockDelays {
   load: number;
@@ -71,18 +70,19 @@ export class MockHubClient implements HubClient, Simulator {
     const d = this.decision(key);
     if (!d || !OPEN_STATES.has(d.status)) throw new Error('decision_not_open');
     const ws = this.workspace(workspaceId);
+    if (!ws.computerOnline) throw new Error('computer_offline');
     if (ws.status === 'STOPPED') throw new Error('workspace_stopped');
     const opt = d.options.find((o) => o.key === input.choice);
     if (!opt) throw new Error('invalid_choice');
     const answer: Answer = {
       choice: opt.key, label: opt.label, note: input.note?.trim() || undefined,
       branch: input.branch, push: d.kind === 'finish' && opt.key === 'A',
-      channel: 'hub', device: 'laptop', at: Date.now(),
+      channel: 'hub', by: 'owner', at: Date.now(),
     };
     const online = ws.status === 'RUNNING';
     this.patchDecision(key, { answer, status: online ? 'SENT' : 'WAITING', rejectReason: undefined });
     this.addHistory({
-      type: 'answer', workspaceId, runId, decisionId, choice: opt.key, label: opt.label, channel: 'hub', device: 'laptop',
+      type: 'answer', workspaceId, runId, decisionId, choice: opt.key, label: opt.label, channel: 'hub', by: 'owner',
       extra: input.branch ? `into ${input.branch}${answer.push ? ', push' : ''}` : undefined, quote: answer.note,
     });
     if (online) this.deliver(key);
@@ -94,8 +94,9 @@ export class MockHubClient implements HubClient, Simulator {
     const key = decisionKey(workspaceId, runId, decisionId);
     const d = this.decision(key);
     if (!d || !OPEN_STATES.has(d.status)) throw new Error('decision_not_open');
+    if (!this.workspace(workspaceId).computerOnline) throw new Error('computer_offline');
     this.patchDecision(key, { status: 'REPLY_SENT', replyText: text });
-    this.addHistory({ type: 'answer', workspaceId, runId, decisionId, quote: text, replyOnly: true, channel: 'hub_reply', device: 'laptop' });
+    this.addHistory({ type: 'answer', workspaceId, runId, decisionId, quote: text, replyOnly: true, channel: 'hub', by: 'owner' });
     // Opus reads the reply and records it as an option, with the user's words as the quote.
     this.later(this.delays.reply, () => {
       const cur = this.decision(key);
@@ -103,7 +104,7 @@ export class MockHubClient implements HubClient, Simulator {
       const opt = cur.options.find((o) => o.key === cur.recommend) ?? cur.options[0]!;
       this.patchDecision(key, {
         status: 'DELIVERED', deliveredAt: Date.now(),
-        answer: { choice: opt.key, label: opt.label, quote: text, channel: 'hub_reply', device: 'laptop', at: Date.now() },
+        answer: { choice: opt.key, label: opt.label, quote: text, channel: 'hub', by: 'owner', at: Date.now() },
       });
       this.notice(`Opus recorded your reply on ${decisionId} as ${opt.key}, with your words.`);
       this.later(this.delays.apply, () => this.apply(key));
@@ -113,8 +114,10 @@ export class MockHubClient implements HubClient, Simulator {
   async sendPrompt(workspaceId: string, text: string): Promise<void> {
     this.assertConnected();
     const ws = this.workspace(workspaceId);
+    if (ws.status === 'STOPPED') throw new Error('workspace_not_online');
+    if (!ws.computerOnline) throw new Error('computer_offline');
     if (ws.status !== 'RUNNING') throw new Error('workspace_not_online');
-    if (new TextEncoder().encode(text).length > PROMPT_LIMIT_BYTES) throw new Error('prompt_too_large');
+    if (text.length > PROMPT_LIMIT_CHARS) throw new Error('prompt_too_large');
     const id = `p${Date.now()}${Math.floor(Math.random() * 1000)}`;
     this.set((s) => ({ ...s, prompts: [{ id, workspaceId, text, status: 'QUEUED', createdAt: Date.now() }, ...s.prompts] }));
     this.addHistory({ type: 'prompt', workspaceId, runId: ws.run?.id ?? '', promptId: id });
@@ -148,7 +151,6 @@ export class MockHubClient implements HubClient, Simulator {
       const k = decisionKey(target.workspaceId, target.runId, target.id);
       list.push({ label: `Opus cancels ${target.id}`, run: () => this.simCancel(k) });
       list.push({ label: `You answer ${target.id} in the terminal`, run: () => this.simTerminal(k) });
-      list.push({ label: `Opus supersedes ${target.id} with a new one`, run: () => this.simSupersede(k) });
     }
     list.push({ label: 'A new decision arrives', run: () => this.simNewDecision() });
     const thrift = this.workspace('ws_k3m9q2');
@@ -257,7 +259,6 @@ export class MockHubClient implements HubClient, Simulator {
           run: w.run && { ...w.run, problems: w.run.problems.filter((p) => p.decisionId !== 'D4') },
           workers: w.workers.map((x) => (x.slot === 'worker-3' ? {
             ...x, status: 'BUSY', live: 'working', sinceAt: Date.now(), reason: undefined,
-            screen: choice === 'A' ? '$ npm install zod\nadded 1 package in 2s\n• Wiring schema into RegisterUserRequest' : '• Install denied. Using the existing validator.\n• Rewriting schema without zod',
           } : x)),
         }));
       }
@@ -282,7 +283,7 @@ export class MockHubClient implements HubClient, Simulator {
     if (this.decision('ws_k3m9q2/r4/D6')) return;
     const done = (id: string) => {
       const d = this.decision(`ws_k3m9q2/r4/${id}`);
-      return !!d && ['APPLIED', 'ANSWERED_ELSEWHERE', 'CANCELLED', 'SUPERSEDED'].includes(d.status);
+      return !!d && ['APPLIED', 'ANSWERED_ELSEWHERE', 'CANCELLED'].includes(d.status);
     };
     if (done('D3') && done('D4')) this.finishRun();
   }
@@ -310,7 +311,7 @@ export class MockHubClient implements HubClient, Simulator {
         ...w,
         orchestrator: { ...w.orchestrator, state: 'idle', lastActivityAt: now },
         run: w.run && { ...w.run, status: 'DONE', gate: 'PASSED', problems: [], tasks: w.run.tasks.map((t) => ({ ...t, status: 'MERGED' })) },
-        workers: w.workers.map((x) => ({ ...x, status: 'IDLE', live: 'idle', taskId: undefined, sinceAt: now, screen: undefined })),
+        workers: w.workers.map((x) => ({ ...x, status: 'IDLE', live: 'idle', taskId: undefined, sinceAt: now })),
       })),
       documents: [
         { id: 'doc_r4_report', workspaceId: 'ws_k3m9q2', runId: 'r4', kind: 'final_report', name: 'final-report.md', title: 'Final report', format: 'markdown', truncated: false, updatedAt: now, content: REPORT_R4, bytes: REPORT_R4.length },
@@ -348,24 +349,6 @@ export class MockHubClient implements HubClient, Simulator {
     this.addHistory({ type: 'answer', workspaceId: d.workspaceId, runId: d.runId, decisionId: d.id, choice: answer.choice, label: answer.label, channel: 'terminal', quote: answer.quote });
     this.notice(`${d.id} was answered in the terminal.`);
     this.later(1800, () => this.effects({ ...d, answer }));
-  }
-
-  private simSupersede(key: string): void {
-    const d = this.decision(key);
-    if (!d) return;
-    this.seq += 1;
-    const id = `D${this.seq}`;
-    const next: Decision = {
-      ...d, id, status: 'OPEN', openedAt: Date.now(), answer: undefined, replyText: undefined, rejectReason: undefined,
-      title: d.id === 'D3' ? 'T2: rebase done. Keep T1’s error wording or T2’s?' : `${d.title} (asked again)`,
-      question: 'Opus asked again with narrower options after the situation changed.',
-      evidence: [],
-      options: d.id === 'D3'
-        ? [{ key: 'A', label: 'Keep T1’s wording', consequence: '“Name must be at most 64 characters.” stays as is.' }, { key: 'B', label: 'Use T2’s wording', consequence: '“Name is too long.” replaces it in both places.' }]
-        : d.options,
-    };
-    this.set((s) => this.touch({ ...s, decisions: s.decisions.map((x) => (x === d ? { ...x, status: 'SUPERSEDED' as const, supersededBy: id } : x)).concat(next) }));
-    this.notice(`${d.id} was superseded by ${id}.`);
   }
 
   private simNewDecision(): void {

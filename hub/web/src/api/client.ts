@@ -1,4 +1,5 @@
 import type { AnswerInput, HubSnapshot } from './types';
+import { LIMITS } from './protocol';
 
 /**
  * The only way the UI talks to a backend.
@@ -25,7 +26,7 @@ export interface Simulator {
   actions(context: { workspaceId?: string; decisionKey?: string }): { label: string; run: () => void }[];
 }
 
-export const PROMPT_LIMIT_BYTES = 8 * 1024;
+export const PROMPT_LIMIT_CHARS = LIMITS.textChars;
 
 export function decisionKey(workspaceId: string, runId: string, decisionId: string): string {
   return `${workspaceId}/${runId}/${decisionId}`;

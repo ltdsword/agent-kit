@@ -16,6 +16,7 @@ import { ConfirmSheet } from './ConfirmSheet';
 
 const ERRORS: Record<string, string> = {
   hub_unreachable: 'The hub can’t be reached. Nothing was sent.',
+  computer_offline: 'The computer is offline. Nothing was sent.',
   decision_not_open: 'This decision is no longer open. Nothing was sent.',
   workspace_stopped: 'This workspace isn’t running. Nothing was sent.',
 };
@@ -23,7 +24,6 @@ const ERRORS: Record<string, string> = {
 const INTERRUPTED: Partial<Record<DecisionStatus, (id: string, t: string) => string>> = {
   CANCELLED: (id, t) => `Opus cancelled ${id} at ${t} while you were reading. Nothing was sent.`,
   ANSWERED_ELSEWHERE: (id) => `You answered ${id} in the terminal while this was open. The form closed.`,
-  SUPERSEDED: (id) => `Opus replaced ${id} with a new decision while you were reading. Nothing was sent.`,
 };
 
 export function DecisionPage() {
@@ -58,6 +58,7 @@ export function DecisionPage() {
 
   const open = NEEDS_YOU.has(d.status);
   const lost = hub.connection === 'lost';
+  const computerOffline = !w.computerOnline;
 
   const run = async (fn: () => Promise<void>) => {
     setError(null); setBusy(true); ownAction.current = true;
@@ -72,7 +73,6 @@ export function DecisionPage() {
     : d.kind === 'worker_approval' ? (form.picked === 'A' ? 'Review: approve once' : 'Review: deny')
     : `Review answer ${form.picked}`;
   const status = DECISION_STATUS[d.status];
-  const statusLabel = d.status === 'SUPERSEDED' && d.supersededBy ? `Superseded by ${d.supersededBy}` : undefined;
 
   return (
     <div className="fade-in stack" style={{ width: '100%', maxWidth: 720, margin: '0 auto', flex: 1 }}>
@@ -92,7 +92,7 @@ export function DecisionPage() {
         <header className="stack" style={{ gap: 10 }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
             <KindChip kind={d.kind} />
-            <StatusChip look={status} label={statusLabel} />
+            <StatusChip look={status} />
             <span className="t-small" style={{ marginLeft: 'auto' }}>opened {ago(d.openedAt, now)}</span>
           </div>
           <div className="meta">
@@ -103,7 +103,7 @@ export function DecisionPage() {
           <h1 style={{ fontSize: 22, lineHeight: 1.3, fontWeight: 600, letterSpacing: '-.01em' }}>{d.title}</h1>
         </header>
 
-        <DecisionContext decision={d} showScreen={open} />
+        <DecisionContext decision={d} />
 
         {(!open || d.status === 'REJECTED') && <DecisionStatusCard decision={d} workspace={w} />}
         {d.status === 'REJECTED' && (
@@ -112,6 +112,7 @@ export function DecisionPage() {
           </Banner>
         )}
         {error && <Banner tone="error" icon="alert" role="alert">{error}</Banner>}
+        {computerOffline && <Banner tone="stale" icon="wifi-off" role="status">Computer offline. Answers and replies are disabled until it reconnects.</Banner>}
 
         {open && <DecisionForm decision={d} workspace={w} form={form} />}
       </div>
@@ -122,12 +123,13 @@ export function DecisionPage() {
           {!lost && d.kind === 'finish' && form.branch && form.picked !== 'C' && (
             <span className="t-small" style={{ textAlign: 'center' }}>Merge {d.runId} into {form.branch}{form.picked === 'A' ? ', then push' : ', no push'}</span>
           )}
+          {computerOffline && <span className="t-small" style={{ textAlign: 'center' }}>Computer offline. Answers are disabled.</span>}
           {form.chatOpen ? (
-            <button type="button" className="btn btn-primary btn-block" style={{ minHeight: 48, fontSize: 15 }} disabled={!form.canReply || lost || busy} onClick={() => void reply()}>
+            <button type="button" className="btn btn-primary btn-block" style={{ minHeight: 48, fontSize: 15 }} disabled={!form.canReply || lost || computerOffline || busy} onClick={() => void reply()}>
               <Icon name="send" />Send reply to Opus
             </button>
           ) : (
-            <button type="button" className="btn btn-primary btn-block" style={{ minHeight: 48, fontSize: 15 }} disabled={!form.canReview || lost} onClick={() => setConfirm(true)}>
+            <button type="button" className="btn btn-primary btn-block" style={{ minHeight: 48, fontSize: 15 }} disabled={!form.canReview || lost || computerOffline} onClick={() => setConfirm(true)}>
               <Icon name="arrow-right" />{reviewLabel}
             </button>
           )}

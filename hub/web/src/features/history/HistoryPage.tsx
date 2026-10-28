@@ -20,7 +20,7 @@ export function HistoryPage() {
   const hub = useHub();
   const now = useNow(60_000);
   const w = workspaceById(hub, wsId);
-  const [kinds, setKinds] = useState<Record<Kind, boolean>>({ answer: true, prompt: true, routine: true });
+  const [kinds, setKinds] = useState<Record<Kind, boolean>>({ answer: true, prompt: false, routine: true });
   const [run, setRun] = useState('all');
   const [query, setQuery] = useState('');
 

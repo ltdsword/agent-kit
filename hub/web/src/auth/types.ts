@@ -30,14 +30,17 @@ export interface AuthClient {
   subscribe(listener: (s: AuthState) => void): () => void;
   /** Throws `invalid_credentials`, `rate_limited` or `hub_unreachable`. */
   signIn(username: string, password: string, remember: boolean): Promise<void>;
+  /** Throws `invalid_credentials`, `weak_password`, or `hub_unreachable`. */
+  changePassword(current: string, next: string): Promise<void>;
   signOut(reason?: SignedOutReason): void;
 }
 
 /** Error codes thrown by AuthClient.signIn, mapped to text on the login page. */
 export const AUTH_ERRORS: Record<string, string> = {
   invalid_credentials: 'Wrong username or password.',
+  weak_password: 'Choose a longer password.',
   rate_limited: 'Too many tries. Wait a minute, then try again.',
-  hub_unreachable: 'The hub can’t be reached. Is your computer on and connected?',
+  hub_unreachable: 'The hub can’t be reached. Try again when the connection is back.',
 };
 
 export function initialsOf(name: string): string {

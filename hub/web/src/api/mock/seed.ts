@@ -116,30 +116,6 @@ diff --git a/docs/api/users.md b/docs/api/users.md
 +\`page\` is deprecated and will be removed in the next release.
 `;
 
-const PLAN_T2 = `# Task plan: T2 Validate email format
-
-Written by Opus for worker-2. Fix round 1 and the review are appended at the end.
-
-## Goal
-
-\`registerUser\` rejects malformed email addresses with a 400 and a clear message.
-
-## Owned paths
-
-- \`src/main/java/org/example/user/server/\`
-- \`src/test/java/org/example/user/\`
-
-## Acceptance
-
-- [x] invalid email gives an error response
-- [ ] plus-addressing (\`a+b@x.io\`) is accepted
-- [ ] unit tests cover both
-
-## Fix round 1 (Opus)
-
-The regex rejected plus-addressing. Use \`EmailValidator.isValid\` instead of the pattern.
-`;
-
 const DECISION_D2 = `# D2 · question · T4
 
 **Question:** T4 touches the client SDK as well as the API. Narrow it?
@@ -172,20 +148,13 @@ const RESEARCH_R4_2 = `# Research dossier · r4 round 2
 READY: contracts and tests are clear.
 `;
 
-const REVIEW_T2 = `# Review · T2 round 1
-
-**Verdict:** MAJOR_FIX
-
-- \`UserHandlerTest.rejectsPlusAddress\` fails on \`a+b@x.io\`
-- \`UserHandler.java:57\` uses a hand-written regex
-`;
-
 export function seedWorkspaces(now: number): Workspace[] {
   return [
     {
       id: 'ws_k3m9q2', name: 'thrift-demo', path: '~/work/thrift-demo.workspace', status: 'RUNNING',
       lastSeenAt: now, kitVersion: '0.9.4', archived: false,
-      uploads: { documents: true, diffs: true, agentScreens: true },
+      computerId: 'c_aaaaaaaaaaaaaaaa', computerOnline: true,
+      uploads: { documents: true, diffs: true, orchestratorScreen: true },
       orchestrator: {
         program: 'Claude Code', model: 'Claude Opus 5.5', effort: 'high', state: 'idle', lastActivityAt: now - 2 * MIN,
         screen: [
@@ -200,12 +169,12 @@ export function seedWorkspaces(now: number): Workspace[] {
         ].join('\n'),
       },
       run: {
-        id: 'r4', status: 'RUNNING', integrationBranch: 'agent/integration-r4', gate: 'NOT_RUN',
+        id: 'r4', title: 'User name validation', goal: 'Validate user names and email addresses before storing records.', status: 'RUNNING', integrationBranch: 'agent/integration-r4', gate: 'NOT_RUN',
         tasks: [
-          { id: 'T1', title: 'Limit name length', status: 'RUNNING', worker: 'worker-1', dependsOn: [] },
-          { id: 'T2', title: 'Validate email format', status: 'FIX_REQUIRED', worker: 'worker-2', fixRound: '1/2', dependsOn: [] },
-          { id: 'T4', title: 'Request schema with zod', status: 'RUNNING', worker: 'worker-3', dependsOn: [] },
-          { id: 'T3', title: 'Update user API docs', status: 'PENDING', dependsOn: ['T1', 'T2'] },
+          { id: 'T1', title: 'Limit name length', summary: 'Keep user names within the documented character limit.', status: 'RUNNING', worker: 'worker-1', dependsOn: [] },
+          { id: 'T2', title: 'Validate email format', summary: 'Reject malformed email addresses before storing user records.', status: 'FIX_REQUIRED', worker: 'worker-2', fixRound: '1/2', dependsOn: [] },
+          { id: 'T4', title: 'Request schema with zod', summary: 'Validate request fields with a shared input schema.', status: 'RUNNING', worker: 'worker-3', dependsOn: [] },
+          { id: 'T3', title: 'Update user API docs', summary: 'Document the updated user input validation behavior.', status: 'PENDING', dependsOn: ['T1', 'T2'] },
         ],
         problems: [
           { text: 'T1 no screen change for 9 min.', note: 'No decision opened.', severity: 'warn' },
@@ -218,33 +187,31 @@ export function seedWorkspaces(now: number): Workspace[] {
         { id: 'r1', status: 'FAILED', outcome: 'closed after abandon D2', date: '20 Oct' },
       ],
       workers: [
-        { slot: 'worker-1', status: 'BUSY', taskId: 'T1', live: 'working', sinceAt: now - 12 * MIN, model: 'gpt-6-luna xhigh',
-          screen: '• Edited UserHandler.java (+14 -3)\n• Running ./gradlew test --tests UserHandlerTest\n  BUILD SUCCESSFUL in 41s' },
-        { slot: 'worker-2', status: 'BUSY', taskId: 'T2', live: 'idle', sinceAt: now - 6 * MIN, model: 'gpt-6-luna xhigh',
-          screen: '• Fix round 1 done, report written\n  reports/T2.json\n› waiting for review' },
+        { slot: 'worker-1', status: 'BUSY', taskId: 'T1', live: 'working', sinceAt: now - 12 * MIN, model: 'gpt-6-luna xhigh' },
+        { slot: 'worker-2', status: 'BUSY', taskId: 'T2', live: 'idle', sinceAt: now - 6 * MIN, model: 'gpt-6-luna xhigh' },
         { slot: 'worker-3', status: 'BLOCKED', taskId: 'T4', live: 'blocked', sinceAt: now - 14 * MIN, model: 'gpt-6-luna xhigh',
-          reason: 'approval prompt: npm install zod',
-          screen: '  Would you like to run the following command?\n  $ npm install zod\n› 1. Yes, proceed\n  2. No, tell Codex what to do differently' },
+          reason: 'approval prompt: npm install zod' },
       ],
       scout: {
         roundsUsed: 2, maxRounds: 3, ready: true,
         rounds: [
-          { name: 'Round 1', questions: ['Where is user input validated today?', 'Which tests cover UserHandler?'], docId: 'doc_res2' },
-          { name: 'Round 2', questions: ['Does the API doc generator read Javadoc?', 'Is zod already a dependency?'], docId: 'doc_res2' },
+          { name: 'Round 1', questions: ['Where is user input validated today?', 'Which tests cover UserHandler?'], docId: '.orchestrator/runs/r4/research/round-1.md' },
+          { name: 'Round 2', questions: ['Does the API doc generator read Javadoc?', 'Is zod already a dependency?'], docId: '.orchestrator/runs/r4/research/round-2.md' },
         ],
       },
     },
     {
       id: 'ws_q7l2a1', name: 'ledger-sync', path: '~/work/ledger-sync.workspace', status: 'OFFLINE',
       lastSeenAt: now - 4 * MIN, kitVersion: '0.9.4', archived: false,
-      uploads: { documents: true, diffs: false, agentScreens: true },
+      computerId: 'c_bbbbbbbbbbbbbbbb', computerOnline: true,
+      uploads: { documents: true, diffs: false, orchestratorScreen: true },
       orchestrator: { program: 'Claude Code', model: 'Claude Opus 5.5', effort: 'high', state: 'unknown', lastActivityAt: now - 4 * MIN },
       run: {
-        id: 'r7', status: 'RUNNING', integrationBranch: 'agent/integration-r7', gate: 'NOT_RUN',
+        id: 'r7', title: 'Ledger migration', goal: 'Deduplicate bank transactions and migrate them safely.', status: 'RUNNING', integrationBranch: 'agent/integration-r7', gate: 'NOT_RUN',
         tasks: [
-          { id: 'T1', title: 'Parse bank CSV export', status: 'MERGED', worker: 'worker-1', dependsOn: [] },
-          { id: 'T2', title: 'Dedupe transactions', status: 'PASSED', worker: 'worker-2', dependsOn: ['T1'] },
-          { id: 'T3', title: 'Run ledger migration', status: 'BLOCKED', worker: 'worker-1', dependsOn: ['T1'] },
+          { id: 'T1', title: 'Parse bank CSV export', summary: 'Read exported bank rows into normalized transactions.', status: 'MERGED', worker: 'worker-1', dependsOn: [] },
+          { id: 'T2', title: 'Dedupe transactions', summary: 'Remove duplicate transactions using stable bank identifiers.', status: 'PASSED', worker: 'worker-2', dependsOn: ['T1'] },
+          { id: 'T3', title: 'Run ledger migration', summary: 'Migrate the normalized transactions into the ledger.', status: 'BLOCKED', worker: 'worker-1', dependsOn: ['T1'] },
         ],
         problems: [{ text: 'T3 blocked 22 min.', note: 'Needs a database the sandbox can’t reach.', severity: 'blocked', decisionId: 'D2' }],
       },
@@ -254,7 +221,8 @@ export function seedWorkspaces(now: number): Workspace[] {
     {
       id: 'ws_p8x1d0', name: 'billing-api', path: '~/work/billing-api.workspace', status: 'STOPPED',
       lastSeenAt: at('18:20', 1), kitVersion: '0.9.1', archived: false,
-      uploads: { documents: true, diffs: true, agentScreens: false },
+      computerId: null, computerOnline: false,
+      uploads: { documents: true, diffs: true, orchestratorScreen: false },
       orchestrator: { program: 'Claude Code', model: 'Claude Opus 5.5', effort: 'high', state: 'off', lastActivityAt: at('18:20', 1) },
       pastRuns: [
         { id: 'r2', status: 'MERGED', outcome: 'merged into main, pushed to origin/main', date: 'yesterday' },
@@ -289,7 +257,6 @@ export function seedDecisions(now: number): Decision[] {
       approval: {
         command: 'npm install zod', cwd: 'worktrees/worker-3',
         why: ['Downloads a package from the npm registry.', 'Writes to ~/.npm, outside the worktree.', 'T4’s task file doesn’t allow installs, so Opus can’t approve it as routine.'],
-        screen: '• Added RegisterUserRequest schema draft\n  └ src/main/ts/validation/register.ts\n• zod is not in package.json yet\n\n  Would you like to run the following command?\n  $ npm install zod\n› 1. Yes, proceed\n  2. No, and tell Codex what to do differently',
       },
       opusNote: 'T4’s plan names zod, and D2 kept T4 to the API layer. One install; the lockfile change stays in the worktree.',
       options: [
@@ -326,26 +293,25 @@ export function seedPrompts(): Prompt[] {
 
 export function seedHistory(): HistoryEntry[] {
   return [
-    { id: 'h1', workspaceId: 'ws_k3m9q2', at: at('11:58'), type: 'answer', runId: 'r4', decisionId: 'D2', choice: 'B', label: 'Narrow T4 to the API layer', channel: 'hub', device: 'phone', docId: 'doc_d2' },
+    { id: 'h1', workspaceId: 'ws_k3m9q2', at: at('11:58'), type: 'answer', runId: 'r4', decisionId: 'D2', choice: 'B', label: 'Narrow T4 to the API layer', channel: 'hub', by: 'alice', docId: 'doc_d2' },
     { id: 'h2', workspaceId: 'ws_k3m9q2', at: at('11:40'), type: 'prompt', runId: 'r4', promptId: 'p3' },
     { id: 'h3', workspaceId: 'ws_k3m9q2', at: at('11:31'), type: 'routine', runId: 'r4', text: 'Opus approved ./gradlew test for worker-1', reason: 'build inside worktree' },
-    { id: 'h4', workspaceId: 'ws_k3m9q2', at: at('10:20'), type: 'routine', runId: 'r4', text: 'Opus sent fix round 1/2 to worker-2 (T2)', reason: 'email regex rejects plus-addressing', docId: 'doc_rev_t2' },
+    { id: 'h4', workspaceId: 'ws_k3m9q2', at: at('10:20'), type: 'routine', runId: 'r4', text: 'Opus sent fix round 1/2 to worker-2 (T2)', reason: 'email regex rejects plus-addressing' },
     { id: 'h5', workspaceId: 'ws_k3m9q2', at: at('10:05'), type: 'answer', runId: 'r4', decisionId: 'D1', choice: 'A', label: 'Use the existing EmailValidator', channel: 'terminal', quote: 'A, go ahead' },
     { id: 'h6', workspaceId: 'ws_k3m9q2', at: at('09:12'), type: 'prompt', runId: 'r4', promptId: 'p1' },
-    { id: 'h7', workspaceId: 'ws_k3m9q2', at: at('16:12', 3), type: 'answer', runId: 'r3', decisionId: 'D4', choice: 'A', label: 'Merge and push', extra: 'into main', channel: 'hub', device: 'laptop', docId: 'doc_r3_report' },
-    { id: 'h8', workspaceId: 'ws_k3m9q2', at: at('14:03', 3), type: 'answer', runId: 'r3', decisionId: 'D2', choice: 'B', label: 'Cursor pagination', channel: 'hub_reply', device: 'laptop', quote: 'use cursor, not offset, clients scroll forever' },
+    { id: 'h7', workspaceId: 'ws_k3m9q2', at: at('16:12', 3), type: 'answer', runId: 'r3', decisionId: 'D4', choice: 'A', label: 'Merge and push', extra: 'into main', channel: 'hub', by: 'alice', docId: 'doc_r3_report' },
+    { id: 'h8', workspaceId: 'ws_k3m9q2', at: at('14:03', 3), type: 'answer', runId: 'r3', decisionId: 'D2', choice: 'B', label: 'Cursor pagination', channel: 'hub', by: 'alice', quote: 'use cursor, not offset, clients scroll forever', replyOnly: true },
     { id: 'h9', workspaceId: 'ws_k3m9q2', at: at('13:40', 3), type: 'routine', runId: 'r3', text: 'Opus fixed import order in T2 itself (MINOR_FIX)', reason: 'formatting only' },
-    { id: 'h10', workspaceId: 'ws_q7l2a1', at: at('10:48'), type: 'answer', runId: 'r7', decisionId: 'D1', choice: 'A', label: 'Accept change outside T2’s files', channel: 'hub', device: 'phone' },
+    { id: 'h10', workspaceId: 'ws_q7l2a1', at: at('10:48'), type: 'answer', runId: 'r7', decisionId: 'D1', choice: 'A', label: 'Accept change outside T2’s files', channel: 'hub', by: 'alice' },
   ];
 }
 
 export function seedDocuments(): HubDocument[] {
   const doc = (d: Omit<HubDocument, 'bytes'>): HubDocument => ({ ...d, bytes: new TextEncoder().encode(d.content).length });
   return [
-    doc({ id: 'doc_plan_t2', workspaceId: 'ws_k3m9q2', runId: 'r4', kind: 'task_file', name: 'email-validation-28-10-26.md', title: 'Task plan · T2', format: 'markdown', truncated: false, updatedAt: at('11:52'), content: PLAN_T2 }),
     doc({ id: 'doc_d2', workspaceId: 'ws_k3m9q2', runId: 'r4', kind: 'decision', name: 'D2.md', title: 'Decision record · D2', format: 'markdown', truncated: false, updatedAt: at('11:58'), content: DECISION_D2 }),
-    doc({ id: 'doc_res2', workspaceId: 'ws_k3m9q2', runId: 'r4', kind: 'research', name: 'r4-research-2.md', title: 'Research dossier · round 2', format: 'markdown', truncated: false, updatedAt: at('09:40'), content: RESEARCH_R4_2 }),
-    doc({ id: 'doc_rev_t2', workspaceId: 'ws_k3m9q2', runId: 'r4', kind: 'review', name: 'review-T2-round-1.md', title: 'Review report · T2 round 1', format: 'markdown', truncated: false, updatedAt: at('10:20'), content: REVIEW_T2 }),
+    doc({ id: '.orchestrator/runs/r4/research/round-1.md', workspaceId: 'ws_k3m9q2', runId: 'r4', kind: 'research', name: 'round-1.md', title: 'Research dossier · round 1', format: 'markdown', truncated: false, updatedAt: at('09:10'), content: RESEARCH_R4_2.replace('round 2', 'round 1') }),
+    doc({ id: '.orchestrator/runs/r4/research/round-2.md', workspaceId: 'ws_k3m9q2', runId: 'r4', kind: 'research', name: 'round-2.md', title: 'Research dossier · round 2', format: 'markdown', truncated: false, updatedAt: at('09:40'), content: RESEARCH_R4_2 }),
     doc({ id: 'doc_r3_report', workspaceId: 'ws_k3m9q2', runId: 'r3', kind: 'final_report', name: 'final-report.md', title: 'Final report', format: 'markdown', truncated: false, updatedAt: at('16:00', 3), content: REPORT_R3 }),
     doc({ id: 'doc_r3_diff', workspaceId: 'ws_k3m9q2', runId: 'r3', kind: 'final_diff', name: 'final.diff', title: 'Total diff', format: 'diff', truncated: true, updatedAt: at('16:00', 3), content: DIFF_R3 }),
     doc({ id: 'doc_r6_report', workspaceId: 'ws_q7l2a1', runId: 'r6', kind: 'final_report', name: 'final-report.md', title: 'Final report', format: 'markdown', truncated: false, updatedAt: at('15:00', 9), content: REPORT_R3.replace(/r3/g, 'r6') }),

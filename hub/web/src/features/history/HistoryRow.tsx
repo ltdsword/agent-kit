@@ -13,7 +13,7 @@ export interface HistoryView {
   title: string;
   quote?: string;
   sub: string;
-  deviceIcon?: IconName;
+  channelIcon?: IconName;
   chip?: React.ReactNode;
   link?: { to: string; label: string };
   /** Lower-cased text for search. */
@@ -26,19 +26,19 @@ export function viewHistory(e: HistoryEntry, hub: HubSnapshot): HistoryView {
   if (e.type === 'answer') {
     const d = findDecision(hub, e.workspaceId, e.runId, e.decisionId);
     const title = e.replyOnly ? `You replied to ${e.decisionId}` : `You chose ${e.choice}: ${e.label}${e.extra ? ` (${e.extra})` : ''}`;
-    const channel = e.channel === 'terminal' ? 'terminal' : `hub · ${e.device ?? 'unknown device'}`;
-    const link = d ? { to: decisionPath(d), label: e.decisionId } : e.docId ? { to: `/w/${e.workspaceId}/docs/${e.docId}`, label: `${e.decisionId} record` } : undefined;
+    const channel = e.channel === 'terminal' ? 'terminal' : e.channel === 'routine' ? 'routine' : `hub · ${e.by ?? 'unknown user'}`;
+    const link = d ? { to: decisionPath(d), label: e.decisionId } : e.docId ? { to: `/w/${e.workspaceId}/docs/${encodeURIComponent(e.docId)}`, label: `${e.decisionId} record` } : undefined;
     const sub = [channel, run].filter(Boolean).join(' · ');
     return {
       cls: 'h-answer', icon: e.replyOnly ? 'message' : 'check', title, quote: e.quote, sub, link,
-      deviceIcon: e.channel === 'terminal' ? 'terminal' : e.device === 'phone' ? 'phone' : 'laptop',
+      channelIcon: e.channel === 'terminal' ? 'terminal' : e.channel === 'routine' ? 'hub' : 'message',
       search: `${title} ${e.quote ?? ''} ${sub} ${e.decisionId}`.toLowerCase(),
     };
   }
   if (e.type === 'prompt') {
     const p = hub.prompts.find((x) => x.id === e.promptId);
     return {
-      cls: 'h-prompt', icon: 'message', title: 'You prompted Opus', quote: p?.text, sub: run,
+      cls: 'h-prompt', icon: 'message', title: 'You prompted Opus', quote: p?.text, sub: [e.by, run].filter(Boolean).join(' · '), channelIcon: 'message',
       chip: p ? <StatusChip look={PROMPT_STATUS[p.status]} /> : undefined,
       search: `prompt ${p?.text ?? ''} ${run}`.toLowerCase(),
     };
@@ -46,7 +46,7 @@ export function viewHistory(e: HistoryEntry, hub: HubSnapshot): HistoryView {
   const sub = `Opus routine call · reason: ${e.reason}${run ? ` · ${run}` : ''}`;
   return {
     cls: 'h-routine', icon: 'hub', title: e.text, sub,
-    link: e.docId ? { to: `/w/${e.workspaceId}/docs/${e.docId}`, label: 'Review report' } : undefined,
+    link: e.docId ? { to: `/w/${e.workspaceId}/docs/${encodeURIComponent(e.docId)}`, label: 'Open document' } : undefined,
     search: `${e.text} ${sub}`.toLowerCase(),
   };
 }
@@ -71,7 +71,7 @@ export function HistoryRow({ entry, compact }: { entry: HistoryEntry; compact?: 
         {!compact && (
           <div className="meta">
             {v.chip}
-            {v.deviceIcon && <Icon name={v.deviceIcon} size="sm" />}
+            {v.channelIcon && <Icon name={v.channelIcon} size="sm" />}
             <span>{v.sub}</span>
           </div>
         )}

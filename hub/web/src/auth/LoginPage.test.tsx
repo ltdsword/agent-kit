@@ -40,6 +40,10 @@ describe('Sign in', () => {
     expect(await screen.findByRole('heading', { name: 'thrift-demo' })).toBeTruthy();
 
     await user.click(screen.getByRole('button', { name: /account: owner/i }));
+    await user.click(screen.getByRole('menuitem', { name: 'Change password' }));
+    expect(await screen.findByRole('heading', { name: 'Change password' })).toBeTruthy();
+
+    await user.click(screen.getByRole('button', { name: /account: owner/i }));
     await user.click(screen.getByRole('menuitem', { name: /sign out/i }));
     expect(await screen.findByText('You signed out of this browser.')).toBeTruthy();
   });

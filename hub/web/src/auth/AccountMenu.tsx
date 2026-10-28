@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+import { Link } from 'react-router-dom';
 import { Icon } from '@/components/Icon';
 import { hhmm } from '@/lib/time';
 import { useAuth, useAuthClient } from './AuthProvider';
@@ -36,10 +37,13 @@ export function AccountMenu() {
             <Avatar initials={user.initials} size={36} />
             <span className="stack" style={{ minWidth: 0 }}>
               <span className="trunc" style={{ fontWeight: 600 }}>{user.username}</span>
-              <span className="t-small">Signed in on this device</span>
+              <span className="t-small">Signed in as {user.username}</span>
             </span>
           </div>
           <p className="t-small">Session ends {expires.toLocaleDateString('en-GB', { day: 'numeric', month: 'short' })} at {hhmm(expiresAt)}, or when you sign out.</p>
+          <Link className="btn btn-block" role="menuitem" to="/account/password" onClick={() => setOpen(false)}>
+            Change password
+          </Link>
           <button type="button" className="btn btn-block" role="menuitem" onClick={() => client.signOut()}>
             <Icon name="power" />Sign out
           </button>

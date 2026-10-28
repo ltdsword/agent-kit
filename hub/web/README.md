@@ -17,22 +17,14 @@ workspace offline, connection lost, held prompts, run finishes, session expires,
 
 ## Sign-in and Vercel
 
-The UI is a static site: deploy it to Vercel with `VITE_HUB_URL=https://<your-backend>` and open it from
-any computer or phone. Everyone signs in with **username + password**; signed-out visitors only ever see
-the login page, and after sign-in they land on the page they first opened.
+The browser signs in with a username and password. Session tokens are sent in the `Authorization` header;
+workspace data stays on the computers connected to the proxy. The UI supports mock mode when
+`VITE_HUB_URL` is unset.
 
-The browser only keeps a session token ("Keep me signed in" → 30 days in localStorage, otherwise until the
-tab closes). **Security lives in the backend, not here.** It must:
-
-- expose `POST /api/v1/auth/login {username, password, remember}` → `{token, expires_at, username}`
-  (401 `invalid_credentials`, 429 `rate_limited`) and `POST /api/v1/auth/logout`;
-- store passwords hashed (argon2id or bcrypt), rate-limit logins, and check the token on every API call
-  (and on `/api/v1/stream?token=…`, since EventSource can't send headers);
-- answer 401 when a token expires: the UI then signs out and shows "Your session expired";
-- be reachable from wherever the browser is (Vercel only serves files; it never sees your data);
-- offer a local reset, e.g. `agent-hub passwd` (the login page points to it).
-
-The calls are in `src/auth/HttpAuthClient.ts` (draft until the backend exists).
+For Vercel, set the project Root Directory to `hub`, Build Command to
+`npm run build -w @agent-hub/web`, and Output Directory to `web/dist`. Set
+`VITE_HUB_URL=https://agent-hub.<subdomain>.workers.dev`. Add the deployed Vercel URL to the proxy's
+`ALLOWED_ORIGINS` setting. `vercel.json` rewrites app routes to `/index.html`.
 
 ## Where things are
 
@@ -40,11 +32,11 @@ The calls are in `src/auth/HttpAuthClient.ts` (draft until the backend exists).
 src/
 ├── auth/                     sign-in: AuthClient interface, mock + HTTP, LoginPage, AccountMenu
 ├── api/
-│   ├── types.ts              domain model (mirrors the backend protocol). Change the schema here first.
+│   ├── types.ts              UI domain model
 │   ├── client.ts             HubClient interface: the ONLY way the UI talks to a backend
 │   ├── index.ts              createClients(): mock or HTTP auth + data, picked by VITE_HUB_URL
 │   ├── mock/                 MockHubClient (backend + connector + scheduler simulation) and seed data
-│   └── http/HttpHubClient.ts real client: REST /api/v1 + SSE /api/v1/stream, 10 s polling fallback
+│   └── http/                 protocol v2 adapter, REST client and fetch-stream SSE parser
 ├── state/
 │   ├── HubProvider.tsx       useHub() (live snapshot), useClient(), useNow()
 │   └── selectors.ts          pure functions over the snapshot (needsYou, inFlight, …)
@@ -71,7 +63,7 @@ src/
 | A status label or icon | `lib/status.ts` |
 | An icon | `components/Icon.tsx` (add a path to `PATHS`) |
 | What the backend sends | `api/types.ts`, then follow the TypeScript errors |
-| The real backend calls | `api/http/HttpHubClient.ts` only |
+| The real backend calls | `api/http/HttpHubClient.ts` and `api/http/adapter.ts` |
 | Decision form behaviour | `features/decision/useDecisionForm.ts` (state) / `DecisionForm.tsx` (markup) |
 | Demo data | `api/mock/seed.ts` |
 | Sign-in calls / session storage | `auth/HttpAuthClient.ts` |

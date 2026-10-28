@@ -35,6 +35,8 @@ export function DocumentPage() {
 
       {doc.format === 'diff' ? (
         <DiffView doc={doc} />
+      ) : doc.format === 'text' ? (
+        <pre className="term" style={{ padding: 20, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', fontFamily: 'var(--font-mono)' }}>{doc.content}</pre>
       ) : (
         <article className="card" style={{ padding: '24px 20px' }}>
           <div className="md md-body">

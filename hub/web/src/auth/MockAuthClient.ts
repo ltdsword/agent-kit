@@ -1,4 +1,5 @@
 import { initialsOf, type AuthClient, type AuthState, type SignedOutReason } from './types';
+import { LIMITS } from '@/api/protocol';
 
 const DAY = 24 * 60 * 60 * 1000;
 
@@ -11,6 +12,7 @@ export class MockAuthClient implements AuthClient {
   private state: AuthState;
   private listeners = new Set<(s: AuthState) => void>();
   private failures = 0;
+  private password = MockAuthClient.DEMO_PASSWORD;
   private readonly delay: number;
 
   constructor(opts: { signedIn?: boolean; delay?: number } = {}) {
@@ -24,12 +26,19 @@ export class MockAuthClient implements AuthClient {
   async signIn(username: string, password: string, remember: boolean): Promise<void> {
     await new Promise((r) => setTimeout(r, this.delay));
     if (this.failures >= 5) throw new Error('rate_limited');
-    if (!username.trim() || password !== MockAuthClient.DEMO_PASSWORD) {
+    if (!username.trim() || password !== this.password) {
       this.failures += 1;
       throw new Error('invalid_credentials');
     }
     this.failures = 0;
     this.set(this.sessionFor(username.trim(), remember));
+  }
+
+  async changePassword(current: string, next: string): Promise<void> {
+    await new Promise((resolve) => setTimeout(resolve, this.delay));
+    if (current !== this.password) throw new Error('invalid_credentials');
+    if (next.length < LIMITS.passwordMinChars) throw new Error('weak_password');
+    this.password = next;
   }
 
   signOut(reason: SignedOutReason = 'signed_out'): void {

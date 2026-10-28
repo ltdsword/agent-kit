@@ -1,11 +1,6 @@
-/**
- * Domain types shared by the whole UI.
- * They mirror the backend protocol (DECISION-HUB-PLAN.md sections 7.4, 8, 11).
- * When the backend schema changes, change it here first; TypeScript will point at every place to update.
- */
+/** UI model adapted from the protocol v2 wire types in `@agent-hub/protocol`. */
 
 export type WorkspaceStatus = 'RUNNING' | 'OFFLINE' | 'STOPPED';
-/** Herdr state of an agent pane. `off` = workspace not running. */
 export type AgentLiveState = 'idle' | 'working' | 'blocked' | 'unknown' | 'off';
 export type RunStatus = 'RUNNING' | 'DONE' | 'MERGED' | 'BLOCKED' | 'FAILED';
 export type GateStatus = 'NOT_RUN' | 'PASSED' | 'FAILED';
@@ -13,19 +8,14 @@ export type TaskStatus =
   | 'PENDING' | 'READY' | 'RUNNING' | 'REVIEW' | 'FIX_REQUIRED'
   | 'PASSED' | 'MERGED' | 'BLOCKED' | 'FAILED';
 export type WorkerStatus = 'IDLE' | 'BUSY' | 'BLOCKED' | 'BROKEN';
-
 export type DecisionKind =
   | 'blocker' | 'repair' | 'scope_exception' | 'abandon'
   | 'worker_approval' | 'question' | 'finish';
-
-/** Hub-side decision state (plan 7.4), plus REPLY_SENT for "chat something…" replies. */
 export type DecisionStatus =
-  | 'OPEN' | 'REPLY_SENT' | 'SENT' | 'WAITING' | 'DELIVERED' | 'APPLIED'
-  | 'ANSWERED_ELSEWHERE' | 'REJECTED' | 'CANCELLED' | 'SUPERSEDED';
-
+  | 'OPEN' | 'SENT' | 'WAITING' | 'REPLY_SENT' | 'DELIVERED' | 'APPLIED'
+  | 'ANSWERED_ELSEWHERE' | 'REJECTED' | 'CANCELLED' | 'ROUTINE';
 export type PromptStatus = 'QUEUED' | 'DELIVERED' | 'HELD' | 'EXPIRED' | 'FAILED';
-export type Channel = 'hub' | 'terminal' | 'hub_reply';
-export type DeviceKind = 'laptop' | 'phone';
+export type Channel = 'hub' | 'terminal' | 'routine';
 
 export interface Orchestrator {
   program: string;
@@ -40,9 +30,9 @@ export interface Orchestrator {
 export interface Task {
   id: string;
   title: string;
+  summary: string;
   status: TaskStatus;
   worker?: string;
-  /** e.g. "1/2" */
   fixRound?: string;
   dependsOn: string[];
 }
@@ -55,7 +45,6 @@ export interface Worker {
   sinceAt: number;
   model?: string;
   reason?: string;
-  screen?: string;
 }
 
 export interface ScoutRound {
@@ -75,16 +64,16 @@ export interface Problem {
   text: string;
   note: string;
   severity: 'warn' | 'blocked';
-  /** Decision id when one is open for it. */
   decisionId?: string;
 }
 
 export interface Run {
   id: string;
+  title: string;
+  goal: string;
   status: RunStatus;
   integrationBranch: string;
   gate: GateStatus;
-  /** Final outcome text once finished, e.g. "merged into main, pushed". */
   outcome?: string;
   tasks: Task[];
   problems: Problem[];
@@ -100,7 +89,7 @@ export interface PastRun {
 export interface UploadSettings {
   documents: boolean;
   diffs: boolean;
-  agentScreens: boolean;
+  orchestratorScreen: boolean;
 }
 
 export interface Workspace {
@@ -111,6 +100,8 @@ export interface Workspace {
   lastSeenAt: number;
   kitVersion: string;
   archived: boolean;
+  computerId: string | null;
+  computerOnline: boolean;
   uploads: UploadSettings;
   orchestrator: Orchestrator;
   run?: Run;
@@ -122,7 +113,6 @@ export interface Workspace {
 export interface DecisionOption {
   key: string;
   label: string;
-  /** One-line consequence. */
   consequence: string;
 }
 
@@ -136,13 +126,11 @@ export interface Answer {
   choice: string;
   label: string;
   note?: string;
-  /** Finish decisions: target branch. */
   branch?: string;
   push?: boolean;
-  /** The user's own words (terminal answer or chat reply). */
   quote?: string;
   channel: Channel;
-  device?: DeviceKind;
+  by?: string;
   at: number;
 }
 
@@ -151,7 +139,6 @@ export interface Decision {
   runId: string;
   id: string;
   kind: DecisionKind;
-  /** Worker slot or 'orchestrator' (where the decision shows inline). */
   agent: string;
   taskId?: string;
   title: string;
@@ -165,14 +152,10 @@ export interface Decision {
   replyText?: string;
   rejectReason?: string;
   cancelReason?: string;
-  supersededBy?: string;
   deliveredAt?: number;
   appliedAt?: number;
-  /** Text shown once applied, e.g. "Used by repair --decision D3." */
   appliedNote?: string;
-  /** worker_approval only */
-  approval?: { command: string; cwd: string; why: string[]; screen?: string };
-  /** Opus's short rationale for the recommendation. */
+  approval?: { command: string; cwd: string | null; why: string[] };
   opusNote?: string;
 }
 
@@ -189,13 +172,12 @@ export type HistoryEntry =
   | {
       id: string; workspaceId: string; at: number; type: 'answer'; runId: string;
       decisionId: string; choice?: string; label?: string; extra?: string;
-      /** Typed words: terminal quote or chat reply. */
-      quote?: string; replyOnly?: boolean; channel: Channel; device?: DeviceKind; docId?: string;
+      quote?: string; replyOnly?: boolean; channel: Channel; by?: string; docId?: string;
     }
-  | { id: string; workspaceId: string; at: number; type: 'prompt'; runId: string; promptId: string }
+  | { id: string; workspaceId: string; at: number; type: 'prompt'; runId: string; promptId: string; by?: string }
   | { id: string; workspaceId: string; at: number; type: 'routine'; runId: string; text: string; reason: string; docId?: string };
 
-export type DocumentKind = 'final_report' | 'final_diff' | 'task_file' | 'decision' | 'research' | 'review';
+export type DocumentKind = 'final_report' | 'final_diff' | 'decision' | 'research';
 
 export interface HubDocument {
   id: string;
@@ -204,7 +186,7 @@ export interface HubDocument {
   kind: DocumentKind;
   name: string;
   title: string;
-  format: 'markdown' | 'diff';
+  format: 'markdown' | 'diff' | 'text';
   bytes: number;
   truncated: boolean;
   updatedAt: number;
@@ -223,7 +205,6 @@ export interface HubSnapshot {
   connection: ConnectionState;
   lastEventAt: number;
   loaded: boolean;
-  /** Short message for the toast, set on live events. */
   notice?: { id: number; text: string };
 }
 

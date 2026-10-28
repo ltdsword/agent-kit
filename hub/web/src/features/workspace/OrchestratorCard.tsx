@@ -42,7 +42,7 @@ export function OrchestratorCard({ workspace: w }: { workspace: Workspace }) {
           </Link>
         ))}
 
-        {running && w.uploads.agentScreens && w.orchestrator.screen && (
+        {running && w.uploads.orchestratorScreen && w.orchestrator.screen && (
           <TerminalTail title="Screen · last lines" text={w.orchestrator.screen} hint="expand" />
         )}
 

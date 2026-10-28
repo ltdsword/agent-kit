@@ -49,12 +49,12 @@ export function ConfirmSheet({ decision: d, workspace: w, form: f, busy, onSend,
         )}
         <dl style={{ margin: 0, display: 'grid', gridTemplateColumns: '24px minmax(0, 1fr)', gap: '10px 8px', fontSize: 13.5, alignItems: 'start' }}>
           <dt style={{ color: 'var(--text-3)' }}><Icon name={online ? 'laptop' : 'wifi-off'} /></dt>
-          <dd style={{ margin: 0 }}>{online ? `Goes to ${w.name} on your computer, which is online now.` : `${w.name} is offline. The answer is saved and delivered when it reconnects.`}</dd>
+          <dd style={{ margin: 0 }}>{!w.computerOnline ? 'Computer offline. You can’t send an answer until it reconnects.' : online ? `Goes to ${w.name} on your computer, which is online now.` : `${w.name} is offline. The answer is saved and delivered when it reconnects.`}</dd>
           <dt style={{ color: 'var(--text-3)' }}><Icon name="lock" /></dt>
           <dd style={{ margin: 0 }}>Final once delivered. To change it, Opus has to open a new decision.</dd>
         </dl>
         <div className="stack" style={{ gap: 8, paddingTop: 4 }}>
-          <button ref={sendRef} type="button" className="btn btn-primary btn-block" style={{ minHeight: 48, fontSize: 15 }} disabled={busy} onClick={onSend}>
+          <button ref={sendRef} type="button" className="btn btn-primary btn-block" style={{ minHeight: 48, fontSize: 15 }} disabled={busy || !w.computerOnline} onClick={onSend}>
             <Icon name="send" />Send answer {opt.key}
           </button>
           <button type="button" className="btn btn-ghost btn-block" onClick={onBack}>Back</button>

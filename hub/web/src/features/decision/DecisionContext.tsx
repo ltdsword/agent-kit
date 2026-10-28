@@ -4,13 +4,12 @@ import remarkGfm from 'remark-gfm';
 import type { Decision } from '@/api/types';
 import { useHub } from '@/state/HubProvider';
 import { Icon, type IconName } from '@/components/Icon';
-import { TerminalTail } from '@/components/ui';
 import { parseDiff } from '../documents/parseDiff';
 
 const WHY_ICONS: IconName[] = ['globe', 'folder', 'info'];
 
 /** "What happened": evidence, the worker-approval command, or the finish report + diff stat. */
-export function DecisionContext({ decision: d, showScreen }: { decision: Decision; showScreen: boolean }) {
+export function DecisionContext({ decision: d }: { decision: Decision }) {
   return (
     <>
       {d.approval && (
@@ -44,8 +43,6 @@ export function DecisionContext({ decision: d, showScreen }: { decision: Decisio
           )}
         </section>
       )}
-
-      {showScreen && d.approval?.screen && <TerminalTail title={`${d.agent} screen · last lines`} text={d.approval.screen} defaultOpen />}
 
       {d.kind === 'finish' && <FinishReport decision={d} />}
     </>

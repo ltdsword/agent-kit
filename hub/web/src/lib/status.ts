@@ -77,7 +77,7 @@ export const DECISION_STATUS: Record<DecisionStatus, StatusLook> = {
   ANSWERED_ELSEWHERE: look('offline', 'terminal', 'Answered in the terminal'),
   REJECTED: look('blocked', 'alert', 'Rejected'),
   CANCELLED: look('offline', 'ban', 'Cancelled by Opus'),
-  SUPERSEDED: look('offline', 'arrow-right', 'Superseded'),
+  ROUTINE: look('routine', 'hub', 'Routine'),
 };
 
 export const PROMPT_STATUS: Record<PromptStatus, StatusLook> = {

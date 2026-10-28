@@ -88,14 +88,14 @@ export function LoginPage() {
             </div>
             <label style={{ display: 'flex', alignItems: 'center', gap: 10, minHeight: 44, cursor: 'pointer', fontSize: 14 }}>
               <input type="checkbox" checked={remember} onChange={(e) => setRemember(e.target.checked)} style={{ width: 18, height: 18, accentColor: 'var(--accent)' }} />
-              Keep me signed in on this device for 30 days
+              Keep me signed in for 30 days
             </label>
             <button type="submit" className="btn btn-primary btn-block" style={{ minHeight: 48, fontSize: 15 }}
               disabled={busy || !username.trim() || !password}>
               {busy ? 'Signing in…' : 'Sign in'}
             </button>
           </form>
-          <p className="t-small">Forgot the password? Reset it on your computer with <code className="mono">agent-hub passwd</code>.</p>
+          <p className="t-small">Forgot it? Ask the admin to run <code className="mono">agent-kit reset-password --name=&lt;you&gt;</code>.</p>
         </section>
         <p className="t-small" style={{ maxWidth: 400, textAlign: 'center' }}>
           Signing in lets you watch, answer and prompt. It can’t start a workspace: that only happens on your computer.

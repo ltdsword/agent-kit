@@ -52,13 +52,15 @@ export function WorkspacePage() {
         </div>
       </div>
 
-      {w.status !== 'RUNNING' && (
+      {(w.status !== 'RUNNING' || !w.computerOnline) && (
         <div style={{ maxWidth: 1240, width: '100%', margin: '0 auto', padding: '16px 16px 0' }}>
           <Banner icon={w.status === 'OFFLINE' ? 'wifi-off' : 'power'} role="status">
-            {w.status === 'OFFLINE'
-              ? <><strong>This workspace is offline.</strong> You can still answer: answers wait for your computer. Prompts are off.</>
+            {!w.computerOnline
+              ? <><strong>Computer offline.</strong> Data may be stale or unavailable. Answers and prompts are disabled until it reconnects.</>
+              : w.status === 'OFFLINE'
+              ? <><strong>This workspace is offline.</strong> Answers can wait for your computer. Prompts are off.</>
               : <><strong>This workspace isn’t running.</strong> Documents and history stay readable; you can’t prompt or answer.</>}
-            {' '}Start it on your computer with <code className="mono">agent-kit start</code>.
+            {w.computerOnline && w.status === 'STOPPED' && <> Start it on your computer with <code className="mono">agent-kit start</code>.</>}
           </Banner>
         </div>
       )}

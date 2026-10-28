@@ -1,17 +1,18 @@
 import { useState } from 'react';
-import { PROMPT_LIMIT_BYTES } from '@/api/client';
+import { PROMPT_LIMIT_CHARS } from '@/api/client';
 import type { Workspace } from '@/api/types';
 import { useClient, useHub } from '@/state/HubProvider';
 import { PROMPT_STATUS } from '@/lib/status';
-import { byteLength, formatBytes, hhmm } from '@/lib/time';
+import { hhmm } from '@/lib/time';
 import { StatusChip } from '@/components/Chips';
 import { Icon } from '@/components/Icon';
 import { Banner } from '@/components/ui';
 
 const ERRORS: Record<string, string> = {
   workspace_not_online: 'This workspace isn’t running any more.',
+  computer_offline: 'The computer is offline. Nothing was sent.',
   hub_unreachable: 'The hub can’t be reached. Try again when it’s back.',
-  prompt_too_large: 'The prompt is over 8 KB.',
+  prompt_too_large: 'The prompt is over 8192 characters.',
 };
 
 /** Multi-line prompt to the orchestrator, plus the list of recent prompts and their delivery status. */
@@ -21,10 +22,10 @@ export function PromptComposer({ workspace: w }: { workspace: Workspace }) {
   const [text, setText] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [sending, setSending] = useState(false);
-  const running = w.status === 'RUNNING';
+  const running = w.status === 'RUNNING' && w.computerOnline;
   const lost = hub.connection === 'lost';
-  const bytes = byteLength(text);
-  const over = bytes > PROMPT_LIMIT_BYTES;
+  const chars = text.length;
+  const over = chars > PROMPT_LIMIT_CHARS;
   const prompts = hub.prompts.filter((p) => p.workspaceId === w.id).slice(0, 5);
 
   const send = async () => {
@@ -53,7 +54,7 @@ export function PromptComposer({ workspace: w }: { workspace: Workspace }) {
           />
           <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
             <span className="t-small mono" style={{ color: over ? 'var(--status-blocked)' : undefined }} aria-live="polite">
-              {formatBytes(bytes)} / 8 KB
+              {chars} / {PROMPT_LIMIT_CHARS} characters
             </span>
             <span className="t-small">
               {lost ? 'Hub connection lost.' : w.orchestrator.state === 'blocked' ? 'Opus has a terminal prompt open: this will be held.' : 'Only the orchestrator receives prompts.'}
@@ -69,8 +70,9 @@ export function PromptComposer({ workspace: w }: { workspace: Workspace }) {
         <>
           <textarea id={`prompt-${w.id}`} className="field" disabled placeholder="Prompts are off while this workspace isn’t running." style={{ background: 'var(--surface-2)' }} />
           <Banner icon="lock">
-            {w.status === 'OFFLINE' ? 'This workspace is offline, so prompts are off.' : 'This workspace isn’t running.'}{' '}
-            Start it on your computer with <code className="mono">agent-kit start</code>.
+            {!w.computerOnline ? 'Computer offline. Prompts are disabled until it reconnects.'
+              : w.status === 'OFFLINE' ? 'This workspace is offline, so prompts are off.'
+              : 'This workspace isn’t running. Start it on your computer with agent-kit start.'}
           </Banner>
         </>
       )}

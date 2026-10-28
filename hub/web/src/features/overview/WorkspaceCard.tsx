@@ -37,7 +37,7 @@ export function WorkspaceCard({ workspace: w, now }: { workspace: Workspace; now
             <span className="needs"><Icon name="bell" />{needs.length} {needs.length === 1 ? 'needs you' : 'need you'}</span>
             <span className="trunc" style={{ fontSize: 13, flex: 1 }}>
               {needs.map((d) => `${d.id} ${d.kind}`).join(' · ')}
-              {w.status !== 'RUNNING' && ' · answers wait for your computer'}
+              {!w.computerOnline ? ' · computer offline; answers disabled' : w.status !== 'RUNNING' ? ' · answers wait for your computer' : ''}
             </span>
             <Icon name="chevron-right" style={{ color: 'var(--needs-you)' }} />
           </button>
@@ -54,14 +54,15 @@ export function WorkspaceCard({ workspace: w, now }: { workspace: Workspace; now
           <span className="mono">{lastRun?.id ?? '—'}</span>
           {lastRun && <StatusChip look={RUN_STATUS[lastRun.status]} />}
           <span className="t-3 trunc">
-            {w.run ? (w.status === 'OFFLINE' ? `as of ${ago(w.lastSeenAt, now)}` : w.run.outcome ?? '') : w.pastRuns[0]?.outcome}
+            {w.run ? (w.status === 'OFFLINE' || !w.computerOnline ? `as of ${ago(w.lastSeenAt, now)}` : w.run.outcome ?? '') : w.pastRuns[0]?.outcome}
           </span>
         </dd>
         <dt>Orchestrator</dt>
         <dd>
           <StatusChip look={AGENT_STATE[w.status === 'RUNNING' ? w.orchestrator.state : w.status === 'OFFLINE' ? 'unknown' : 'off']} />
           {w.status === 'RUNNING' && <span className="t-2">{ago(w.orchestrator.lastActivityAt, now)}</span>}
-          {w.status === 'OFFLINE' && <span className="t-2">no heartbeat</span>}
+          {!w.computerOnline && <span className="t-2">computer offline</span>}
+          {w.computerOnline && w.status === 'OFFLINE' && <span className="t-2">no heartbeat</span>}
         </dd>
         <dt>Problems</dt>
         <dd>
@@ -85,8 +86,9 @@ export function WorkspaceCard({ workspace: w, now }: { workspace: Workspace; now
           </div>
         )}
         <div className="meta">
-          {w.status === 'RUNNING' && <span className="mono">{w.run?.integrationBranch}</span>}
-          {w.status === 'OFFLINE' && <span>Read-only until it reconnects. Prompts are off.</span>}
+          {w.status === 'RUNNING' && w.computerOnline && <span className="mono">{w.run?.integrationBranch}</span>}
+          {!w.computerOnline && <span>Computer offline. Data may be stale; answers and prompts are disabled.</span>}
+          {w.computerOnline && w.status === 'OFFLINE' && <span>Workspace offline until it reconnects. Prompts are off.</span>}
           {w.status === 'STOPPED' && <span>Documents and history stay readable.</span>}
         </div>
       </div>

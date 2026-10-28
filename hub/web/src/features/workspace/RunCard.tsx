@@ -17,9 +17,13 @@ export function RunCard({ workspace: w }: { workspace: Workspace }) {
         {run ? (
           <>
             <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
-              <h2 id="runs-h" className="t-h2">Run <span className="mono">{run.id}</span></h2>
+              <div className="stack" style={{ gap: 2, flex: 1, minWidth: 0 }}>
+                <h2 id="runs-h" className="t-h2">{run.title}</h2>
+                <span className="t-small mono">Run {run.id}</span>
+              </div>
               <StatusChip look={RUN_STATUS[run.status]} />
             </div>
+            {run.goal && <p className="t-2">{run.goal}</p>}
             {run.outcome && <Banner tone="info" icon="merge">{run.outcome}</Banner>}
             <dl className="dl-grid" style={{ gridTemplateColumns: '70px minmax(0, 1fr)', fontSize: 13 }}>
               <dt>Branch</dt><dd className="mono"><Icon name="branch" size="sm" />{run.integrationBranch}</dd>
@@ -94,6 +98,7 @@ function TaskNode({ task: t }: { task: Task }) {
         <span className="trunc" style={{ fontSize: 13, flex: 1 }}>{t.title}</span>
         {t.worker && t.status !== 'MERGED' && <span className="t-small mono">{t.worker}</span>}
       </span>
+      {t.summary && <span className="t-2" style={{ display: 'block', paddingLeft: 32, fontSize: 12.5 }}>{t.summary}</span>}
       <span style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
         <StatusChip look={TASK_STATUS[t.status]} mono />
         {t.fixRound && t.status !== 'MERGED' && <PlainChip>fix {t.fixRound}</PlainChip>}

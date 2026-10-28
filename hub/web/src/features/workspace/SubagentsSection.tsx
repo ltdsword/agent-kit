@@ -6,7 +6,6 @@ import { TASK_STATUS, WORKER_STATUS } from '@/lib/status';
 import { duration } from '@/lib/time';
 import { PlainChip, StatusChip } from '@/components/Chips';
 import { Icon, type IconName } from '@/components/Icon';
-import { TerminalTail } from '@/components/ui';
 
 const LIVE: Record<Worker['live'], { color: string; icon: IconName; label: string }> = {
   working: { color: 'var(--status-running)', icon: 'activity', label: 'working' },
@@ -49,6 +48,7 @@ function WorkerCard({ workspace: w, worker: k }: { workspace: Workspace; worker:
       {task && (
         <div className="stack" style={{ gap: 4 }}>
           <span style={{ fontWeight: 600 }}><span className="mono">{task.id}</span> {task.title}</span>
+          {task.summary && <span className="t-2" style={{ fontSize: 13 }}>{task.summary}</span>}
           <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
             <StatusChip look={TASK_STATUS[task.status]} mono />
             {task.fixRound && <PlainChip>fix {task.fixRound}</PlainChip>}
@@ -60,9 +60,6 @@ function WorkerCard({ workspace: w, worker: k }: { workspace: Workspace; worker:
         <span className="sep" /><span>{duration(k.sinceAt, now)}</span>
         {k.model && <><span className="sep" /><span>{k.model}</span></>}
       </div>
-      {k.screen && w.uploads.agentScreens && w.status === 'RUNNING' && (
-        <TerminalTail title="Screen" text={k.screen} defaultOpen={k.live === 'blocked'} />
-      )}
       {decision && (
         <Link className="needs-band" to={decisionPath(decision)} style={{ padding: '10px 12px', flexDirection: 'column', alignItems: 'stretch', gap: 6 }}>
           <span style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
@@ -102,7 +99,7 @@ function ScoutCard({ workspace: w }: { workspace: Workspace }) {
             <ul style={{ margin: 0, paddingLeft: 18, fontSize: 13.5 }}>
               {r.questions.map((q) => <li key={q}>{q}</li>)}
             </ul>
-            <Link to={`/w/${w.id}/docs/${r.docId}`} style={{ fontSize: 13, display: 'inline-flex', gap: 6, alignItems: 'center', minHeight: 32 }}>
+            <Link to={`/w/${w.id}/docs/${encodeURIComponent(r.docId)}`} style={{ fontSize: 13, display: 'inline-flex', gap: 6, alignItems: 'center', minHeight: 32 }}>
               <Icon name="file" size="sm" />Research dossier
             </Link>
           </div>

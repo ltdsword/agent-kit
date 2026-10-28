@@ -8,10 +8,8 @@ import { Icon, type IconName } from '@/components/Icon';
 export const DOC_KIND: Record<DocumentKind, { icon: IconName; className: string; label: string }> = {
   final_report: { icon: 'file', className: 'report', label: 'Final report' },
   final_diff: { icon: 'diff', className: 'diff', label: 'Total diff' },
-  task_file: { icon: 'file', className: '', label: 'Task plan' },
   decision: { icon: 'bell', className: 'decision', label: 'Decision record' },
   research: { icon: 'compass', className: 'research', label: 'Research dossier' },
-  review: { icon: 'eye', className: '', label: 'Review report' },
 };
 
 export function DocumentList({ workspace: w }: { workspace: Workspace }) {
@@ -28,7 +26,7 @@ export function DocumentList({ workspace: w }: { workspace: Workspace }) {
           {g.docs.map((d) => {
             const k = DOC_KIND[d.kind];
             return (
-              <Link key={d.id} className="row" to={`/w/${w.id}/docs/${d.id}`}>
+              <Link key={d.id} className="row" to={`/w/${w.id}/docs/${encodeURIComponent(d.id)}`}>
                 <span className={`doc-ico ${k.className}`}><Icon name={k.icon} /></span>
                 <span style={{ flex: 1, minWidth: 0 }}>
                   <span className="trunc" style={{ display: 'block', fontWeight: 600, fontSize: 13.5 }}>{d.title}</span>

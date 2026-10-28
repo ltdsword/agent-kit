@@ -6,6 +6,7 @@ import { WorkspacePage } from '@/features/workspace/WorkspacePage';
 import { DecisionPage } from '@/features/decision/DecisionPage';
 import { DocumentPage } from '@/features/documents/DocumentPage';
 import { HistoryPage } from '@/features/history/HistoryPage';
+import { ChangePasswordPage } from '@/auth/ChangePasswordPage';
 
 /** A fresh form for every decision (keyed by its id). */
 function DecisionRoute() {
@@ -24,6 +25,7 @@ export const routes: RouteObject[] = [
     element: <Layout />,
     children: [
       { index: true, element: <OverviewPage /> },
+      { path: 'account/password', element: <ChangePasswordPage /> },
       { path: 'w/:wsId', element: <WorkspacePage /> },
       { path: 'w/:wsId/d/:runId/:decId', element: <DecisionRoute /> },
       { path: 'w/:wsId/docs/:docId', element: <DocumentPage /> },
