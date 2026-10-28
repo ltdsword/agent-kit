@@ -17,10 +17,10 @@ The design is in `.agent-system/docs/DECISION-HUB-PLAN.md` (the "plan"), and the
 |---|---|---|---|
 | H0 Herdr + Claude Team check | user + lead | none | done 2026-10-28 (11/11) |
 | M0 contract: schema, fixtures, TS types + ajv, Python validator, API doc | lead | H0 | done 2026-10-28 |
-| A1 kit sync side: scheduler bits, `agentctl` sync/watch (push only), kitstart, doctor | subagent A | M0 | in progress |
-| B1 backend: full API, SQLite, auth/pairing, commands queue, SSE, CLI | subagent B | M0 | in progress |
+| A1 kit sync side: scheduler bits, `agentctl` sync/watch (push only), kitstart, doctor | codex worker-1 | M0 | done 2026-10-28 (run hub1, review PASS) |
+| B1 backend: full API, SQLite, auth/pairing, commands queue, SSE, CLI | codex worker-2 | M0 | done 2026-10-28 (run hub1, review PASS) |
 | C0 UI design (Claude Design) | user | none | in progress |
-| M1 integration: real `agentctl watch` against the real backend | lead | A1, B1 | todo |
+| M1 integration: real `agentctl watch` against the real backend | lead | A1, B1 | done 2026-10-28 (sync, ONLINE→STOPPED, restart resync: 0 resent) |
 | A2 kit commands: answer/reply/prompt delivery through scheduler + Herdr, orchestrator rule text | subagent A | M1 | todo |
 | C1 web app (read-only) built from the design, mocked from fixtures | subagent C | C0, M0 | todo |
 | M2 read-only hub on 127.0.0.1 (plan H2+H3) | lead | M1, C1 | todo |
