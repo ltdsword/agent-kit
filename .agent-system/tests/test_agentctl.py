@@ -23,9 +23,10 @@ from test_scheduler import Base  # noqa: E402
 class FakeBackend:
     """Loopback v2 backend that validates and records every connector message."""
 
-    def __init__(self, offline=False, restore_after=None, duplicate=False):
+    def __init__(self, offline=False, restore_after=None, duplicate=False, commands=None):
         self.requests, self.invalid = [], []
         self.offline, self.restore_after, self.duplicate = offline, restore_after, duplicate
+        self.commands, self.acks = list(commands or []), []
         self.event_cursors, self.decision_hashes, self.document_hashes = {}, {}, {}
         self.snapshot_hash = None
         owner = self
@@ -62,6 +63,7 @@ class FakeBackend:
                 elif path.endswith("/events"): definition = "EventsBatch"
                 elif path.endswith("/documents") and self.command == "PUT": definition = "DocumentsBatch"
                 elif path.endswith("/goodbye"): definition = "GoodbyeRequest"
+                elif path.endswith("/ack") and "/commands/" in path and self.command == "POST": definition = "AckRequest"
                 if definition:
                     try: hubschema.validate(definition, body)
                     except ValueError as error: owner.invalid.append((definition, str(error)))
@@ -103,6 +105,14 @@ class FakeBackend:
                     self.reply(204)
                 elif path.endswith("/documents") and self.command == "DELETE":
                     for name in parse_qs(parsed.query).get("path", []): owner.document_hashes.pop(name, None)
+                    self.reply(204)
+                elif path.endswith("/commands") and self.command == "GET":
+                    response = {"commands": owner.commands}
+                    try: hubschema.validate("CommandsResponse", response)
+                    except ValueError as error: owner.invalid.append(("CommandsResponse", str(error)))
+                    self.reply(200, response)
+                elif path.endswith("/ack") and "/commands/" in path and self.command == "POST":
+                    owner.acks.append({"path": path, "body": body})
                     self.reply(204)
                 elif path.endswith("/heartbeat") or path.endswith("/goodbye"):
                     self.reply(204)
@@ -150,8 +160,15 @@ class AgentCtlTests(Base):
                 return subprocess.CompletedProcess(args, 0, json.dumps(body), "")
             if args[1:3] == ["agent", "read"]:
                 return subprocess.CompletedProcess(args, 0, "visible screen\n", "")
+            if args[1:3] == ["agent", "prompt"]:
+                return subprocess.CompletedProcess(args, 0, "{}", "")
             return subprocess.CompletedProcess(args, 1, "", "agent not found")
         return runner
+
+    @staticmethod
+    def command(command_id, kind, body, run_id="r1", decision_id="D3", by="alice", created_at="2026-10-29T00:00:00Z"):
+        return {"id": command_id, "type": kind, "run_id": run_id, "decision_id": decision_id,
+                "body": body, "by": by, "created_at": created_at, "expires_at": None}
 
     def set_backend(self, backend):
         self.cfg["hub"]["url"] = backend.url
@@ -196,6 +213,36 @@ class AgentCtlTests(Base):
         saved = json.loads(self.config_path.read_text())
         self.assertTrue(saved["hub"]["enabled"])
         self.assertRegex(saved["hub"]["workspace_id"], r"^ws_[a-z2-7]{16}$")
+        self.assertEqual(S.validate_config(saved), [])
+
+    def test_enable_rewrites_only_hub_object_and_keeps_key_order(self):
+        source = ('{\n  "first" : [1,  2],\n "hub" : {"enabled": false, "workspace_id": null},\n'
+                  '\t"last":{"nested":true}\n}\n')
+        self.config_path.write_text(source)
+        cfg = {"first": [1, 2], "hub": {"enabled": False, "workspace_id": None},
+               "last": {"nested": True}}
+        with mock.patch.object(AC, "load_config", return_value=cfg), mock.patch.object(AC, "ping", return_value={}), \
+                redirect_stdout(StringIO()):
+            self.assertEqual(AC.command_enable(self.ws, None), 0)
+        updated = self.config_path.read_text()
+        self.assertIn('  "first" : [1,  2],', updated)
+        self.assertIn(',\n\t"last":{"nested":true}', updated)
+        saved = json.loads(updated)
+        self.assertEqual(list(saved), ["first", "hub", "last"])
+        self.assertEqual(list(saved["hub"]), ["enabled", "workspace_id", "url", "upload", "screen_lines"])
+
+    def test_enable_inserts_hub_without_reformatting_existing_config(self):
+        cfg = dict(self.cfg)
+        cfg.pop("hub")
+        source = json.dumps(cfg, indent=2) + "\n"
+        self.config_path.write_text(source)
+        with mock.patch.object(AC, "ping", return_value={}), redirect_stdout(StringIO()):
+            self.assertEqual(AC.main(["enable"], workspace_root=self.ws), 0)
+        updated = self.config_path.read_text()
+        self.assertIn('"pool": {\n', updated)
+        self.assertTrue(updated.startswith(source[:source.index('"pool"')]))
+        saved = json.loads(updated)
+        self.assertTrue(saved["hub"]["enabled"])
         self.assertEqual(S.validate_config(saved), [])
 
     def test_ping_rejects_unsupported_protocol(self):
@@ -285,8 +332,157 @@ class AgentCtlTests(Base):
         paths = [request["path"] for request in backend.requests]
         for suffix in ("/agent/hello", "/snapshot", "/decisions", "/events", "/documents", "/goodbye"):
             self.assertTrue(any(path.endswith(suffix) for path in paths), suffix)
-        self.assertFalse(any("/commands" in path for path in paths))
+        self.assertTrue(any(path.endswith("/commands") for path in paths))
+        command_request = next(r for r in backend.requests if r["path"].endswith("/commands"))
+        self.assertEqual(parse_qs(command_request["query"]), {"wait": ["5"]})
         self.assertTrue(all(r["protocol"] == "2" and r["authorized"] for r in backend.requests))
+        self.assertFalse(backend.invalid)
+
+    def test_watch_retries_connect_when_key_appears_after_start(self):
+        self.sample_run()
+        reads = {"count": 0}
+        original_read_key = AC.read_key
+
+        def delayed_key(*args, **kwargs):
+            reads["count"] += 1
+            if reads["count"] < 3:
+                raise RuntimeError("connector key is not ready")
+            return original_read_key(*args, **kwargs)
+
+        with FakeBackend() as backend:
+            self.set_backend(backend)
+            with mock.patch.object(AC, "read_key", side_effect=delayed_key), \
+                    redirect_stdout(StringIO()), redirect_stderr(StringIO()):
+                self.assertEqual(AC.watch(self.ws, runner=self.fake_herdr(), sleep=lambda _: None,
+                                          no_orchestrator=True, max_loops=1), 0)
+        self.assertEqual(reads["count"], 3)
+        self.assertTrue(any(request["path"].endswith("/agent/hello") for request in backend.requests))
+
+    def test_watch_answer_records_hub_attribution_and_delivers_notice(self):
+        self.sample_run()
+        second = self.s.decision_ask("r1", "question", "Another choice", "Pick one.",
+                                     ["A=Use current", "B=Change it"])["decision"]
+        commands = [
+            self.command("cmd_aaaaaaaaaaaaaaaa", "answer", {"choice": "A", "note": "Keep this choice"}),
+            self.command("cmd_hhhhhhhhhhhhhhhh", "answer", {"choice": "A"}, decision_id=second,
+                         created_at="2026-10-29T00:01:00Z"),
+        ]
+        prompts = []
+
+        def runner(args, **kwargs):
+            if args[1:3] == ["agent", "prompt"]:
+                prompts.append(args[4])
+                return subprocess.CompletedProcess(args, 0, "{}", "")
+            return self.fake_herdr()(args, **kwargs)
+
+        with FakeBackend(commands=commands) as backend:
+            self.set_backend(backend)
+            with redirect_stdout(StringIO()), redirect_stderr(StringIO()):
+                self.assertEqual(AC.watch(self.ws, runner=runner, sleep=lambda _: None,
+                                          no_orchestrator=True, max_loops=1), 0)
+        answer = self.s.store.load("r1")["decisions"]["D3"]["answer"]
+        self.assertEqual((answer["channel"], answer["by"], answer["quote"]), ("hub", "alice", "Keep this choice"))
+        self.assertEqual(self.s.store.load("r1")["decisions"][second]["answer"]["quote"], "Use current")
+        self.assertEqual([ack["body"] for ack in backend.acks], [
+            {"status": "DELIVERED", "reason": None}, {"status": "DELIVERED", "reason": None}])
+        self.assertEqual(prompts, [
+            "[hub] D3 answered by alice: A (Allow). It is recorded; carry it out with --decision D3.",
+            f"[hub] {second} answered by alice: A (Use current). It is recorded; carry it out with --decision {second}."])
+        self.assertTrue(all(r["authorized"] for r in backend.requests))
+        self.assertFalse(backend.invalid)
+
+    def test_watch_scheduler_refusal_is_rejected_with_exact_message(self):
+        self.sample_run()
+        command = self.command("cmd_bbbbbbbbbbbbbbbb", "answer", {"choice": "Z"})
+        with FakeBackend(commands=[command]) as backend:
+            self.set_backend(backend)
+            with redirect_stdout(StringIO()), redirect_stderr(StringIO()):
+                self.assertEqual(AC.watch(self.ws, runner=self.fake_herdr(), sleep=lambda _: None,
+                                          no_orchestrator=True, max_loops=1), 0)
+        self.assertEqual(backend.acks[0]["body"], {
+            "status": "REJECTED", "reason": "'Z' is not an option of D3: ['A', 'B']"})
+        self.assertEqual(self.s.store.load("r1")["decisions"]["D3"]["status"], "PENDING")
+
+    def test_watch_reply_and_prompt_texts_are_typed_oldest_first(self):
+        self.sample_run()
+        commands = [
+            self.command("cmd_cccccccccccccccc", "prompt", {"text": "Check the result"}, run_id=None,
+                         decision_id=None, created_at="2026-10-29T00:01:00Z"),
+            self.command("cmd_dddddddddddddddd", "reply", {"text": "I prefer A"},
+                         created_at="2026-10-29T00:00:00Z"),
+        ]
+        prompts = []
+
+        def runner(args, **kwargs):
+            if args[1:3] == ["agent", "prompt"]:
+                prompts.append(args[4])
+                return subprocess.CompletedProcess(args, 0, "{}", "")
+            return self.fake_herdr()(args, **kwargs)
+
+        with FakeBackend(commands=commands) as backend:
+            self.set_backend(backend)
+            with redirect_stdout(StringIO()), redirect_stderr(StringIO()):
+                self.assertEqual(AC.watch(self.ws, runner=runner, sleep=lambda _: None,
+                                          no_orchestrator=True, max_loops=1), 0)
+        self.assertEqual(prompts, ['[hub] reply to D3 from alice: "I prefer A"', "[hub] Check the result"])
+        self.assertEqual([ack["body"]["status"] for ack in backend.acks], ["DELIVERED", "DELIVERED"])
+        self.assertFalse(backend.invalid)
+
+    def test_watch_blocked_orchestrator_holds_reply(self):
+        command = self.command("cmd_eeeeeeeeeeeeeeee", "reply", {"text": "Please continue"})
+        with FakeBackend(commands=[command]) as backend:
+            self.set_backend(backend)
+            with redirect_stdout(StringIO()), redirect_stderr(StringIO()):
+                self.assertEqual(AC.watch(self.ws, runner=self.fake_herdr("blocked"), sleep=lambda _: None,
+                                          no_orchestrator=True, max_loops=1), 0)
+        self.assertEqual(backend.acks[0]["body"], {"status": "HELD", "reason": "orchestrator is blocked"})
+        self.assertFalse((self.ws / ".orchestrator" / "hub-log.jsonl").exists())
+
+    def test_watch_retries_answer_notice_locally_after_typing_failure(self):
+        self.sample_run()
+        command = self.command("cmd_ffffffffffffffff", "answer", {"choice": "A"})
+        prompts, attempts = [], {"count": 0}
+
+        def runner(args, **kwargs):
+            if args[1:3] == ["agent", "prompt"]:
+                prompts.append(args[4])
+                attempts["count"] += 1
+                if attempts["count"] == 1:
+                    return subprocess.CompletedProcess(args, 1, "", "temporary failure")
+                return subprocess.CompletedProcess(args, 0, "{}", "")
+            return self.fake_herdr()(args, **kwargs)
+
+        with FakeBackend(commands=[command]) as backend:
+            self.set_backend(backend)
+            with redirect_stdout(StringIO()), redirect_stderr(StringIO()):
+                self.assertEqual(AC.watch(self.ws, runner=runner, sleep=lambda _: None,
+                                          no_orchestrator=True, max_loops=2), 0)
+        self.assertEqual(len(prompts), 2)
+        self.assertEqual(prompts[0], prompts[1])
+        self.assertEqual([ack["body"]["status"] for ack in backend.acks], ["DELIVERED", "DELIVERED"])
+
+    def test_watch_does_not_type_logged_command_after_restart(self):
+        self.sample_run()
+        command = self.command("cmd_gggggggggggggggg", "prompt", {"text": "Run the check"},
+                               run_id=None, decision_id=None)
+        prompts = []
+
+        def runner(args, **kwargs):
+            if args[1:3] == ["agent", "prompt"]:
+                prompts.append(args[4])
+                return subprocess.CompletedProcess(args, 0, "{}", "")
+            return self.fake_herdr()(args, **kwargs)
+
+        with FakeBackend(commands=[command]) as backend:
+            self.set_backend(backend)
+            for _ in range(2):
+                with redirect_stdout(StringIO()), redirect_stderr(StringIO()):
+                    self.assertEqual(AC.watch(self.ws, runner=runner, sleep=lambda _: None,
+                                              no_orchestrator=True, max_loops=1), 0)
+        self.assertEqual(prompts, ["[hub] Run the check"])
+        entries = [json.loads(line) for line in (self.ws / ".orchestrator" / "hub-log.jsonl").read_text().splitlines()]
+        self.assertEqual(sum(entry.get("type") == "prompt" and entry["id"] == command["id"] for entry in entries), 1)
+        self.assertEqual(set(entries[0]), {"id", "type", "by", "body", "at"})
         self.assertFalse(backend.invalid)
 
     def test_watch_unchanged_sends_heartbeat_only(self):

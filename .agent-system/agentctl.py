@@ -146,9 +146,67 @@ def load_config(ws: Path) -> dict:
 
 
 def save_config(ws: Path, cfg: dict) -> None:
-    """Write config using the scheduler's default JSON formatting (no config writer exists)."""
+    """Update only the hub object so unrelated config formatting stays stable."""
     path = ws / ".agent-system" / "config.json"
-    atomic_write(path, json.dumps(cfg, indent=2) + "\n")
+    source = path.read_text(encoding="utf-8")
+    decoder = json.JSONDecoder()
+    index = 0
+
+    def skip_space(position):
+        while position < len(source) and source[position].isspace():
+            position += 1
+        return position
+
+    index = skip_space(index)
+    if index >= len(source) or source[index] != "{":
+        raise ValueError("config.json must contain a JSON object")
+    index += 1
+    hub_start = hub_end = None
+    hub_key_start = None
+    while True:
+        index = skip_space(index)
+        if index >= len(source) or source[index] == "}":
+            break
+        if source[index] == ",":
+            index = skip_space(index + 1)
+        key_start = index
+        key, index = decoder.raw_decode(source, index)
+        index = skip_space(index)
+        if index >= len(source) or source[index] != ":":
+            raise ValueError("invalid config.json object")
+        value_start = skip_space(index + 1)
+        _, value_end = decoder.raw_decode(source, value_start)
+        if key == "hub":
+            hub_key_start, hub_start, hub_end = key_start, value_start, value_end
+            break
+        index = value_end
+
+    hub = cfg.get("hub")
+    if not isinstance(hub, dict):
+        raise ValueError("hub config must be an object")
+    pretty = json.dumps(hub, ensure_ascii=False, indent=2)
+    if hub_start is not None:
+        line_start = source.rfind("\n", 0, hub_key_start) + 1
+        leading = source[line_start:hub_key_start]
+        base_indent = leading if not leading.strip() else ""
+        if "\n" in source[hub_start:hub_end]:
+            lines = pretty.splitlines()
+            replacement = lines[0] + "\n" + "\n".join(base_indent + line for line in lines[1:])
+        else:
+            replacement = json.dumps(hub, ensure_ascii=False, separators=(",", ": "))
+        updated = source[:hub_start] + replacement + source[hub_end:]
+    else:
+        root_end = source.rfind("}")
+        if root_end < 0:
+            raise ValueError("invalid config.json object")
+        top_indents = [line[:len(line) - len(line.lstrip())] for line in source.splitlines()
+                       if line.lstrip().startswith('"') and ":" in line]
+        indent = next((value for value in top_indents if value), "  ")
+        before = source[:root_end].rstrip()
+        comma = "," if any(key != "hub" for key in cfg) else ""
+        addition = f'{comma}\n{indent}"hub": ' + pretty.replace("\n", "\n" + indent) + "\n"
+        updated = before + addition + source[root_end:]
+    atomic_write(path, updated)
 
 
 def config_hub(cfg: dict) -> dict:
@@ -244,6 +302,14 @@ class HubClient:
 
     def heartbeat(self) -> None:
         self.call("heartbeat", "POST")
+
+    def commands(self, wait=25) -> list[dict]:
+        response = self.call("commands", "GET", timeout=wait + 5, query={"wait": wait})
+        return validate("CommandsResponse", response)["commands"]
+
+    def ack_command(self, command_id: str, status: str, reason: str | None = None) -> None:
+        body = validate("AckRequest", {"status": status, "reason": reason})
+        self.call(f"commands/{urllib.parse.quote(command_id, safe='')}/ack", "POST", "AckRequest", body)
 
     def goodbye(self, session_id: str, reason: str) -> None:
         self.call("goodbye", "POST", "GoodbyeRequest", {"session_id": session_id, "reason": reason}, timeout=3)
@@ -773,6 +839,203 @@ def _orchestrator_alive(name: str, runner=subprocess.run) -> bool:
     return state not in ("absent", "unknown")
 
 
+def _load_hub_log(ws: Path) -> dict[str, dict]:
+    records = {}
+    try:
+        lines = (ws / ".orchestrator" / "hub-log.jsonl").read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return records
+    for line in lines:
+        try:
+            entry = json.loads(line)
+        except ValueError:
+            continue
+        command_id = entry.get("id") if isinstance(entry, dict) else None
+        if not isinstance(command_id, str):
+            continue
+        if "type" in entry:
+            records[command_id] = entry
+        elif command_id in records:
+            records[command_id].update({key: entry[key] for key in ("status", "reason") if key in entry})
+    return records
+
+
+def _append_hub_log(ws: Path, command: dict, records: dict[str, dict]) -> None:
+    entry = {"id": command["id"], "type": command["type"], "by": scrub(command["by"]),
+             "body": scrub(command["body"]), "at": now()}
+    path = ws / ".orchestrator" / "hub-log.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as stream:
+        stream.write(json.dumps(entry, ensure_ascii=False, separators=(",", ":")) + "\n")
+        stream.flush()
+        os.fsync(stream.fileno())
+    records[entry["id"]] = {**entry, "status": "DELIVERED"}
+
+
+def _update_hub_log(ws: Path, command_id: str, status: str, reason: str | None,
+                    records: dict[str, dict]) -> None:
+    event = {"id": command_id, "status": status}
+    if reason:
+        event["reason"] = scrub(reason)
+    path = ws / ".orchestrator" / "hub-log.jsonl"
+    with path.open("a", encoding="utf-8") as stream:
+        stream.write(json.dumps(event, ensure_ascii=False, separators=(",", ":")) + "\n")
+        stream.flush()
+        os.fsync(stream.fileno())
+    records[command_id].update(event)
+
+
+def _short_reason(error) -> str:
+    message = scrub(str(error)).replace("\n", " ").strip()
+    return (message or "command delivery failed")[:300]
+
+
+def _type_hub_notice(name: str, text: str, cfg: dict, runner=subprocess.run) -> tuple[bool, str | None]:
+    _, state = _herdr_record(name, runner)
+    if state == "blocked":
+        return False, "orchestrator is blocked"
+    if state not in ("idle", "working"):
+        return False, "orchestrator is not live"
+    S.Herdr(runner=runner).agent_prompt(name, scrub(text), cfg["herdr"]["prompt_ack_timeout_ms"])
+    return True, None
+
+
+def _answer_notice(scheduler: S.Scheduler, command: dict) -> tuple[dict, str]:
+    body = scrub(command["body"])
+    run_id, decision_id = command.get("run_id"), command.get("decision_id")
+    choice = body.get("choice")
+    if not isinstance(run_id, str) or not isinstance(decision_id, str) or not isinstance(choice, str):
+        raise ValueError("answer command is missing its run, decision or choice")
+    note = body.get("note") if isinstance(body.get("note"), str) else ""
+    label = ""
+    try:
+        decision = scheduler.store.load(run_id).get("decisions", {}).get(decision_id, {})
+        option = next((item for item in decision.get("options", [])
+                       if item.get("key", "").lower() == choice.lower()), None)
+        label = option.get("label", "") if option else ""
+    except (S.SchedulerError, AttributeError, TypeError):
+        pass
+    quote = note if note.strip() else (label or choice)
+    result = scheduler.decision_answer(run_id, decision_id, choice, note, channel="hub", by=command["by"],
+                                       followup=body.get("followup"), value=body.get("value"), quote=quote)
+    text = (f"[hub] {decision_id} answered by {command['by']}: {result['choice']} ({result['label']}). "
+            f"It is recorded; carry it out with --decision {decision_id}.")
+    return result, scrub(text)
+
+
+def _command_notice(command: dict) -> str:
+    body = scrub(command["body"])
+    if command["type"] == "reply":
+        decision_id = command.get("decision_id")
+        if not isinstance(decision_id, str) or not decision_id:
+            raise ValueError("reply command is missing its decision id")
+        text = body.get("text")
+        if not isinstance(text, str) or not text:
+            raise ValueError("reply command is missing text")
+        return scrub(f'[hub] reply to {decision_id} from {command["by"]}: "{text}"')
+    if command["type"] == "prompt":
+        text = body.get("text")
+        if not isinstance(text, str) or not text:
+            raise ValueError("prompt command is missing text")
+        return scrub(f"[hub] {text}")
+    raise ValueError(f"unsupported command type: {command.get('type')}")
+
+
+def _ack_command(client: HubClient, command_id: str, status: str, reason: str | None = None) -> None:
+    client.ack_command(command_id, status, reason)
+
+
+def _deliver_command(ws: Path, cfg: dict, name: str, runner, client: HubClient,
+                     command: dict, records: dict[str, dict], notice_retries: list[tuple[str, str]]) -> None:
+    command_id = command["id"]
+    if command_id in records:
+        record = records[command_id]
+        _ack_command(client, command_id, record.get("status", "DELIVERED"), record.get("reason"))
+        return
+
+    if command["type"] == "answer":
+        try:
+            scheduler = S.Scheduler(ws, cfg=cfg, herdr=S.Herdr(runner=runner))
+        except Exception as error:
+            _ack_command(client, command_id, "FAILED", _short_reason(error))
+            return
+        try:
+            _, notice = _answer_notice(scheduler, command)
+        except S.SchedulerError as error:
+            _ack_command(client, command_id, "REJECTED", scrub(str(error))[:2000])
+            return
+        except Exception as error:
+            _ack_command(client, command_id, "FAILED", _short_reason(error))
+            return
+        try:
+            _append_hub_log(ws, command, records)
+        except OSError as error:
+            log_action(ws, f"hub command log unavailable: {error}")
+        try:
+            delivered, _ = _type_hub_notice(name, notice, cfg, runner)
+            if not delivered:
+                notice_retries.append((command_id, notice))
+        except Exception as error:
+            log_action(ws, f"answer notice will retry locally: {_short_reason(error)}")
+            notice_retries.append((command_id, notice))
+        _ack_command(client, command_id, "DELIVERED")
+        return
+
+    try:
+        notice = _command_notice(command)
+    except Exception as error:
+        _ack_command(client, command_id, "FAILED", _short_reason(error))
+        return
+    try:
+        _, state = _herdr_record(name, runner)
+    except Exception as error:
+        _ack_command(client, command_id, "FAILED", _short_reason(error))
+        return
+    if state == "blocked":
+        _ack_command(client, command_id, "HELD", "orchestrator is blocked")
+        return
+    if state not in ("idle", "working"):
+        _ack_command(client, command_id, "HELD", "orchestrator is not live")
+        return
+    try:
+        _append_hub_log(ws, command, records)
+    except OSError as error:
+        _ack_command(client, command_id, "FAILED", _short_reason(error))
+        return
+    try:
+        S.Herdr(runner=runner).agent_prompt(name, notice, cfg["herdr"]["prompt_ack_timeout_ms"])
+    except Exception as error:
+        reason = _short_reason(error)
+        try:
+            _update_hub_log(ws, command_id, "FAILED", reason, records)
+        except OSError as log_error:
+            log_action(ws, f"could not update hub command log: {log_error}")
+        _ack_command(client, command_id, "FAILED", reason)
+        return
+    _ack_command(client, command_id, "DELIVERED")
+
+
+def _retry_hub_notices(ws: Path, name: str, cfg: dict, runner,
+                       notice_retries: list[tuple[str, str]]) -> None:
+    remaining = []
+    for command_id, notice in notice_retries:
+        try:
+            delivered, _ = _type_hub_notice(name, notice, cfg, runner)
+        except Exception as error:
+            log_action(ws, f"answer notice retry failed for {command_id}: {_short_reason(error)}")
+            delivered = False
+        if not delivered:
+            remaining.append((command_id, notice))
+    notice_retries[:] = remaining
+
+
+def _poll_hub_commands(ws: Path, cfg: dict, name: str, runner, client: HubClient,
+                       records: dict[str, dict], notice_retries: list[tuple[str, str]], wait: int = 25) -> None:
+    commands = sorted(client.commands(wait=wait), key=lambda command: (command["created_at"], command["id"]))
+    for command in commands:
+        _deliver_command(ws, cfg, name, runner, client, command, records, notice_retries)
+
+
 def watch(ws: Path, interval=5, no_orchestrator=False, runner=subprocess.run, sleep=time.sleep,
           max_loops=None, clock=time.monotonic) -> int:
     """Run the connector until stopped, the backend is duplicated, or the orchestrator exits."""
@@ -819,12 +1082,17 @@ def watch(ws: Path, interval=5, no_orchestrator=False, runner=subprocess.run, sl
     last_send, last_check, last_mtimes = clock(), 0.0, None
     reason = "signal"
     orch_name = kitstart.agent_name(S.project_root_for(ws, cfg).name)
+    command_records = _load_hub_log(ws)
+    notice_retries = []
     log_action(ws, "connector started")
 
     def connect_and_sync():
-        nonlocal client, connected, remote, backoff, last_send, last_check
+        nonlocal client, connected, remote, backoff, last_send, last_check, key
         if key is None:
-            raise RuntimeError("connector key unavailable")
+            try:
+                key = read_key()
+            except RuntimeError as error:
+                raise RuntimeError("connector key unavailable") from error
         client = HubClient(hub.get("url", "http://127.0.0.1:7420"), key, hello["workspace_id"])
         response = client.hello(hello)
         remote = {"event_cursors": response["event_cursors"], "decision_hashes": response["decision_hashes"],
@@ -903,6 +1171,18 @@ def watch(ws: Path, interval=5, no_orchestrator=False, runner=subprocess.run, sl
                 except Exception as e:
                     connected = False
                     log_action(ws, f"backend offline: {e}")
+                    write_hint(ws, False)
+                    sleep(backoff)
+                    backoff = min(backoff * 2, 60)
+            if connected:
+                _retry_hub_notices(ws, orch_name, cfg, runner, notice_retries)
+                try:
+                    # Hold the long-poll only for one sync interval so snapshots keep their cadence.
+                    _poll_hub_commands(ws, cfg, orch_name, runner, client, command_records, notice_retries,
+                                       wait=max(1, min(25, int(interval))))
+                except Exception as e:
+                    connected = False
+                    log_action(ws, f"command poll failed: {e}")
                     write_hint(ws, False)
                     sleep(backoff)
                     backoff = min(backoff * 2, 60)

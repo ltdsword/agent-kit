@@ -103,6 +103,12 @@ Record only what the user actually wrote, in their words: never invent, paraphra
 answer, never record one from your own reasoning, never edit `.orchestrator/**/state.json` or
 decision files, and never route around a refusal.
 
+## Agent Hub messages
+
+Lines starting `[hub]` are the user's words from Agent Hub. An `answered` notice means the decision
+is already recorded: carry it out with `--decision <id>` and do not ask again. A `reply` or prompt is
+the user's message; treat it like chat.
+
 Rules: Herdr `idle` is not success; the scheduler's state is the authority for leases; never
 `git reset --hard`/`clean` an unknown worktree; never dispatch non-trivial work before READY.
 <!-- agent-system:orchestrator:end -->

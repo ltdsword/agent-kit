@@ -131,7 +131,8 @@ class HubCtlTests(Base):
         destination.write_text('{"old": true}\n')
         output = StringIO()
         with mock.patch.object(HC.getpass, "getpass", return_value="temporary-password") as password_prompt, \
-                redirect_stdout(output):
+                mock.patch.object(HC, "hub_start", return_value=0), \
+                mock.patch.object(HC.agentctl, "_orchestrator_alive", return_value=False), redirect_stdout(output):
             self.assertEqual(HC.hub_login("alice", self.proxy.url, "Test computer", self.repo), 0)
         password_prompt.assert_called_once()
         saved = json.loads(destination.read_text())
@@ -143,6 +144,97 @@ class HubCtlTests(Base):
         registration = next(item for item in self.proxy.requests if item["path"].endswith("/computers/register"))
         self.assertEqual(registration["body"], {"username": "alice", "password": "temporary-password",
                                                  "name": "Test computer"})
+
+    def test_hub_login_starts_backend_waits_for_key_enables_then_starts_watcher(self):
+        system = self.repo / ".agent-system"
+        system.mkdir()
+        cfg = json.loads(json.dumps(REAL_CONFIG))
+        cfg.pop("project", None)
+        cfg["pool"]["worktree_root"] = str(Path(self.tmp.name) / "wt")
+        cfg["hub"] = {"enabled": False, "url": self.proxy.url, "workspace_id": None,
+                      "upload": {"documents": True, "diffs": True, "orchestrator_screen": True}}
+        config_path = system / "config.json"
+        config_path.write_text(json.dumps(cfg))
+        destination = self.config_dir / "computer.json"
+        key_path = self.config_dir / "connector.key"
+        events, original_main = [], HC.agentctl.main
+
+        def start_backend(source, workspace, start_connector=True):
+            self.assertTrue(destination.is_file())
+            events.append("backend-start")
+            key_path.write_text("fake-connector-key")
+            return 0
+
+        def enable(argv=None, **kwargs):
+            events.append("enable")
+            self.assertTrue(key_path.is_file())
+            return original_main(argv, **kwargs)
+
+        def live(_name):
+            events.append("live-check")
+            return True
+
+        with mock.patch.object(HC.getpass, "getpass", return_value="temporary-password"), \
+                mock.patch.object(HC, "hub_start", side_effect=start_backend), \
+                mock.patch.object(HC.agentctl, "main", side_effect=enable), \
+                mock.patch.object(HC.agentctl, "_orchestrator_alive", side_effect=live), \
+                mock.patch.object(HC.agentctl.kitstart, "start_connector", side_effect=lambda *_: events.append("watch")), \
+                redirect_stdout(StringIO()):
+            self.assertEqual(HC.hub_login("alice", self.proxy.url, "Test computer", self.repo), 0)
+        self.assertEqual(events, ["backend-start", "enable", "live-check", "watch"])
+        self.assertTrue(json.loads(config_path.read_text())["hub"]["enabled"])
+
+    def test_hub_start_launches_backend_and_live_workspace_watcher(self):
+        system = self.repo / ".agent-system"
+        system.mkdir()
+        cfg = json.loads(json.dumps(REAL_CONFIG))
+        cfg.pop("project", None)
+        cfg["pool"]["worktree_root"] = str(Path(self.tmp.name) / "wt")
+        cfg["hub"] = {"enabled": True, "url": self.proxy.url, "workspace_id": "ws_abcdefghijklmnop"}
+        (system / "config.json").write_text(json.dumps(cfg))
+        calls = []
+
+        def popen(args, **kwargs):
+            calls.append((args, kwargs))
+            return type("Process", (), {"pid": 500 + len(calls)})()
+
+        with mock.patch.object(HC.Path, "cwd", return_value=self.repo), \
+                mock.patch.object(HC, "node24", return_value=Path("/usr/bin/node")), \
+                mock.patch.object(HC.subprocess, "Popen", side_effect=popen), \
+                mock.patch.object(HC.agentctl, "_orchestrator_alive", return_value=True), \
+                redirect_stdout(StringIO()):
+            self.assertEqual(HC.main(["hub", "start"]), 0)
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(calls[1][0][1:], [str(Path(HC.agentctl.__file__).resolve()), "watch"])
+        self.assertEqual(calls[1][1]["cwd"], str(self.repo))
+        self.assertTrue(calls[1][1]["start_new_session"])
+
+    def test_hub_stop_waits_for_pid_exit(self):
+        self.data_dir.mkdir()
+        (self.data_dir / "hub.pid").write_text("456\n")
+        alive = iter([True, True, False, False])
+        sleeps, output = [], StringIO()
+        with mock.patch.object(HC.agentctl, "pid_alive", side_effect=lambda _pid: next(alive)), \
+                mock.patch.object(HC.os, "kill") as kill, redirect_stdout(output):
+            self.assertEqual(HC.hub_stop(sleep=sleeps.append, clock=lambda: 0), 0)
+        kill.assert_called_once_with(456, HC.signal.SIGTERM)
+        self.assertTrue(sleeps)
+        self.assertEqual(output.getvalue().strip(), "stopped")
+
+    def test_hub_stop_reports_still_running_after_ten_seconds(self):
+        self.data_dir.mkdir()
+        (self.data_dir / "hub.pid").write_text("789\n")
+        now, sleeps, output = {"value": 0.0}, [], StringIO()
+
+        def sleep(seconds):
+            sleeps.append(seconds)
+            now["value"] = 10.0
+
+        with mock.patch.object(HC.agentctl, "pid_alive", return_value=True), \
+                mock.patch.object(HC.os, "kill"), redirect_stdout(output):
+            self.assertEqual(HC.hub_stop(sleep=sleep, clock=lambda: now["value"]), 0)
+        self.assertEqual(sum(sleeps), 0.1)
+        self.assertEqual(output.getvalue().strip(), "still running (pid 789)")
 
     def test_install_script_dispatches_new_commands_in_dry_run(self):
         installer = ROOT / ".agent-system" / "scripts" / "install.sh"

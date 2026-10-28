@@ -14,6 +14,7 @@ import socket
 import stat
 import subprocess
 import sys
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -148,6 +149,33 @@ def atomic_private_json(path: Path, value: dict) -> None:
             pass
 
 
+def _wait_for_connector_key(timeout=20, sleep=time.sleep, clock=time.monotonic) -> bool:
+    deadline = clock() + min(max(timeout, 0), 20)
+    while True:
+        try:
+            agentctl.read_key()
+            return True
+        except RuntimeError:
+            remaining = deadline - clock()
+            if remaining <= 0:
+                return False
+            sleep(min(0.25, remaining))
+
+
+def _start_workspace_connector(workspace: Path) -> None:
+    if not (workspace / ".agent-system" / "config.json").is_file():
+        return
+    try:
+        cfg = agentctl.load_config(workspace)
+        if not agentctl.config_hub(cfg).get("enabled"):
+            return
+        project = agentctl.S.project_root_for(workspace, cfg)
+        if agentctl._orchestrator_alive(agentctl.kitstart.agent_name(project.name)):
+            agentctl.kitstart.start_connector(workspace, cfg)
+    except Exception as error:
+        print(f"hub connector could not be started: {agentctl.scrub(str(error))}", file=sys.stderr)
+
+
 def hub_login(name: str, url: str | None, computer_name: str | None, workspace: Path) -> int:
     if url:
         proxy_url = url.rstrip("/")
@@ -170,9 +198,19 @@ def hub_login(name: str, url: str | None, computer_name: str | None, workspace: 
     atomic_private_json(computer_path(), saved)
     print(f"registered {name} on {computer_name}; saved computer config")
     if (workspace / ".agent-system" / "config.json").is_file():
+        try:
+            hub_start(Path(__file__).resolve().parent.parent, workspace, start_connector=False)
+        except (HubCtlError, OSError, ValueError) as error:
+            raise HubCtlError(f"registration was saved, but Agent Hub backend could not be started: {error}") from error
+        if not _wait_for_connector_key():
+            raise HubCtlError("registration was saved, but connector.key did not appear within 20 seconds")
         code = agentctl.main(["--workspace-root", str(workspace), "enable"], workspace_root=workspace)
         if code:
             raise HubCtlError("registration was saved, but agentctl enable failed")
+        cfg = agentctl.load_config(workspace)
+        project = agentctl.S.project_root_for(workspace, cfg)
+        if agentctl._orchestrator_alive(agentctl.kitstart.agent_name(project.name)):
+            agentctl.kitstart.start_connector(workspace, cfg)
     return 0
 
 
@@ -204,7 +242,8 @@ def _node_major(node: Path) -> int:
         return 0
 
 
-def hub_start(source: Path) -> int:
+def hub_start(source: Path, workspace: Path | None = None, start_connector=True) -> int:
+    workspace = (workspace or Path.cwd()).resolve()
     directory = data_dir()
     directory.mkdir(parents=True, exist_ok=True, mode=0o700)
     pidfile, logfile = directory / "hub.pid", directory / "hub.log"
@@ -215,6 +254,8 @@ def hub_start(source: Path) -> int:
             pid = 0
         if agentctl.pid_alive(pid):
             print(f"Agent Hub backend is already running (pid {pid})")
+            if start_connector:
+                _start_workspace_connector(workspace)
             return 0
     node = node24(source)
     cli = source / "hub" / "server" / "src" / "cli.ts"
@@ -233,10 +274,12 @@ def hub_start(source: Path) -> int:
     os.chmod(temp, 0o600)
     os.replace(temp, pidfile)
     print(f"started Agent Hub backend (pid {process.pid}); log: {logfile}")
+    if start_connector:
+        _start_workspace_connector(workspace)
     return 0
 
 
-def hub_stop() -> int:
+def hub_stop(sleep=time.sleep, clock=time.monotonic) -> int:
     pidfile = data_dir() / "hub.pid"
     try:
         pid = int(pidfile.read_text(encoding="ascii").strip())
@@ -251,7 +294,16 @@ def hub_stop() -> int:
         os.kill(pid, signal.SIGTERM)
     except OSError as error:
         raise HubCtlError(f"could not stop Agent Hub backend pid {pid}: {error}") from error
-    print(f"sent SIGTERM to Agent Hub backend pid {pid}")
+    deadline = clock() + 10
+    while agentctl.pid_alive(pid):
+        remaining = deadline - clock()
+        if remaining <= 0:
+            break
+        sleep(min(0.1, remaining))
+    if agentctl.pid_alive(pid):
+        print(f"still running (pid {pid})")
+    else:
+        print("stopped")
     return 0
 
 
@@ -331,7 +383,7 @@ def main(argv=None) -> int:
         if args.command == "hub-login":
             return hub_login(args.name, args.url, args.computer_name, Path.cwd())
         if args.command == "hub":
-            return {"start": lambda: hub_start(args.source), "stop": hub_stop,
+            return {"start": lambda: hub_start(args.source, Path.cwd()), "stop": hub_stop,
                     "status": hub_status}[args.action]()
         if args.command == "proxy-setup":
             return proxy_setup(args.source, args.rotate_admin_key, args.origins)

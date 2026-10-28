@@ -25,7 +25,7 @@ User request -> orchestrator: configured program + model (default Claude Code, O
 | `models.py` | Model registry: Herdr agent programs (Claude Code and Codex verified, others unverified), Claude list, Codex catalog, effort checks, pick-from table |
 | `kitconfig.py` | `agent-kit config`: choose program/model/effort per role (flags, or interactive on a terminal) |
 | `kitstart.py` | `agent-kit start` / `continue`: open Herdr and launch the orchestrator with its program/model/effort, or resume its last chat |
-| `agentctl.py` | Agent Hub connector: enable the workspace, preview a sync, watch status and documents, and manage the connector |
+| `agentctl.py` | Agent Hub connector: enable the workspace, preview a sync, deliver queued commands, sync status and documents, and manage the connector |
 | `hubctl.py` | Agent Hub account, computer registration, local backend and proxy-setup commands |
 | `scripts/record-session.py` | Claude Code hook (SessionStart, UserPromptSubmit): saves the workspace's active chat id to `.orchestrator/orchestrator.json` |
 | `WORKER-RULES.md` | Rules every worker reads, whatever its program (the worker prompt points to it) |
@@ -63,8 +63,8 @@ Prefix every command with `python3 .agent-system/scheduler.py`. Add `--json` bef
 | `doctor` | Validate config, tools, scout agent, Codex profile, cached model catalog |
 | `agentctl enable [--url URL]` / `sync --dry-run [--json]` / `watch [--interval 5] [--no-orchestrator]` / `status` / `stop` / `reset-id` | Configure and inspect the optional Agent Hub connector (`python3 .agent-system/agentctl.py <command>`) |
 | `agent-kit create-user --name=<u>` / `reset-password --name=<u>` | Admin-only account setup; prints the generated password once |
-| `agent-kit hub-login --name=<u> [--url=<proxy>] [--computer-name=<n>]` | Register this computer and enable the connector in the current workspace |
-| `agent-kit hub start\|stop\|status` | Start, stop or inspect the local Agent Hub backend |
+| `agent-kit hub-login --name=<u> [--url=<proxy>] [--computer-name=<n>]` | Register this computer; in a kit workspace, start the backend, wait for its connector key, enable the connector, and start its watcher when the orchestrator is live |
+| `agent-kit hub start\|stop\|status` | Start the local backend and eligible workspace watcher, stop it with a 10-second wait, or inspect status |
 | `agent-kit proxy-setup [--rotate-admin-key] [--origins ...]` | Provision the shared Agent Hub proxy |
 | `pool init` / `pool show` | Create the worktree root, show slot paths/state; show per-slot model resolution |
 | `run create --run ID --tasks FILE [--base REF] [--request-id ID]` | Validate run title/goal and task DAG (1..`max_tasks_per_request`), create `agent/integration-ID` worktree |
