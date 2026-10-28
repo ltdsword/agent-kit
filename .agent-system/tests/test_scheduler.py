@@ -610,6 +610,7 @@ class TestTaskFiles(Base):
         self.assertIn(str(self.repo / "packets" / "T1.md"), text)
         self.assertIn("Do not guess", text)
         self.assertIn("committed=false", text)
+        self.assertIn("unless the file's Boundaries explicitly allow them", text)  # installs only when the task allows
         self.assertIn(str(self.s.store.run_dir("r1") / "reports" / "T1.json"), text)
 
     def test_collect_captures_uncommitted_diff_and_appends_result(self):
