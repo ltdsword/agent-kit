@@ -108,3 +108,73 @@ This overrides the phase file where they differ:
 - **Worker `since`:** the `at` of the newest event in that run's `events` with `kind == "worker"`
   and `worker == <slot>`. If there is none, use the slot's `session_started_at`, else `null`.
 - Everything else in the task file and the phase file stands. Start the implementation now.
+
+## Worker result - attempt 2 (28/10/26 15:53)
+
+- Status: **done** (worker worker-1, branch `agent/hub1-t1-r2`)
+- Commits: none, changes left uncommitted (orchestrator commits after review)
+- Files: `.agent-system/README.md`, `.agent-system/agentctl.py`, `.agent-system/config.json`, `.agent-system/kitstart.py`, `.agent-system/scheduler.py`, `.agent-system/scripts/install.sh`, `.agent-system/templates/claude-settings.json`, `.agent-system/tests/test_agentctl.py`, `.agent-system/tests/test_scheduler.py`
+- Scope: OK
+- Tests reported:
+  - `python3 -m unittest discover -s .agent-system/tests` -> exit 0
+  - `python3 -m unittest discover -s .agent-system/tests -p test_hubschema.py -v` -> exit 0
+  - `git diff --check` -> exit 0
+- Risks:
+  - Worker since comes from the newest run event with kind=worker and matching worker slot; it falls back to workers[slot].session_started_at, then null.
+  - No separate review document is uploaded: per the D1 clarification, review text is already included in task_file content and kind=review is never emitted.
+  - Research documents use research.rounds[].evidence_path. Decision agent uses tasks[task_id].worker, falling back to orchestrator.
+  - The checkout contains the hub protocol schemas and fixtures but no backend implementation. Fake-backend requests passed schema validation; production endpoint integration remains unverified. No other contract mismatch or open question was found.
+- Not done: none
+- Full diff: `.orchestrator/runs/hub1/reports/T1.diff`
+
+````text
+ .agent-system/README.md                      |    2 +
+ .agent-system/agentctl.py                    | 1044 ++++++++++++++++++++++++++
+ .agent-system/config.json                    |    1 +
+ .agent-system/kitstart.py                    |   35 +
+ .agent-system/scheduler.py                   |   62 +-
+ .agent-system/scripts/install.sh             |    2 +-
+ .agent-system/templates/claude-settings.json |    6 +-
+ .agent-system/tests/test_agentctl.py         |  353 +++++++++
+ .agent-system/tests/test_scheduler.py        |   87 +++
+ 9 files changed, 1585 insertions(+), 7 deletions(-)
+````
+
+(diff is 1730 lines; read the full diff file)
+
+## Review round 2: PASS (28/10/26 15:56)
+
+- Verdict: **PASS** -> task is now PASSED (fix rounds used: 0/2)
+- Reviewed HEAD: e87fb6bc8fb0, commits e87fb6bc8fb0
+
+# Review: hub1 T1, kit connector sync (phase A1)
+
+Verdict: **PASS**
+
+## Checked
+- Scheduler diff: `log_event` `n` counter + trim kept; `decision_ask` hub hint (online needs backend online,
+  heartbeat < 90 s, live pid; any error → offline); `doctor` hub checks only when enabled, ping lazily
+  imported from agentctl, backend down = warn.
+- agentctl: ProxyHandler({}) on every request; canonical hash matches contract; scrubber applied to
+  snapshot, hello, documents, log lines; key never printed; 409 duplicate → exit 2; goodbye + pidfile
+  cleanup + offline hint in `finally`; backoff 1→60 s; resync by hello hashes after reconnect.
+- kitstart: connector start is best-effort, never fails start.
+- Tests: 120 OK (`python3 -m unittest discover -s .agent-system/tests`).
+- Real-data dry run (hub1 state copied to a temp workspace with an id): hello, snapshot, 2 decisions,
+  3 documents all validate. 0 events because hub1 events predate `n` (expected per spec).
+
+## Minor (follow-up, not blocking)
+- Idle loop wakes every 0.5 s and runs `herdr agent get` for the orchestrator on every wake (~2 subprocess
+  calls/s). Check liveness only when `due`. Fix in A2.
+- Snapshot hash excludes `taken_at`; if the backend hashes differently, the first post-hello snapshot is
+  resent once. Harmless; confirm at M1.
+- Backend integration unverified until M1 (real `watch` against T2 server).
+
+## Integration: merged (28/10/26 15:57)
+
+- On `agent/integration-hub1` at 079699fea38f; `.agent-system/scripts/verify.sh --quick` passed (log `.orchestrator/runs/hub1/logs/post-merge-T1-a2.log`)
+
+## Final gate: PASS (28/10/26 15:59)
+
+- `.agent-system/scripts/verify.sh` exit 0 on agent/integration-hub1 at bbb60fb72f7b (log `.orchestrator/runs/hub1/logs/verify-1793177959.log`)
+- Task MERGED; run DONE
