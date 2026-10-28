@@ -1,6 +1,7 @@
 export interface Env {
-  SPIKE_KEY?: string;
-  RELAY_TIMEOUT_MS?: string;
   DB: D1Database;
   RELAY: DurableObjectNamespace;
+  ADMIN_KEY_HASH?: string;
+  SIGNING_KEY?: string;
+  ALLOWED_ORIGINS?: string;
 }

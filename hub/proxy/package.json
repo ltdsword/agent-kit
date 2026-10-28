@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "wrangler dev --local",
+    "setup": "node scripts/setup.ts",
     "test": "vitest run",
     "typecheck": "tsc --noEmit -p ."
   },
