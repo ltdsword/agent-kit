@@ -83,6 +83,11 @@ export class ComputerRelay {
     this.db = bindings.DB;
   }
 
+  private async knownComputerId(): Promise<string> {
+    if (!this.computerId) this.computerId = (await this.state.storage.get<string>("computerId")) ?? "";
+    return this.computerId;
+  }
+
   async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
     const internal = /^\/internal\/computers\/([^/]+)\/(status|relay)$/.exec(url.pathname);
@@ -107,7 +112,11 @@ export class ComputerRelay {
     let computerId: string;
     try { computerId = decodeURIComponent(publicRoute[1]); } catch { return error("not_found", "Computer not found.", 404); }
     if (!/^c_[a-z2-7]{16}$/.test(computerId)) return error("not_found", "Computer not found.", 404);
-    this.computerId = computerId;
+    if (this.computerId !== computerId) {
+      this.computerId = computerId;
+      // Persist it: a hibernated object is rebuilt with empty fields before webSocketMessage runs.
+      await this.state.storage.put("computerId", computerId);
+    }
     if (publicRoute[2] === "connect") return this.connect(request);
     if (publicRoute[2] === "poll") return this.poll(request, computerId, url);
     return this.receiveFrames(request, computerId);
@@ -267,8 +276,9 @@ export class ComputerRelay {
         this.countMalformedFrame();
         return;
       }
-      const frameComputerId = frame.type === "hello" ? frame.computer_id : this.computerId;
-      if (typeof frameComputerId !== "string" || frameComputerId !== this.computerId) {
+      const computerId = await this.knownComputerId();
+      const frameComputerId = frame.type === "hello" ? frame.computer_id : computerId;
+      if (typeof frameComputerId !== "string" || frameComputerId !== computerId) {
         this.countMalformedFrame();
         return;
       }
