@@ -50,3 +50,76 @@
 
 ---
 <!-- Do not edit above this line after dispatch. scheduler.py appends: Worker result, Review, Integration, Final gate. -->
+
+## Worker result - attempt 1 (28/10/26 22:40)
+
+- Status: **done** (worker worker-1, branch `agent/hub3-t2`)
+- Commits: none, changes left uncommitted (orchestrator commits after review)
+- Files: `hub/server/migrations/002-v2.sql`, `hub/server/src/app.ts`, `hub/server/src/auth.ts`, `hub/server/src/cli.ts`, `hub/server/src/config.ts`, `hub/server/src/connector-api.ts`, `hub/server/src/db.ts`, `hub/server/src/relay.ts`, `hub/server/src/status.ts`, `hub/server/src/user-api.ts`, `hub/server/test/server.test.ts`
+- Scope: OK
+- Tests reported:
+  - `source ~/.nvm/nvm.sh && nvm use 24 && cd hub && npm test -w @agent-hub/server` -> exit 1
+  - `source ~/.nvm/nvm.sh && nvm use 24 && cd hub && npm test -w @agent-hub/server` -> exit 0
+  - `source ~/.nvm/nvm.sh && nvm use 24 && cd hub && npm run typecheck -w @agent-hub/server` -> exit 0
+- Risks: none
+- Not done: none
+- Full diff: `.orchestrator/runs/hub3/reports/T2.diff`
+
+````text
+ hub/server/migrations/002-v2.sql |  32 ++
+ hub/server/src/app.ts            |   6 +-
+ hub/server/src/auth.ts           |  76 +++--
+ hub/server/src/cli.ts            |  68 ++---
+ hub/server/src/config.ts         |  57 +++-
+ hub/server/src/connector-api.ts  |  40 +--
+ hub/server/src/db.ts             | 136 ++++-----
+ hub/server/src/relay.ts          | 353 ++++++++++++++++++++++
+ hub/server/src/status.ts         |  29 +-
+ hub/server/src/user-api.ts       |  78 ++---
+ hub/server/test/server.test.ts   | 628 ++++++++++++++++++++++-----------------
+ 11 files changed, 984 insertions(+), 519 deletions(-)
+````
+
+(diff is 1927 lines; read the full diff file)
+
+## Review round 1: PASS (28/10/26 22:42)
+
+- Verdict: **PASS** -> task is now PASSED (fix rounds used: 0/2)
+- Reviewed HEAD: b49f9b395c11, commits b49f9b395c11
+
+# Review: hub3 T2, local backend v2 (`hub/server`)
+
+Verdict: **PASS**
+
+## Checked
+- `npm test -w @agent-hub/server`: 8 pass. Typecheck: 0 errors.
+- Assertion check (`src/auth.ts`):
+  - Ed25519 signature using the pinned `proxy_public_key`, which must be 32 bytes;
+  - payload validated against the schema;
+  - `exp` within [now, now+120 s];
+  - `cid`, `sub` and `rid` must match;
+  - no relay frame means 401.
+  - Tests cover a bad signature, an expired assertion, and a wrong cid/sub/rid.
+- Commands take `by` from `assertion.sub`.
+- Pairing and devices removed: `002-v2.sql` drops both tables, and no `pair`/`device` references remain in `src/`.
+- Runs are upserted and survive a later snapshot. The sweep runs on start and hourly, and deletes decisions, events, documents and the run in one transaction.
+- The workspace list keeps the 15-day rule, and `?all=true` returns everything.
+- Relay (`src/relay.ts`):
+  - transports tried in order: WS, then long-poll direct, then long-poll via `EnvHttpProxyAgent`;
+  - backoff from 1 s to 60 s;
+  - in-process `app.fetch` with the frame id bound;
+  - stream chunks + end, cancel, and 413 for oversized bodies;
+  - frames validated before sending.
+- REPLY_SENT is derived as the spec says.
+
+## Notes (minor, not blocking)
+- The fallback that auto-streams large documents depends on a `Content-Length` header, and Hono's `c.json` doesn't set one. So a `documents/content` response over 900 KB streams only when the proxy sends `stream: true`. That matches the contract ("a `DocumentContent` response is sent with `stream: true`"). Added to the P2a spec: the proxy sets `stream: true` on `documents/content` requests.
+
+## Integration: merged (28/10/26 22:51)
+
+- On `agent/integration-hub3` at 69fd3061f553; `.agent-system/scripts/verify.sh --quick` passed (log `.orchestrator/runs/hub3/logs/post-merge-T2-a1.log`)
+
+## Final gate: PASS (28/10/26 22:54)
+
+- `.agent-system/scripts/verify.sh` exit 0 on agent/integration-hub3 at b82502faff42 (log `.orchestrator/runs/hub3/logs/verify-1793202836.log`)
+- Task MERGED; run DONE
