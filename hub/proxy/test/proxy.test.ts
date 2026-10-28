@@ -544,6 +544,22 @@ describe("protocol-v2 proxy", () => {
     }
   }, 40_000);
 
+  it("accepts a workspaces frame after the hibernated relay wakes with empty fields", async () => {
+    const stored = new Map<string, unknown>([["computerId", "c_aaaaaaaaaaaaaaaa"]]);
+    const writes: unknown[][] = [];
+    const db = { prepare: () => ({ bind: (...values: unknown[]) => ({ run: async () => { writes.push(values); return {}; } }) }) };
+    const state = {
+      getWebSockets: () => [],
+      storage: { get: async (key: string) => stored.get(key), put: async (key: string, value: unknown) => { stored.set(key, value); }, delete: async () => false },
+    };
+    // A new instance stands in for the object rebuilt after hibernation: only storage survives.
+    const relay = new ComputerRelay(state as never, { DB: db } as never);
+    const frame = { type: "workspaces", workspaces: [{ workspace_id: "ws_aaaaaaaaaaaaaaaa", name: "kit", status: "ONLINE", last_seen_at: "2026-10-29T00:00:00.000Z" }] };
+    expectDefinition("RelayWorkspaces", frame);
+    await relay.webSocketMessage({ readyState: 1, send() {}, close() {} } as never, JSON.stringify(frame));
+    expect(writes.some((values) => values[0] === "ws_aaaaaaaaaaaaaaaa" && values[1] === "c_aaaaaaaaaaaaaaaa")).toBe(true);
+  });
+
   it("sends cancel when the relay request is aborted", async () => {
     const sent: Record<string, unknown>[] = [];
     const socket = {

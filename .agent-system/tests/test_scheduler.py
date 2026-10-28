@@ -1852,3 +1852,11 @@ class TestInstall(Base):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class AgentStateShapeTests(unittest.TestCase):
+    def test_reads_herdr_agent_status(self):
+        # Shape of `herdr agent get` (result.agent.agent_status); wait() relies on it to see approval prompts.
+        res = {"agent": {"agent": "codex", "agent_session": {"agent": "codex", "kind": "id", "value": "x"},
+                         "agent_status": "blocked", "name": "worker-3-hub5"}, "type": "agent"}
+        self.assertEqual(S._agent_state(res), "blocked")
