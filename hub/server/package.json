@@ -1,0 +1,24 @@
+{
+  "name": "@agent-hub/server",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "agent-hub": "./src/cli.ts"
+  },
+  "scripts": {
+    "start": "node src/cli.ts serve",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit -p ."
+  },
+  "dependencies": {
+    "@agent-hub/protocol": "1.0.0",
+    "@hono/node-server": "^2.1.5",
+    "hono": "^4.13.14"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "~5.9.3",
+    "vitest": "^5.0.5"
+  }
+}
