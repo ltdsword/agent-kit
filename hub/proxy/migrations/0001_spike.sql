@@ -1,0 +1,5 @@
+CREATE TABLE IF NOT EXISTS spike_rows (
+  id INTEGER PRIMARY KEY,
+  note TEXT,
+  at TEXT
+);
