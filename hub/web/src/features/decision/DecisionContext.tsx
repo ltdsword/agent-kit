@@ -3,6 +3,7 @@ import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import type { Decision } from '@/api/types';
 import { useHub } from '@/state/HubProvider';
+import { documentForDecision } from '@/state/selectors';
 import { Icon, type IconName } from '@/components/Icon';
 import { parseDiff } from '../documents/parseDiff';
 
@@ -10,6 +11,8 @@ const WHY_ICONS: IconName[] = ['globe', 'folder', 'info'];
 
 /** "What happened": evidence, the worker-approval command, or the finish report + diff stat. */
 export function DecisionContext({ decision: d }: { decision: Decision }) {
+  const hub = useHub();
+  const rawFile = documentForDecision(hub, d);
   return (
     <>
       {d.approval && (
@@ -42,6 +45,12 @@ export function DecisionContext({ decision: d }: { decision: Decision }) {
             </div>
           )}
         </section>
+      )}
+
+      {rawFile && (
+        <Link to={`/w/${d.workspaceId}/docs/${encodeURIComponent(rawFile.id)}`} style={{ display: 'inline-flex', alignItems: 'center', gap: 6, minHeight: 36, fontSize: 13, fontWeight: 600 }}>
+          <Icon name="file" size="sm" />Raw file<Icon name="chevron-right" size="sm" />
+        </Link>
       )}
 
       {d.kind === 'finish' && <FinishReport decision={d} />}

@@ -214,6 +214,10 @@ export function mapDecision(item: HubDecision, workspaceStatus: WorkspaceStatus)
   };
 }
 
+export function mapDecisions(items: HubDecision[], workspaceStatus: WorkspaceStatus): Decision[] {
+  return items.map((item) => mapDecision(item, workspaceStatus)).sort((a, b) => b.openedAt - a.openedAt);
+}
+
 function mapPromptStatus(status: UserCommand['status']): PromptStatus {
   return status === 'REJECTED' ? 'FAILED' : status;
 }

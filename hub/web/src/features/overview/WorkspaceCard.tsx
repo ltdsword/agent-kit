@@ -34,7 +34,7 @@ export function WorkspaceCard({ workspace: w, now }: { workspace: Workspace; now
 
         {needs.length > 0 ? (
           <button type="button" className="needs-band" onClick={openNeeds}>
-            <span className="needs"><Icon name="bell" />{needs.length} {needs.length === 1 ? 'needs you' : 'need you'}</span>
+            <span className="needs"><Icon name="bell" />{needs.length} decision{needs.length === 1 ? '' : 's'}</span>
             <span className="trunc" style={{ fontSize: 13, flex: 1 }}>
               {needs.map((d) => `${d.id} ${d.kind}`).join(' · ')}
               {!w.computerOnline ? ' · computer offline; answers disabled' : w.status !== 'RUNNING' ? ' · answers wait for your computer' : ''}

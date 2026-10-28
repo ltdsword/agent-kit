@@ -63,7 +63,7 @@ function WorkerCard({ workspace: w, worker: k }: { workspace: Workspace; worker:
       {decision && (
         <Link className="needs-band" to={decisionPath(decision)} style={{ padding: '10px 12px', flexDirection: 'column', alignItems: 'stretch', gap: 6 }}>
           <span style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-            <span className="chip c-needs"><Icon name="bell" />Needs you</span>
+            <span className="chip c-needs"><Icon name="bell" />Decisions</span>
             <span className="mono" style={{ fontWeight: 600 }}>{decision.id}</span>
             <span className="t-small" style={{ marginLeft: 'auto' }}>{duration(decision.openedAt, now)}</span>
           </span>

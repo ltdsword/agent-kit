@@ -13,7 +13,7 @@ let client: MockHubClient;
 afterEach(() => client?.dispose());
 
 function renderAt(path: string) {
-  client = new MockHubClient({ delays: { load: 0, deliver: 20, apply: 20, prompt: 20, reply: 20, finish: 20 }, heartbeat: false });
+  client = new MockHubClient({ delays: { load: 0, deliver: 20, apply: 20, prompt: 20, reply: 5000, finish: 20 }, heartbeat: false });
   const router = createMemoryRouter(routes, { initialEntries: [path] });
   render(
     <AuthProvider client={new MockAuthClient({ signedIn: true })}>

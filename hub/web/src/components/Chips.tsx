@@ -33,7 +33,7 @@ export function PlainChip({ children }: { children: React.ReactNode }) {
 }
 
 export function NeedsBadge({ count, large, onClick }: { count: number; large?: boolean; onClick?: () => void }) {
-  const text = `${count} ${count === 1 ? 'needs you' : 'need you'}`;
+  const text = `${count} decision${count === 1 ? '' : 's'}`;
   const cls = `needs${large ? ' needs-lg' : ''}`;
   if (onClick) {
     return (

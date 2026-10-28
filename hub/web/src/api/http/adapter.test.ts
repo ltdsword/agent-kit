@@ -8,7 +8,7 @@ import replyDecisionFixture from '../../../../protocol/fixtures/HubDecision.repl
 import approvalFixture from '../../../../protocol/fixtures/Decision.worker-approval.json';
 import documentContentFixture from '../../../../protocol/fixtures/DocumentContent.json';
 import {
-  collectPages, mapDecision, mapDocumentContent, mapHistoryItem, mapWorkspaceDetail,
+  collectPages, mapDecision, mapDecisions, mapDocumentContent, mapHistoryItem, mapWorkspaceDetail,
   mapWorkspaceSummary,
 } from './adapter';
 
@@ -62,6 +62,23 @@ describe('protocol v2 adapter', () => {
     expect(mapped.evidence[0]).toMatchObject({ code: 'task-scope', note: 'The command is within the assigned test scope.' });
     expect(mapDecision(replyDecisionFixture as unknown as HubDecision, 'OFFLINE').status).toBe('REPLY_SENT');
     expect(mapDecision({ ...open, hub_status: 'SENT' }, 'OFFLINE').status).toBe('WAITING');
+  });
+
+  it('adapts every decision list item and orders the list newest first', () => {
+    const open = openDecisionFixture as unknown as HubDecision;
+    const reply = replyDecisionFixture as unknown as HubDecision;
+    const older = {
+      ...open,
+      decision: { ...open.decision, decision_id: 'D1', opened_at: '2026-10-27T08:00:00.000Z' },
+    };
+    const newer = {
+      ...reply,
+      decision: { ...reply.decision, decision_id: 'D2', opened_at: '2026-10-28T08:00:00.000Z' },
+    };
+
+    const mapped = mapDecisions([older, newer], 'RUNNING');
+    expect(mapped.map((decision) => decision.id)).toEqual(['D2', 'D1']);
+    expect(mapped[0]).toMatchObject({ runId: 'r4', status: 'REPLY_SENT' });
   });
 
   it('maps text documents and history authors/channels', () => {

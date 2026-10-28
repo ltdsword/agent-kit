@@ -399,9 +399,11 @@ describe("relay client", () => {
       documentChunks.forEach((frame) => valid("RelayStreamChunk", frame));
 
       const other = await fixture<any>("HelloRequest.json"); other.workspace_id = "ws_p4x2d6abcdefghij"; other.session_id = "ses_eeeeffffgggghhhh";
-      await doHello(other); events.publish({ type: "workspace", workspace_id: other.workspace_id, at: new Date(now).toISOString(), ref: other.workspace_id });
+      const newWorkspace = await doHello(other);
+      expect(newWorkspace.response.status).toBe(200);
       const workspaces = await proxy.waitFor((frame) => frame.type === "workspaces" && frame.workspaces.length === 2, 5000);
       valid("RelayWorkspaces", workspaces);
+      expect(workspaces.workspaces).toContainEqual(expect.objectContaining({ workspace_id: other.workspace_id, name: other.name, status: "ONLINE" }));
 
       const firstConnectedAt = Date.now();
       const initialWebsocketAttempts = proxy.websocketAttempts;

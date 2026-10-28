@@ -35,7 +35,7 @@ export function OrchestratorCard({ workspace: w }: { workspace: Workspace }) {
 
         {ownDecisions.map((d) => (
           <Link key={d.id} className="needs-band" to={decisionPath(d)}>
-            <span className="chip c-needs"><Icon name="bell" />Needs you</span>
+            <span className="chip c-needs"><Icon name="bell" />Decisions</span>
             <span className="mono" style={{ fontWeight: 600 }}>{d.id}</span>
             <span className="trunc" style={{ flex: 1, fontWeight: 600, fontSize: 13.5 }}>{d.title}</span>
             <Icon name="chevron-right" />

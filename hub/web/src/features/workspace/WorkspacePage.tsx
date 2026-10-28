@@ -13,9 +13,9 @@ import { RunCard } from './RunCard';
 import { DocumentList } from './DocumentList';
 import { HistoryPreview } from './HistoryPreview';
 
-type Tab = 'all' | 'needs' | 'agents' | 'runs' | 'docs';
+type Tab = 'all' | 'decisions' | 'agents' | 'runs' | 'docs';
 const TABS: { id: Tab; label: string }[] = [
-  { id: 'all', label: 'Everything' }, { id: 'needs', label: 'Needs you' }, { id: 'agents', label: 'Agents' },
+  { id: 'all', label: 'Everything' }, { id: 'decisions', label: 'Decisions' }, { id: 'agents', label: 'Agents' },
   { id: 'runs', label: 'Runs' }, { id: 'docs', label: 'Documents' },
 ];
 
@@ -30,8 +30,8 @@ export function WorkspacePage() {
   const needCount = needsYou(hub, w.id).length;
   const show = (t: Tab) => tab === 'all' || tab === t;
   // A tab whose content sits in one column gets that column alone, wide and centred.
-  const hasMain = show('needs') || show('agents');
-  const hasSide = show('runs') || show('docs') || show('needs');
+  const hasMain = show('decisions') || show('agents');
+  const hasSide = show('runs') || show('docs') || show('decisions');
 
   return (
     <div className="fade-in stack">
@@ -47,7 +47,7 @@ export function WorkspacePage() {
             {TABS.map((t) => (
               <button key={t.id} type="button" className={`tab${tab === t.id ? ' on' : ''}`} aria-pressed={tab === t.id} onClick={() => setTab(t.id)}>
                 {t.label}
-                {t.id === 'needs' && needCount > 0 && <span className="count">{needCount}</span>}
+                {t.id === 'decisions' && needCount > 0 && <span className="count">{needCount}</span>}
               </button>
             ))}
             <Link className="tab" to={`/w/${w.id}/history`}>History</Link>
@@ -71,7 +71,7 @@ export function WorkspacePage() {
       <div className="page page-wide cols" style={{ paddingTop: 16, flexDirection: 'row' }}>
         {hasMain && (
           <div className={`col-main${hasSide ? '' : ' col-solo'}`}>
-            {show('needs') && <NeedsYouSection workspace={w} />}
+            {show('decisions') && <NeedsYouSection workspace={w} />}
             {show('agents') && <OrchestratorCard workspace={w} />}
             {show('agents') && <SubagentsSection workspace={w} />}
           </div>
@@ -80,7 +80,7 @@ export function WorkspacePage() {
           <div className={`col-side${hasMain ? '' : ' col-solo'}`}>
             {show('runs') && <RunCard workspace={w} />}
             {show('docs') && <DocumentList workspace={w} />}
-            {show('needs') && <HistoryPreview workspace={w} />}
+            {show('decisions') && <HistoryPreview workspace={w} />}
           </div>
         )}
       </div>

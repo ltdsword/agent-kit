@@ -266,6 +266,31 @@ export function seedDecisions(now: number): Decision[] {
       recommend: 'A', status: 'OPEN', openedAt: now - 14 * MIN, appliedNote: 'Opus pressed 1 in worker-3’s terminal. The install ran.',
     },
     {
+      workspaceId: 'ws_k3m9q2', runId: 'r4', id: 'D2', kind: 'question', agent: 'orchestrator', taskId: 'T4',
+      title: 'Narrow T4 to the API layer?',
+      question: 'T4 touches the client SDK as well as the API. Narrow it?',
+      evidence: [{ code: 'T4 scope', note: 'The client SDK is outside this run.' }],
+      options: [
+        { key: 'A', label: 'Keep the client SDK changes', consequence: 'T4 updates both the API and client SDK.' },
+        { key: 'B', label: 'Narrow T4 to the API layer', consequence: 'The client SDK stays unchanged.' },
+      ],
+      recommend: 'B', status: 'APPLIED', openedAt: now - 90 * MIN,
+      answer: { choice: 'B', label: 'Narrow T4 to the API layer', channel: 'hub', by: 'alice', at: now - 75 * MIN },
+      appliedAt: now - 70 * MIN, appliedNote: 'T4 stayed within the API layer.',
+    },
+    {
+      workspaceId: 'ws_k3m9q2', runId: 'r3', id: 'D4', kind: 'finish', agent: 'orchestrator',
+      title: 'Merge run r3?', question: 'The run passed its gate. How should it be merged?', evidence: [],
+      options: [
+        { key: 'A', label: 'Merge and push', consequence: 'Merge the run into main and push it.' },
+        { key: 'B', label: 'Merge locally', consequence: 'Merge into main without pushing.' },
+        { key: 'C', label: 'Do not merge', consequence: 'Leave the run unmerged.' },
+      ],
+      recommend: 'A', status: 'APPLIED', openedAt: now - 3 * 24 * 60 * MIN - 15 * MIN,
+      answer: { choice: 'A', label: 'Merge and push', branch: 'main', push: true, channel: 'hub', by: 'alice', at: now - 3 * 24 * 60 * MIN },
+      appliedAt: now - 3 * 24 * 60 * MIN + 10 * MIN, appliedNote: 'Run r3 merged into main.',
+    },
+    {
       workspaceId: 'ws_q7l2a1', runId: 'r7', id: 'D2', kind: 'blocker', agent: 'worker-1', taskId: 'T3',
       title: 'T3 blocked: the migration needs a database the sandbox can’t reach',
       question: 'The migration test connects to Postgres on localhost:5432. The worker sandbox blocks it, so T3 can’t verify its change.',

@@ -6,7 +6,7 @@ import {
 import type { HubClient } from '../client';
 import type { AnswerInput, HubSnapshot, Workspace } from '../types';
 import {
-  collectPages, mapDecision, mapDocumentContent, mapHistoryItem, mapPrompt,
+  collectPages, mapDecisions, mapDocumentContent, mapHistoryItem, mapPrompt,
   mapWorkspaceDetail, mapWorkspaceSummary,
 } from './adapter';
 import { SSEParser } from './sse';
@@ -184,7 +184,7 @@ export class HttpHubClient implements HubClient {
     const path = routePath(USER_ROUTES.decisions.path, { ws: workspaceId });
     const items = await this.list<HubDecision>(path, workspaceId);
     const workspace = this.workspace(workspaceId);
-    const mapped = items.map((item) => mapDecision(item, workspace?.status ?? 'OFFLINE'));
+    const mapped = mapDecisions(items, workspace?.status ?? 'OFFLINE');
     this.emit({ decisions: [...this.snap.decisions.filter((item) => item.workspaceId !== workspaceId), ...mapped] });
   }
 

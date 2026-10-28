@@ -1,5 +1,5 @@
 import { decisionKey } from '@/api/client';
-import type { Decision, HubSnapshot, Workspace } from '@/api/types';
+import type { Decision, HubDocument, HubSnapshot, Workspace } from '@/api/types';
 import { IN_FLIGHT, NEEDS_YOU } from '@/lib/status';
 
 /** Pure functions over a snapshot. Easy to unit-test; components stay thin. */
@@ -37,6 +37,22 @@ export function keyOf(d: Decision): string {
 
 export function decisionPath(d: Pick<Decision, 'workspaceId' | 'runId' | 'id'>): string {
   return `/w/${d.workspaceId}/d/${d.runId}/${d.id}`;
+}
+
+function documentMentionsDecision(document: HubDocument, decisionId: string): boolean {
+  return `${document.id} ${document.name} ${document.title}`.toLowerCase().split(/[^a-z0-9]+/).includes(decisionId.toLowerCase());
+}
+
+export function decisionForDocument(s: HubSnapshot, document: HubDocument): Decision | undefined {
+  if (document.kind !== 'decision') return undefined;
+  return s.decisions.find((decision) => decision.workspaceId === document.workspaceId
+    && decision.runId === document.runId && documentMentionsDecision(document, decision.id));
+}
+
+export function documentForDecision(s: HubSnapshot, decision: Decision): HubDocument | undefined {
+  return s.documents.find((document) => document.kind === 'decision'
+    && document.workspaceId === decision.workspaceId && document.runId === decision.runId
+    && documentMentionsDecision(document, decision.id));
 }
 
 export function documentsByRun(s: HubSnapshot, workspaceId: string) {

@@ -31,7 +31,7 @@ export function Layout() {
           <span>Agent Hub</span>
         </Link>
         {needs.length > 0 && (
-          <button type="button" className="needs" onClick={() => navigate(decisionPath(needs[0]!))} aria-label={`${needs.length} decisions need you. Open the oldest.`}>
+          <button type="button" className="needs" onClick={() => navigate(decisionPath(needs[0]!))} aria-label={`${needs.length} open decisions. Open the oldest.`}>
             <Icon name="bell" />{needs.length}
           </button>
         )}
