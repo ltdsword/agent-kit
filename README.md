@@ -707,7 +707,7 @@ agent-kit update --folder=~/Code/myrepo              # roll it out to each works
 | `scripts/doctor.sh`, `verify.sh` | Health check, quality gate |
 | `templates/` | The orchestrator rules (`ORCHESTRATOR.section.md`, written into `CLAUDE.md` and `AGENTS.md`) and Claude deny rules |
 | `tests/test_scheduler.py` | Scheduler, workspace mode and installer tests |
-| `docs/` | Workspace rule; Decision Hub plan (not planned) |
+| `docs/` | Workspace rule; Agent Hub plan (planned, not built) |
 | `../.claude/agents/scout.md` | The Sonnet scout definition |
 
 ### Releasing (apt package)
@@ -783,8 +783,8 @@ Inside `.agent-system/` (copied into every workspace):
 - `GUIDE.md`: step-by-step walkthrough (Herdr basics, setup, first task, adopting results).
 - `README.md`: scheduler file and command reference.
 - `docs/WORKSPACE-SETUP.md`: the workspace rule (why the tooling lives outside the repo) and setup.
-- `docs/DECISION-HUB-PLAN.md`: a web dashboard for remote decisions, not planned: Claude Remote Control
-  plus chat answers covers it for a single user. Kept for reference.
+- `docs/DECISION-HUB-PLAN.md`: the Agent Hub, planned (not built): a web dashboard for running
+  workspaces, multiple-choice decisions, prompts, job reports and history, with a local backend.
 - `prompts/review-checklist.md`, `prompts/task-packet.md`: how tasks are written and reviewed.
 
 ---
