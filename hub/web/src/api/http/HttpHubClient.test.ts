@@ -10,7 +10,7 @@ const summary = (computerId: string | null) => ({
 const json = (body: unknown) => new Response(JSON.stringify(body), { status: 200, headers: { 'Content-Type': 'application/json' } });
 
 describe('HttpHubClient', () => {
-  afterEach(() => { vi.unstubAllGlobals(); });
+  afterEach(() => { vi.useRealTimers(); vi.unstubAllGlobals(); });
 
   it('keeps the computer from the listing when a workspace detail refresh arrives, so the live stream stays open', async () => {
     let streamSignal: AbortSignal | undefined;
@@ -42,6 +42,45 @@ describe('HttpHubClient', () => {
       expect(workspace?.computerId).toBe('c_1');
       expect(workspace?.computerOnline).toBe(true);
       expect(streamSignal?.aborted).toBe(false);
+    } finally {
+      client.dispose();
+    }
+  });
+
+  it('retries a failed stream within 3 seconds and refreshes decisions after reconnecting', async () => {
+    vi.useFakeTimers();
+    let streamAttempts = 0;
+    let decisionRequests = 0;
+    vi.stubGlobal('fetch', vi.fn(async (input: string) => {
+      const path = new URL(input).pathname;
+      if (path.endsWith('/computers/c_1/stream')) {
+        streamAttempts += 1;
+        if (streamAttempts < 3) throw new Error('stream unavailable');
+        return new Response(new ReadableStream<Uint8Array>(), { status: 200, headers: { 'Content-Type': 'text/event-stream' } });
+      }
+      if (path.endsWith('/workspaces')) return json({ items: [summary('c_1')], next: null });
+      if (path.endsWith('/workspaces/ws_aaaaaaaaaaaaaaaa')) {
+        return json({ workspace: summary(null), snapshot: null, decisions_open: [], commands_recent: [] });
+      }
+      if (path.endsWith('/decisions')) {
+        decisionRequests += 1;
+        return json({ items: [], next: null });
+      }
+      return json({ items: [], next: null });
+    }));
+
+    const client = new HttpHubClient('https://hub.example', () => 'token', () => {});
+    try {
+      await vi.advanceTimersByTimeAsync(0);
+      expect(streamAttempts).toBe(1);
+      expect(decisionRequests).toBe(1);
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(streamAttempts).toBe(2);
+      await vi.advanceTimersByTimeAsync(1999);
+      expect(streamAttempts).toBe(2);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(streamAttempts).toBe(3);
+      await vi.waitFor(() => expect(decisionRequests).toBe(2));
     } finally {
       client.dispose();
     }

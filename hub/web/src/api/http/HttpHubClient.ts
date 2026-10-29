@@ -270,9 +270,14 @@ export class HttpHubClient implements HubClient {
           throw error;
         }
         if (!response.body) throw new HubApiError('empty_stream', 'The event stream had no body.');
+        const reconnected = this.streamDown.has(computerId);
         this.streamDown.delete(computerId);
         this.clearPoll(computerId);
         this.setConnection();
+        if (reconnected) {
+          const workspaces = this.snap.workspaces.filter((item) => item.computerId === computerId);
+          void Promise.all(workspaces.map((item) => this.refreshWorkspaceAll(item.id, item.computerOnline))).catch(() => {});
+        }
         delay = 1000;
         const parser = new SSEParser();
         const reader = response.body.getReader();
@@ -303,7 +308,7 @@ export class HttpHubClient implements HubClient {
         this.setConnection();
         this.startPoll(computerId);
         await this.wait(delay, signal);
-        delay = Math.min(delay * 2, 30_000);
+        delay = Math.min(delay * 2, 5_000);
       }
     }
   }
