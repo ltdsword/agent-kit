@@ -36,12 +36,14 @@ export class RelayClient {
   private readonly requests = new Map<string, AbortController>();
   private readonly timers = new Set<ReturnType<typeof setTimeout>>();
   private readonly intervals = new Set<ReturnType<typeof setInterval>>();
+  private readonly demotedUntil = new Map<Transport, number>();
   private readonly unsubscribe: () => void;
   private currentSocket?: WebSocket;
   private preferred?: Transport;
   private currentStatus: RelayStatus;
   private running?: Promise<void>;
   private sendWorkspaces?: () => void;
+  private transportConnectedAt?: number;
   private backoffMs = 1_000;
   private workspaceTimer?: ReturnType<typeof setTimeout>;
   // A dead network path can leave a socket or request open forever; these bound every wait so the loop always retries.
@@ -104,9 +106,24 @@ export class RelayClient {
 
   private async run(): Promise<void> {
     while (!this.abort.signal.aborted) {
-      const order: Transport[] = ["websocket", "long-poll-direct", "long-poll-proxy"];
-      if (this.preferred) order.unshift(order.splice(order.indexOf(this.preferred), 1)[0]);
+      const normalOrder: Transport[] = ["websocket", "long-poll-direct", "long-poll-proxy"];
+      const now = this.clock();
+      const demoted = new Set(normalOrder.filter((transport) => {
+        const until = this.demotedUntil.get(transport);
+        if (until === undefined) return false;
+        if (until <= now) { this.demotedUntil.delete(transport); return false; }
+        return true;
+      }));
+      let order = normalOrder;
+      if (demoted.size < normalOrder.length) {
+        const available = normalOrder.filter((transport) => !demoted.has(transport));
+        if (this.preferred && available.includes(this.preferred)) {
+          available.unshift(available.splice(available.indexOf(this.preferred), 1)[0]);
+        }
+        order = [...available, ...normalOrder.filter((transport) => demoted.has(transport))];
+      }
       for (const transport of order) {
+        this.transportConnectedAt = undefined;
         try {
           await this.setStatus(transport, false);
           if (transport === "websocket") await this.runWebSocket();
@@ -115,6 +132,12 @@ export class RelayClient {
           if (this.abort.signal.aborted) break;
           const reason = error instanceof Error ? (error.cause instanceof Error ? `${error.message}: ${error.cause.message}` : error.message) : String(error);
           process.stderr.write(`${new Date(this.clock()).toISOString()} relay ${transport} ended: ${reason}\n`);
+          const endedAt = this.clock();
+          if (this.transportConnectedAt === undefined || endedAt - this.transportConnectedAt < 5 * 60 * 1000) {
+            this.demotedUntil.set(transport, endedAt + 15 * 60 * 1000);
+          } else {
+            this.demotedUntil.delete(transport);
+          }
           await this.setStatus(transport, false);
         }
         if (this.abort.signal.aborted) break;
@@ -169,6 +192,8 @@ export class RelayClient {
           if (this.abort.signal.aborted) { socket.close(); finish(new Error("relay stopped")); return; }
           this.preferred = "websocket";
           this.backoffMs = 1_000;
+          this.transportConnectedAt = this.clock();
+          process.stderr.write(`${new Date(this.clock()).toISOString()} relay websocket connected\n`);
           void this.setStatus("websocket", true);
           send(this.hello(), "RelayHello");
           lastMessageAt = Date.now();
@@ -233,6 +258,8 @@ export class RelayClient {
       if (flushError) throw flushError;
       this.preferred = useProxy ? "long-poll-proxy" : "long-poll-direct";
       this.backoffMs = 1_000;
+      this.transportConnectedAt = this.clock();
+      process.stderr.write(`${new Date(this.clock()).toISOString()} relay ${this.preferred} connected\n`);
       await this.setStatus(this.preferred, true);
       while (!this.abort.signal.aborted) {
         if (flushError) throw flushError;

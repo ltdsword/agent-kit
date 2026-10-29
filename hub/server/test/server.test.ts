@@ -248,22 +248,29 @@ function parseClientFrames(socket: Duplex, onFrame: (frame: unknown) => void, in
 
 class FakeProxy {
   readonly messages: any[] = [];
+  readonly attemptEvents: string[] = [];
   readonly sockets = new Set<Duplex>();
   readonly queued: unknown[] = [];
   readonly paths: string[] = [];
   readonly server = createServer((request, response) => { void this.http(request, response); });
   port = 0;
   websocket = true;
+  closeNextWebsocketImmediately = false;
   failPolls = false;
   hangUpgrade = false;
   hangPolls = false;
+  holdPolls = false;
   websocketAttempts = 0;
+  websocketHellos = 0;
+  pollAttempts = 0;
   authHeaders: string[] = [];
+  private pendingPollResponses: ServerResponse[] = [];
   private waiters: Array<{ predicate: (frame: any) => boolean; resolve: (frame: any) => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout> }> = [];
 
   async listen(): Promise<void> {
     this.server.on("upgrade", (request, socket, head) => {
       this.websocketAttempts++;
+      this.attemptEvents.push("websocket");
       if (this.hangUpgrade) { this.sockets.add(socket); return; }
       if (!this.websocket) { socket.end("HTTP/1.1 426 Upgrade Required\r\nConnection: close\r\n\r\n"); return; }
       this.authHeaders.push(String(request.headers.authorization ?? ""));
@@ -273,7 +280,14 @@ class FakeProxy {
       socket.write(`HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ${accept}\r\n\r\n`);
       this.sockets.add(socket);
       socket.on("close", () => this.sockets.delete(socket));
-      parseClientFrames(socket, (frame) => this.capture(frame), head);
+      parseClientFrames(socket, (frame) => {
+        if (frame && typeof frame === "object" && "type" in frame && frame.type === "hello") this.websocketHellos++;
+        this.capture(frame);
+      }, head);
+      if (this.closeNextWebsocketImmediately) {
+        this.closeNextWebsocketImmediately = false;
+        socket.end();
+      }
     });
     await new Promise<void>((resolve) => this.server.listen(0, "127.0.0.1", resolve));
     this.port = (this.server.address() as { port: number }).port;
@@ -307,14 +321,23 @@ class FakeProxy {
 
   closeSockets(): void { for (const socket of this.sockets) socket.destroy(); this.sockets.clear(); }
 
+  releasePoll(status = 200): void {
+    const response = this.pendingPollResponses.shift();
+    if (!response) throw new Error("no held poll response to release");
+    if (status !== 200) { response.writeHead(status).end(); return; }
+    setTimeout(() => response.end(JSON.stringify({ frames: [] })), 20);
+  }
+
   private async http(request: IncomingMessage, response: ServerResponse): Promise<void> {
     const path = new URL(request.url ?? "/", `http://${request.headers.host}`).pathname;
     this.paths.push(path);
     this.authHeaders.push(String(request.headers.authorization ?? ""));
     if (path.endsWith("/connect")) { response.writeHead(426).end(); return; }
     if (path.endsWith("/poll")) {
+      this.pollAttempts++;
       if (this.failPolls) { response.writeHead(503).end(); return; }
       if (this.hangPolls) return;
+      if (this.holdPolls) { this.pendingPollResponses.push(response); return; }
       const frame = this.queued.shift();
       setTimeout(() => response.end(JSON.stringify({ frames: frame === undefined ? [] : [frame] })), 20);
       return;
@@ -323,7 +346,12 @@ class FakeProxy {
       if (this.failPolls) { response.writeHead(503).end(); return; }
       const chunks: Buffer[] = [];
       for await (const chunk of request) chunks.push(Buffer.from(chunk));
-      try { for (const frame of JSON.parse(Buffer.concat(chunks).toString("utf8")).frames) this.capture(frame); } catch {}
+      try {
+        for (const frame of JSON.parse(Buffer.concat(chunks).toString("utf8")).frames) {
+          if (frame.type === "hello") this.attemptEvents.push("long-poll");
+          this.capture(frame);
+        }
+      } catch {}
       response.writeHead(204).end(); return;
     }
     response.writeHead(404).end();
@@ -334,6 +362,12 @@ class FakeProxy {
     this.server.closeAllConnections();
     await new Promise<void>((resolve) => this.server.close(() => resolve()));
   }
+}
+
+async function waitUntil(predicate: () => boolean, label: string, timeout = 5000): Promise<void> {
+  const deadline = Date.now() + timeout;
+  while (!predicate() && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 10));
+  expect(predicate(), label).toBe(true);
 }
 
 function newRelayRequest(id: string, path: string, stream = false): RelayRequest {
@@ -363,6 +397,63 @@ async function startRelay(proxy: FakeProxy, relayAppInstance: Hono, dbInstance =
 }
 
 describe("relay client", () => {
+  it("tries a briefly dropped WebSocket last for 15 minutes, then restores its place", async () => {
+    const proxy = new FakeProxy();
+    proxy.closeNextWebsocketImmediately = true;
+    proxy.holdPolls = true;
+    await proxy.listen();
+    try {
+      const client = await startRelay(proxy, relayApp({ cancelled: false, started: false }));
+      await waitUntil(() => proxy.pollAttempts >= 1, "first long-poll attempt did not start");
+
+      now += 5 * 60 * 1000;
+      proxy.releasePoll(503);
+      await waitUntil(() => proxy.pollAttempts >= 2, "second long-poll attempt did not start");
+      now += 5 * 60 * 1000;
+      proxy.releasePoll(503);
+
+      const cycleTwoStart = proxy.attemptEvents.length;
+      const websocketHelloBaseline = proxy.websocketHellos;
+      await waitUntil(() => proxy.pollAttempts >= 3, "second cycle did not start");
+      now += 5 * 60 * 1000;
+      proxy.releasePoll(503);
+      await waitUntil(() => proxy.pollAttempts >= 4, "second cycle did not try both long-poll transports");
+      now += 5 * 60 * 1000;
+      proxy.releasePoll(503);
+      await waitUntil(() => proxy.websocketAttempts >= 2, "second cycle did not try WebSocket");
+      expect(proxy.attemptEvents.slice(cycleTwoStart, cycleTwoStart + 3)).toEqual(["long-poll", "long-poll", "websocket"]);
+
+      await waitUntil(() => proxy.websocketHellos > websocketHelloBaseline, "second WebSocket did not connect");
+      const secondWebsocketIndex = proxy.attemptEvents.lastIndexOf("websocket");
+      proxy.closeSockets();
+      await waitUntil(() => !client.status().connected, "second WebSocket did not disconnect");
+      now += 16 * 60 * 1000;
+      await waitUntil(() => proxy.websocketAttempts >= 3, "WebSocket was not first in the cycle after its demotion expired");
+      expect(proxy.attemptEvents[secondWebsocketIndex + 1]).toBe("websocket");
+      await client.stop();
+    } finally { await proxy.close(); }
+  }, 20000);
+
+  it("does not demote a transport that stays connected for five minutes", async () => {
+    const proxy = new FakeProxy();
+    proxy.websocket = false;
+    proxy.holdPolls = true;
+    await proxy.listen();
+    try {
+      const client = await startRelay(proxy, relayApp({ cancelled: false, started: false }));
+      await waitUntil(() => proxy.pollAttempts >= 1, "first long-poll attempt did not start");
+      now += 5 * 60 * 1000;
+      proxy.releasePoll(503);
+      await waitUntil(() => proxy.pollAttempts >= 2, "second long-poll attempt did not start");
+      proxy.releasePoll(503);
+
+      const nextCycleStart = proxy.attemptEvents.length;
+      await waitUntil(() => proxy.attemptEvents.length > nextCycleStart, "retry cycle did not start");
+      expect(proxy.attemptEvents[nextCycleStart]).toBe("long-poll");
+      await client.stop();
+    } finally { await proxy.close(); }
+  }, 15000);
+
   it("sends hello, routes requests, streams, cancels, bounds frames, updates workspaces, and reconnects", async () => {
     const proxy = new FakeProxy(); await proxy.listen();
     const signals = { cancelled: false, started: false };
