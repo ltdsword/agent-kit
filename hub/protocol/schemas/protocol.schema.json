@@ -27,7 +27,7 @@
     "CommandType": {"enum": ["answer", "reply", "prompt"]},
     "CommandStatus": {"enum": ["QUEUED", "HELD", "DELIVERED", "REJECTED", "FAILED", "EXPIRED"]},
     "AckStatus": {"enum": ["DELIVERED", "HELD", "REJECTED", "FAILED"]},
-    "DocumentKind": {"enum": ["final_report", "final_diff", "decision", "research"]},
+    "DocumentKind": {"enum": ["final_report", "final_diff", "decision", "research", "plan", "review", "other"]},
     "DocumentFormat": {"enum": ["markdown", "diff", "text"]},
 
     "ApiError": {

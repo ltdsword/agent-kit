@@ -11,6 +11,9 @@ export const DOC_KIND: Record<DocumentKind, { icon: IconName; className: string;
   final_diff: { icon: 'diff', className: 'diff', label: 'Total diff' },
   decision: { icon: 'bell', className: 'decision', label: 'Decision record' },
   research: { icon: 'compass', className: 'research', label: 'Research dossier' },
+  plan: { icon: 'file', className: 'report', label: 'Plan' },
+  review: { icon: 'file', className: 'report', label: 'Review' },
+  other: { icon: 'file', className: 'report', label: 'Document' },
 };
 
 type Filter = 'Docs' | 'Diffs' | 'Decisions';

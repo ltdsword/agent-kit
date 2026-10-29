@@ -192,7 +192,7 @@ export type HistoryEntry =
   | { id: string; workspaceId: string; at: number; type: 'prompt'; runId: string; promptId: string; by?: string }
   | { id: string; workspaceId: string; at: number; type: 'routine'; runId: string; text: string; reason: string; docId?: string };
 
-export type DocumentKind = 'final_report' | 'final_diff' | 'decision' | 'research';
+export type DocumentKind = 'final_report' | 'final_diff' | 'decision' | 'research' | 'plan' | 'review' | 'other';
 
 export interface HubDocument {
   id: string;

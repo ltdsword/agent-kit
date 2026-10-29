@@ -33,7 +33,7 @@ export type AnswerChannel = "chat" | "hub" | "opus";
 export type CommandType = "answer" | "reply" | "prompt";
 export type CommandStatus = "QUEUED" | "HELD" | "DELIVERED" | "REJECTED" | "FAILED" | "EXPIRED";
 export type AckStatus = "DELIVERED" | "HELD" | "REJECTED" | "FAILED";
-export type DocumentKind = "final_report" | "final_diff" | "decision" | "research";
+export type DocumentKind = "final_report" | "final_diff" | "decision" | "research" | "plan" | "review" | "other";
 export type DocumentFormat = "markdown" | "diff" | "text";
 
 /**
