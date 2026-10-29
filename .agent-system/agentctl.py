@@ -27,6 +27,9 @@ import scheduler as S  # noqa: E402
 CONNECTOR_VERSION = "0.1.0"
 PROTOCOL_VERSION = 2
 LEGACY_RUN_LOGGED = set()
+# The backend holds a workspace for 90 s after a session that never said goodbye (e.g. killed during a
+# restart); a clash that outlasts this is a real duplicate (a copied workspace).
+DUPLICATE_GRACE_S = 120
 ID_ALPHABET = "abcdefghijklmnopqrstuvwxyz234567"
 MAX_DOCUMENT_BYTES = 1024 * 1024
 MAX_SNAPSHOT_BYTES = 256 * 1024
@@ -1280,14 +1283,29 @@ def watch(ws: Path, interval=5, no_orchestrator=False, runner=subprocess.run, sl
         backoff = 1
         log_action(ws, "hello and sync complete")
 
+    duplicate_since = None
+
+    def duplicate_clash(e: DuplicateWorkspace) -> bool:
+        """Wait out a stale session; True once the clash has lasted too long to be one."""
+        nonlocal duplicate_since
+        if duplicate_since is None:
+            duplicate_since = clock()
+            log_action(ws, "workspace id held by an earlier session; retrying until it expires")
+        if clock() - duplicate_since < DUPLICATE_GRACE_S:
+            write_hint(ws, False)
+            sleep(10)
+            return False
+        print(f"workspace id is already online ({e.message}); run `agentctl reset-id`", file=sys.stderr)
+        log_action(ws, "duplicate workspace id; reset-id required")
+        return True
+
     try:
         try:
             connect_and_sync()
         except DuplicateWorkspace as e:
-            reason = "manual"
-            print(f"workspace id is already online ({e.message}); run `agentctl reset-id`", file=sys.stderr)
-            log_action(ws, "duplicate workspace id; reset-id required")
-            return 2
+            if duplicate_clash(e):
+                reason = "manual"
+                return 2
         except Exception as e:
             connected = False
             log_action(ws, f"backend offline: {e}")
@@ -1315,10 +1333,10 @@ def watch(ws: Path, interval=5, no_orchestrator=False, runner=subprocess.run, sl
                 try:
                     connect_and_sync()
                 except DuplicateWorkspace as e:
-                    reason = "manual"
-                    print(f"workspace id is already online ({e.message}); run `agentctl reset-id`", file=sys.stderr)
-                    log_action(ws, "duplicate workspace id; reset-id required")
-                    return 2
+                    if duplicate_clash(e):
+                        reason = "manual"
+                        return 2
+                    continue
                 except Exception as e:
                     log_action(ws, f"backend offline: {e}")
                     write_hint(ws, False)

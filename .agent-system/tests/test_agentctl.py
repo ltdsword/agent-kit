@@ -81,7 +81,7 @@ class FakeBackend:
                                      "server_time": "2026-10-28T08:00:00Z", "version": "0.1.0"})
                 elif path.endswith("/agent/hello"):
                     if owner.duplicate:
-                        owner.duplicate = False
+                        owner.duplicate -= 1  # True = once; an int = that many times
                         self.reply(409, {"error": {"code": "duplicate_workspace", "message": "already online"}})
                         return
                     self.reply(200, {"known": bool(owner.snapshot_hash), "server_time": "2026-10-28T08:00:00Z",
@@ -626,13 +626,28 @@ class AgentCtlTests(Base):
         self.assertIn(True, hints)
         self.assertTrue(any(r["path"].endswith("/snapshot") for r in backend.requests))
 
-    def test_watch_duplicate_workspace_exits_two(self):
+    def test_watch_waits_out_a_stale_session_then_connects(self):
         with FakeBackend(duplicate=True) as backend:
             self.set_backend(backend)
             with redirect_stdout(StringIO()), redirect_stderr(StringIO()):
                 code = AC.watch(self.ws, runner=self.fake_herdr(), sleep=lambda _: None,
-                                no_orchestrator=True, max_loops=1)
+                                no_orchestrator=True, max_loops=2)
+        self.assertNotEqual(code, 2)
+        self.assertTrue(any(r["path"].endswith("/snapshot") for r in backend.requests))
+
+    def test_watch_duplicate_workspace_exits_two(self):
+        now = {"t": 0.0}
+
+        def sleep(seconds):
+            now["t"] += seconds
+
+        with FakeBackend(duplicate=10**6) as backend:
+            self.set_backend(backend)
+            with redirect_stdout(StringIO()), redirect_stderr(StringIO()):
+                code = AC.watch(self.ws, runner=self.fake_herdr(), sleep=sleep, clock=lambda: now["t"],
+                                no_orchestrator=True, max_loops=50)
         self.assertEqual(code, 2)
+        self.assertGreaterEqual(now["t"], AC.DUPLICATE_GRACE_S)
         self.assertFalse((self.ws / ".orchestrator" / "hub-connector.pid").exists())
 
     def test_watch_orchestrator_gone_goodbye(self):
