@@ -238,7 +238,12 @@ def start_connector(ws: Path, cfg: dict, popen=None, log=None, no_orchestrator=F
     logpath = ws / ".orchestrator" / "hub-connector.log"
     logpath.parent.mkdir(parents=True, exist_ok=True)
     try:
-        args = [sys.executable, str(Path(__file__).resolve().with_name("agentctl.py")), "watch"]
+        # Run the workspace's own agentctl: it takes its workspace from its own location, so the kit's
+        # copy (used when `hub start` runs from another folder) would connect the wrong workspace.
+        script = ws / ".agent-system" / "agentctl.py"
+        if not script.is_file():
+            script = Path(__file__).resolve().with_name("agentctl.py")
+        args = [sys.executable, str(script), "watch"]
         if no_orchestrator:
             args.append("--no-orchestrator")
         with open(logpath, "a") as output:

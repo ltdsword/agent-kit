@@ -294,6 +294,15 @@ class HubCtlTests(Base):
         HC.agentctl.kitstart.start_connector(self.repo, cfg, popen=popen, no_orchestrator=True)
         self.assertEqual(calls[0][0][-2:], ["watch", "--no-orchestrator"])
 
+    def test_start_connector_runs_the_workspace_own_agentctl(self):
+        cfg = self.configure_workspace(self.repo)
+        own = self.repo / ".agent-system" / "agentctl.py"
+        own.write_text("# workspace copy\n")
+        calls = []
+        HC.agentctl.kitstart.start_connector(self.repo, cfg, popen=lambda args, **kw: calls.append(args),
+                                             log=lambda _: None, no_orchestrator=True)
+        self.assertEqual(calls[0][1], str(own))
+
     def test_hub_autostart_reports_missing_systemctl(self):
         output = StringIO()
         with mock.patch.dict(os.environ, {"XDG_CONFIG_HOME": str(Path(self.tmp.name) / "xdg-config")}), \
