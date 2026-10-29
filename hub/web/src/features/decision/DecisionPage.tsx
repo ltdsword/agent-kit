@@ -18,6 +18,7 @@ const ERRORS: Record<string, string> = {
   hub_unreachable: 'The hub can’t be reached. Nothing was sent.',
   computer_offline: 'The computer is offline. Nothing was sent.',
   decision_not_open: 'This decision is no longer open. Nothing was sent.',
+  decision_not_answerable: 'This decision was already answered or closed, so nothing new was sent. The page now shows its current status.',
   workspace_stopped: 'This workspace isn’t running. Nothing was sent.',
 };
 

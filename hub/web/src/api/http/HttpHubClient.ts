@@ -138,6 +138,10 @@ export class HttpHubClient implements HubClient {
       const value = await res.json().catch(() => ({}));
       const error = apiError(res, value);
       if (error.code === 'computer_offline' && options.workspaceId) this.markWorkspaceOffline(options.workspaceId);
+      // The page was stale (answered elsewhere or by an earlier send): pull the current decision state.
+      if (error.code === 'decision_not_answerable' && options.workspaceId) {
+        void this.refreshDecisions(options.workspaceId).catch(() => {});
+      }
       throw error;
     }
     return res.status === 204 ? undefined as T : await res.json() as T;
