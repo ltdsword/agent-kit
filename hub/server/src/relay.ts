@@ -111,8 +111,10 @@ export class RelayClient {
           await this.setStatus(transport, false);
           if (transport === "websocket") await this.runWebSocket();
           else await this.runLongPoll(transport === "long-poll-proxy");
-        } catch {
+        } catch (error) {
           if (this.abort.signal.aborted) break;
+          const reason = error instanceof Error ? (error.cause instanceof Error ? `${error.message}: ${error.cause.message}` : error.message) : String(error);
+          process.stderr.write(`${new Date(this.clock()).toISOString()} relay ${transport} ended: ${reason}\n`);
           await this.setStatus(transport, false);
         }
         if (this.abort.signal.aborted) break;

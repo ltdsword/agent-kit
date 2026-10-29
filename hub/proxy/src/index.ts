@@ -421,8 +421,10 @@ async function handleWorkspaces(request: Request, env: Env, session: Session, ur
 
   const items = liveResults.flatMap((result) => result.items);
   const recentCutoff = new Date(Date.now() - LIMITS.recentWorkspaceDays * 86_400_000).toISOString();
-  const offlineComputerIds = new Set(liveResults.filter((result) => !result.status.online).map((result) => result.status.id));
-  if (offlineComputerIds.size) {
+  // A computer that is offline, or online but failed to answer in time, falls back to its last known index
+  // so a slow relay never makes the workspace list look empty.
+  const unlisted = new Map(liveResults.filter((result) => !result.status.listed).map((result) => [result.status.id, result.status.online]));
+  if (unlisted.size) {
     const indexes = await env.DB.prepare(
       `SELECT wi.workspace_id, wi.name, wi.last_seen_at, c.id AS computer_id
        FROM workspace_index wi JOIN computers c ON c.id = wi.computer_id
@@ -430,7 +432,7 @@ async function handleWorkspaces(request: Request, env: Env, session: Session, ur
     ).bind(session.id, recentCutoff).all<{ workspace_id: string; name: string; last_seen_at: string | null; computer_id: string }>();
     const seen = new Set(items.map((item) => item.id));
     for (const index of indexes.results ?? []) {
-      if (!offlineComputerIds.has(index.computer_id) || seen.has(index.workspace_id)) continue;
+      if (!unlisted.has(index.computer_id) || seen.has(index.workspace_id)) continue;
       items.push({
         id: index.workspace_id,
         name: index.name,
@@ -447,7 +449,7 @@ async function handleWorkspaces(request: Request, env: Env, session: Session, ur
         upload: null,
         orchestrator_last_activity_at: null,
         computer_id: index.computer_id,
-        computer_online: false,
+        computer_online: unlisted.get(index.computer_id) === true,
       });
     }
   }

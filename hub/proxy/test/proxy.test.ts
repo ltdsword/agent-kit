@@ -656,6 +656,23 @@ describe("protocol-v2 proxy", () => {
     expect((await readJson(foreign, "ApiError")).error.code).toBe("not_found");
   });
 
+  it("lists an online computer's last known workspaces when its live listing fails", async () => {
+    const indexedId = `ws_${"k".repeat(16)}`;
+    await seedIndex(computer, indexedId, "indexed workspace");
+    const socket = await connectClient(computer.id, computer.key);
+    try {
+      const listing = fetch(`${baseUrl}/api/v1/workspaces`, { headers: headers(account.token) });
+      const request = await socket.nextMessage() as Record<string, unknown>;
+      socket.sendText(JSON.stringify({ type: "res", id: request.id, status: 503, body: { error: { code: "unavailable", message: "busy" } } }));
+      const list = await readJson(await listing, "List");
+      expect(list.items).toEqual(expect.arrayContaining([
+        expect.objectContaining({ id: indexedId, computer_id: computer.id, computer_online: true }),
+      ]));
+    } finally {
+      socket.close();
+    }
+  });
+
   it("handles CORS preflight and leaves no spike route", async () => {
     const preflight = await fetch(`${baseUrl}/api/v1/auth/login`, {
       method: "OPTIONS",
