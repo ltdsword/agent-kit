@@ -115,6 +115,10 @@ def now() -> str:
     return _dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds")
 
 
+def dispatch_time() -> str:
+    return _dt.datetime.now(_dt.timezone.utc).isoformat(timespec="microseconds")
+
+
 # --------------------------------------------------------------------------- config
 
 def load_config(workspace_root: Path) -> dict:
@@ -252,6 +256,37 @@ def git_rev_list(cwd, base: str, head: str) -> list[str]:
 
 def git_branch_exists(cwd, branch: str) -> bool:
     return git(cwd, "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}", check=False).returncode == 0
+
+
+def report_is_fresh(path: Path, task: dict) -> bool:
+    """Old states have no dispatch time; otherwise a report must postdate the latest dispatch."""
+    dispatched_at = task.get("dispatched_at")
+    if not dispatched_at:
+        return True
+    try:
+        dispatched_ts = _dt.datetime.fromisoformat(dispatched_at).timestamp()
+        return path.stat().st_mtime > dispatched_ts
+    except (OSError, TypeError, ValueError):
+        return False
+
+
+def report_matches_dispatch(path: Path, tid: str, task: dict) -> bool:
+    if not report_is_fresh(path, task):
+        return False
+    try:
+        return json.loads(path.read_text()).get("task_id") == tid
+    except (OSError, json.JSONDecodeError, AttributeError):
+        return False
+
+
+def read_first_paths(packet_text: str) -> list[str]:
+    """Repo paths named in a task packet's Read first section that need base verification."""
+    match = re.search(r"(?ims)^##\s+Read first\b[^\n]*\n(.*?)(?=^##\s|\Z)", packet_text)
+    if not match:
+        return []
+    return sorted(set(re.findall(
+        r"(?<![\w./-])(?:plans|gen-tasks)/[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)*",
+        match.group(1))))
 
 
 def worktree_diff(cwd, base: str) -> tuple[str, str]:
@@ -509,7 +544,7 @@ def plan_dispatch(state: dict, cfg: dict, workspace_root: Path) -> tuple[list[tu
     capacity = limit - sum(1 for w in state["workers"].values() if w["status"] == "BUSY")
     idle = [wid for wid in sorted(state["workers"], key=slot_order) if state["workers"][wid]["status"] == "IDLE"]
     plan, skipped = [], {}
-    for tid in sorted(state["tasks"]):
+    for tid in sorted(state["tasks"], key=lambda item: (not state["tasks"][item].get("redispatch_partial"), item)):
         t = state["tasks"][tid]
         if t["status"] != "READY":
             continue
@@ -799,6 +834,51 @@ class Scheduler:
             yield state
             self.store.save(state)
 
+    def _task_source_issues(self, tasks: list, base_sha: str) -> list[str]:
+        sources = {}
+        issues = set()
+        for task in tasks:
+            packet = Path(task["packet"])
+            if packet.is_absolute() or ".." in packet.parts:
+                issues.add(task["packet"])
+                continue
+            packet_path = self.workspace_root / packet
+            if not packet_path.is_file():
+                issues.add(packet.as_posix())
+                continue
+            rel = packet.as_posix()
+            sources.setdefault(rel, packet_path)
+            sources.update({path: self.project_root / path for path in read_first_paths(
+                packet_path.read_text())})
+
+        for rel, source in sorted(sources.items()):
+            tracked = git(self.project_root, "ls-tree", "-r", "--name-only", base_sha, "--", rel).stdout.splitlines()
+            if rel not in tracked or git(self.project_root, "diff", "--quiet", base_sha, "--", rel,
+                                         check=False).returncode != 0:
+                issues.add(rel)
+                continue
+            committed = git(self.project_root, "show", f"{base_sha}:{rel}").stdout
+            try:
+                actual = source.read_text()
+            except OSError:
+                issues.add(rel)
+                continue
+            if actual != committed:
+                issues.add(rel)
+        return sorted(issues)
+
+    def _archive_report(self, run_id: str, tid: str, attempt: int) -> Path | None:
+        report = self.store.run_dir(run_id) / "reports" / f"{tid}.json"
+        if not report.exists():
+            return None
+        archived = report.with_name(f"{tid}.attempt{attempt}.json")
+        suffix = 2
+        while archived.exists():
+            archived = report.with_name(f"{tid}.attempt{attempt}.{suffix}.json")
+            suffix += 1
+        report.replace(archived)
+        return archived
+
     # ---- run lifecycle
     def create_run(self, run_id: str, tasks: list, base: str = "HEAD", request_id: str | None = None,
                    title=_UNSET, goal=_UNSET) -> dict:
@@ -819,6 +899,10 @@ class Scheduler:
                 raise SchedulerError(f"run(s) {active} still RUNNING; worker slots are shared. "
                                      "Finish or close them first (run close).")
             base_sha = git_out(self.project_root, "rev-parse", "--verify", f"{base}^{{commit}}")
+            task_source_issues = self._task_source_issues(tasks, base_sha)
+            if task_source_issues:
+                raise SchedulerError("task files must be tracked and unmodified at integration base: "
+                                     + ", ".join(task_source_issues))
             if base == "HEAD":  # the branch checked out in the repo folder; None when detached
                 base_branch = git(self.project_root, "symbolic-ref", "-q", "--short", "HEAD",
                                   check=False).stdout.strip() or None
@@ -979,6 +1063,7 @@ class Scheduler:
             f"- packet: {self.workspace_root / packet}",
             f"- research index: {self.workspace_root / state['research']['index_path']}",
             f"- model: {w['model']} / reasoning effort: {w['reasoning_effort']}",
+            *([f"- Lead note: {t['lead_note']}"] if t.get("lead_note") else []),
             f"- completion report (write JSON here): {report}",
             "",
             "Report keys: task_id, status (done|blocked|failed), base_sha, head_sha, commits, committed,",
@@ -1006,6 +1091,7 @@ class Scheduler:
             f"- Work only in: {t['worktree']} (branch {t['branch']}, base {t['base_sha'][:12]})",
             f"- Change only: {', '.join(t['owned_paths'])}",
             f"- Report file: {report}",
+            *([f"- Lead note: {t['lead_note']}"] if t.get("lead_note") else []),
             f"- More detail if needed: {header}",
             "",
             "Cautions:",
@@ -1080,29 +1166,81 @@ class Scheduler:
                 return {"plan": plan, "skipped": skipped}
             if launch == "herdr":
                 self.herdr.require()
+            partial = {}
+            for tid, t in state["tasks"].items():
+                if t["status"] != "READY" or not t.get("redispatch_partial"):
+                    continue
+                if t.get("redispatch_base_sha"):
+                    partial[tid] = ("new", t["redispatch_base_sha"])
+                    continue
+                wt = Path(t["worktree"]) if t.get("worktree") else None
+                dirty = git_dirty_files(wt) if wt and is_worktree(wt) else []
+                if not dirty:
+                    continue
+                wid = t.get("worker")
+                w = state["workers"].get(wid)
+                if w and w["status"] in ("BLOCKED", "IDLE") and w.get("task") is None \
+                        and wt == self.slot_path(wid):
+                    if w["status"] == "BLOCKED":
+                        transition_worker(state, wid, "IDLE", reason="reuse blocked task partial work")
+                    partial[tid] = ("reuse", wid)
+                else:
+                    branch = git_out(wt, "branch", "--show-current")
+                    if branch != t.get("branch"):
+                        raise SchedulerError(f"{tid} partial worktree is on {branch}, not its recorded branch "
+                                             f"{t.get('branch')}; inspect it before re-dispatch")
+                    git(wt, "add", "-A")
+                    git(wt, "commit", "-q", "-m", f"WIP: preserve {tid} partial work")
+                    recovery_sha = git_out(wt, "rev-parse", "HEAD")
+                    t["redispatch_base_sha"] = recovery_sha
+                    self.store.save(state)
+                    partial[tid] = ("new", recovery_sha)
             while True:
                 plan, skipped = plan_dispatch(state, self.cfg, self.workspace_root)
                 result["skipped"] = skipped
                 if not plan:
                     break
+                for index, (tid, wid) in enumerate(plan):
+                    recovery = partial.get(tid)
+                    if not recovery or recovery[0] != "reuse":
+                        continue
+                    previous_wid = recovery[1]
+                    previous_index = next((i for i, (_, assigned_wid) in enumerate(plan)
+                                           if i != index and assigned_wid == previous_wid), None)
+                    if previous_index is not None:
+                        displaced_tid, _ = plan[previous_index]
+                        plan[previous_index] = (displaced_tid, wid)
+                    plan[index] = (tid, previous_wid)
+                    if index:
+                        plan[0], plan[index] = plan[index], plan[0]
+                    break
                 tid, wid = plan[0]
                 t = state["tasks"][tid]
-                branch = self._unique_branch(run_id, tid)
+                recovery = partial.pop(tid, None)
+                reuse = recovery and recovery[0] == "reuse"
+                start_sha = recovery[1] if recovery and recovery[0] == "new" else state["integration_sha"]
+                branch = t["branch"] if reuse else self._unique_branch(run_id, tid)
                 try:
-                    path = self._prepare_slot(wid, branch, state["integration_sha"])
+                    path = Path(t["worktree"]) if reuse else self._prepare_slot(wid, branch, start_sha)
                 except DirtySlot as e:
                     transition_worker(state, wid, "BLOCKED", reason=str(e))
                     result["quarantined"].append({"worker": wid, "reason": str(e)})
                     self.store.save(state)
                     continue
+                self._archive_report(run_id, tid, t["attempts"])
+                dispatch_base_sha = t["base_sha"] if recovery else state["integration_sha"]
+                dispatched_at = dispatch_time()
+                head_sha = git_out(path, "rev-parse", "HEAD")
                 transition_worker(state, wid, "BUSY", task=tid, reason="dispatch")
                 transition_task(state, tid, "RUNNING", "dispatch", worker=wid, branch=branch,
-                                worktree=str(path), base_sha=state["integration_sha"],
-                                head_sha=state["integration_sha"], commits=[],
+                                worktree=str(path), base_sha=dispatch_base_sha,
+                                head_sha=head_sha, commits=[], dispatched_at=dispatched_at,
                                 attempts=t["attempts"] + 1, active_packet=t["packet"],
                                 lease={"worker": wid, "started_at": now(), "last_observed_at": now(),
                                        "expected_artifacts": [self.rel(self.store.run_dir(run_id) /
                                                                        "reports" / f"{tid}.json")]})
+                t.pop("redispatch_partial", None)
+                t.pop("redispatch_base_sha", None)
                 header = self._write_header(state, tid, "task", t["packet"])
                 text = self._prompt_text(state, tid, header, t["packet"], "new task")
                 self.store.save(state)  # lease is durable before any agent starts
@@ -1125,8 +1263,9 @@ class Scheduler:
             t = state["tasks"][tid]
             if t["status"] != "RUNNING":
                 raise SchedulerError(f"{tid} is {t['status']}; relaunch only applies to RUNNING tasks")
-            if (self.store.run_dir(run_id) / "reports" / f"{tid}.json").exists():
-                raise SchedulerError(f"{tid} already has a report; run collect instead of relaunching")
+            self._archive_report(run_id, tid, t["attempts"])
+            t["dispatched_at"] = dispatch_time()
+            t["lease"]["last_observed_at"] = t["dispatched_at"]
             kind = "repair" if t["major_repairs"] else "task"
             header = self._write_header(state, tid, kind, t["active_packet"])
             text = self._prompt_text(state, tid, header, t["active_packet"], f"relaunched {kind}")
@@ -1151,7 +1290,8 @@ class Scheduler:
             if not running:
                 return {"result": "nothing_running",
                         "tasks": {tid: t["status"] for tid, t in state["tasks"].items()}}
-            reported = [tid for tid in running if (reports / f"{tid}.json").exists()]
+            reported = [tid for tid in running
+                        if report_matches_dispatch(reports / f"{tid}.json", tid, state["tasks"][tid])]
             blocked = []
             if self.herdr.available():
                 for tid in running:
@@ -1190,6 +1330,10 @@ class Scheduler:
             rp = self.store.run_dir(run_id) / "reports" / f"{tid}.json"
             if not rp.exists():
                 obs["result"] = "pending: no report yet (herdr idle is not success)"
+                t["observations"].append(obs)
+                return {"task": tid, "result": "pending", "detail": obs["result"]}
+            if not report_is_fresh(rp, t):
+                obs["result"] = "pending: report predates the latest dispatch"
                 t["observations"].append(obs)
                 return {"task": tid, "result": "pending", "detail": obs["result"]}
             problems = []
@@ -1429,6 +1573,7 @@ class Scheduler:
             wid = t["worker"]
             transition_task(state, tid, "RUNNING", "repair dispatched", major_repairs=t["major_repairs"] + 1,
                             attempts=t["attempts"] + 1, active_packet=packet)
+            t["dispatched_at"] = dispatch_time()
             t["lease"]["last_observed_at"] = now()
             # The errors and the proposed fix go into the task file too, so the user sees them in one place.
             body = fix_round_summary(packet_path.read_text())
@@ -2131,6 +2276,8 @@ class Scheduler:
         with self.txn(run_id) as state:
             t = state["tasks"][tid]
             self._require_decision(state, "blocker", tid, decision, "task-unblock", note)
+            t["redispatch_partial"] = t["status"] == "BLOCKED"
+            t["lead_note"] = note.strip()
             transition_task(state, tid, "PENDING", note or "unblocked by Opus")
             if reset_repairs:
                 t["major_repairs"] = 0
