@@ -83,7 +83,7 @@ export const DECISION_STATUS: Record<DecisionStatus, StatusLook> = {
 export const PROMPT_STATUS: Record<PromptStatus, StatusLook> = {
   QUEUED: look('idle', 'clock', 'Queued'),
   DELIVERED: look('done', 'check', 'Delivered'),
-  HELD: look('review', 'hold', 'Held'),
+  HELD: look('review', 'hold', 'Waiting for Opus'),
   EXPIRED: look('offline', 'clock', 'Expired'),
   FAILED: look('blocked', 'alert', 'Failed'),
 };

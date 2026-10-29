@@ -10,7 +10,8 @@ const NODE_CLASS: Partial<Record<Task['status'], string>> = {
 };
 
 export function RunCard({ workspace: w }: { workspace: Workspace }) {
-  const run = w.run;
+  const run = w.run?.id === 'inbox' ? undefined : w.run;
+  const pastRuns = w.pastRuns.filter((pastRun) => pastRun.id !== 'inbox');
   return (
     <section className="card" aria-labelledby="runs-h">
       <div className="stack" style={{ padding: 16, gap: 14 }}>
@@ -48,12 +49,12 @@ export function RunCard({ workspace: w }: { workspace: Workspace }) {
             <p className="t-2">No active run.</p>
           </>
         )}
-        {w.pastRuns.length > 0 && (
+        {pastRuns.length > 0 && (
           <details style={{ borderTop: '1px solid var(--border)', paddingTop: 4 }}>
             <summary style={{ display: 'flex', alignItems: 'center', gap: 8, minHeight: 44, cursor: 'pointer', fontWeight: 600, fontSize: 13.5, listStyle: 'none' }}>
-              <Icon name="chevron-down" />Past runs<span className="count count-quiet">{w.pastRuns.length}</span>
+              <Icon name="chevron-down" />Past runs<span className="count count-quiet">{pastRuns.length}</span>
             </summary>
-            {w.pastRuns.map((p) => (
+            {pastRuns.map((p) => (
               <div key={p.id} className="row" style={{ padding: '8px 0', minHeight: 44 }}>
                 <span className="mono" style={{ width: 24 }}>{p.id}</span>
                 <StatusChip look={RUN_STATUS[p.status]} />

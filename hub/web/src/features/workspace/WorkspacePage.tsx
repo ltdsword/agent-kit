@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { Link, useParams } from 'react-router-dom';
+import { Link, useNavigate, useParams } from 'react-router-dom';
 import { useHub, useNow } from '@/state/HubProvider';
 import { needsYou, workspaceById } from '@/state/selectors';
 import { WORKSPACE_STATUS } from '@/lib/status';
@@ -12,15 +12,17 @@ import { SubagentsSection } from './SubagentsSection';
 import { RunCard } from './RunCard';
 import { DocumentList } from './DocumentList';
 import { HistoryPreview } from './HistoryPreview';
+import { QuestionsSection } from './QuestionsSection';
 
-type Tab = 'all' | 'decisions' | 'agents' | 'runs' | 'docs';
+type Tab = 'all' | 'decisions' | 'questions' | 'agents' | 'runs' | 'docs';
 const TABS: { id: Tab; label: string }[] = [
-  { id: 'all', label: 'Everything' }, { id: 'decisions', label: 'Decisions' }, { id: 'agents', label: 'Agents' },
+  { id: 'all', label: 'Everything' }, { id: 'decisions', label: 'Decisions' }, { id: 'questions', label: 'Questions' }, { id: 'agents', label: 'Agents' },
   { id: 'runs', label: 'Runs' }, { id: 'docs', label: 'Documents' },
 ];
 
 export function WorkspacePage() {
   const { wsId } = useParams();
+  const navigate = useNavigate();
   const hub = useHub();
   const now = useNow();
   const [tab, setTab] = useState<Tab>('all');
@@ -28,11 +30,13 @@ export function WorkspacePage() {
   // Until the workspace list has loaded once, a missing workspace means "still connecting", not "removed".
   if (!w) return hub.loaded ? <NotFound /> : <Connecting />;
 
-  const needCount = needsYou(hub, w.id).length;
+  const needs = needsYou(hub, w.id);
+  const questionNeedCount = needs.filter((decision) => decision.runId === 'inbox').length;
+  const needCount = needs.length - questionNeedCount;
   const show = (t: Tab) => tab === 'all' || tab === t;
   // A tab whose content sits in one column gets that column alone, wide and centred.
-  const hasMain = show('decisions') || show('agents');
-  const hasSide = show('runs') || show('docs') || show('decisions');
+  const hasMain = show('decisions') || show('questions') || show('agents');
+  const hasSide = show('runs') || show('docs') || show('decisions') || show('all');
 
   return (
     <div className="fade-in stack">
@@ -49,6 +53,7 @@ export function WorkspacePage() {
               <button key={t.id} type="button" className={`tab${tab === t.id ? ' on' : ''}`} aria-pressed={tab === t.id} onClick={() => setTab(t.id)}>
                 {t.label}
                 {t.id === 'decisions' && needCount > 0 && <span className="count">{needCount}</span>}
+                {t.id === 'questions' && questionNeedCount > 0 && <span className="count">{questionNeedCount}</span>}
               </button>
             ))}
             <Link className="tab" to={`/w/${w.id}/history`}>History</Link>
@@ -72,7 +77,8 @@ export function WorkspacePage() {
       <div className="page page-wide cols" style={{ paddingTop: 16, flexDirection: 'row' }}>
         {hasMain && (
           <div className={`col-main${hasSide ? '' : ' col-solo'}`}>
-            {show('decisions') && <NeedsYouSection workspace={w} />}
+            {show('decisions') && <NeedsYouSection workspace={w} compact={tab === 'all'} onMore={() => setTab('decisions')} />}
+            {show('questions') && <QuestionsSection workspace={w} compact={tab === 'all'} onMore={() => setTab('questions')} />}
             {show('agents') && <OrchestratorCard workspace={w} />}
             {show('agents') && <SubagentsSection workspace={w} />}
           </div>
@@ -80,8 +86,8 @@ export function WorkspacePage() {
         {hasSide && (
           <div className={`col-side${hasMain ? '' : ' col-solo'}`}>
             {show('runs') && <RunCard workspace={w} />}
-            {show('docs') && <DocumentList workspace={w} />}
-            {show('decisions') && <HistoryPreview workspace={w} />}
+            {show('docs') && <DocumentList workspace={w} compact={tab === 'all'} onMore={() => setTab('docs')} />}
+            {(show('all') || show('decisions')) && <HistoryPreview workspace={w} compact onMore={() => navigate(`/w/${w.id}/history`)} />}
           </div>
         )}
       </div>

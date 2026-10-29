@@ -22,7 +22,7 @@ export interface HistoryView {
 
 /** Turns an entry into what the row shows. Pure, so the History page can filter/search on it. */
 export function viewHistory(e: HistoryEntry, hub: HubSnapshot): HistoryView {
-  const run = e.runId ? `run ${e.runId}` : '';
+  const run = e.runId === 'inbox' ? 'Question' : e.runId ? `run ${e.runId}` : '';
   if (e.type === 'answer') {
     const d = findDecision(hub, e.workspaceId, e.runId, e.decisionId);
     const title = e.replyOnly ? `You replied to ${e.decisionId}` : `You chose ${e.choice}: ${e.label}${e.extra ? ` (${e.extra})` : ''}`;
@@ -37,10 +37,11 @@ export function viewHistory(e: HistoryEntry, hub: HubSnapshot): HistoryView {
   }
   if (e.type === 'prompt') {
     const p = hub.prompts.find((x) => x.id === e.promptId);
+    const sub = [e.by, run, p?.status === 'FAILED' ? p.reason : undefined].filter(Boolean).join(' · ');
     return {
-      cls: 'h-prompt', icon: 'message', title: 'You prompted Opus', quote: p?.text, sub: [e.by, run].filter(Boolean).join(' · '), channelIcon: 'message',
+      cls: 'h-prompt', icon: 'message', title: 'You prompted Opus', quote: p?.text, sub, channelIcon: 'message',
       chip: p ? <StatusChip look={PROMPT_STATUS[p.status]} /> : undefined,
-      search: `prompt ${p?.text ?? ''} ${run}`.toLowerCase(),
+      search: `prompt ${p?.text ?? ''} ${sub}`.toLowerCase(),
     };
   }
   const sub = `Opus routine call · reason: ${e.reason}${run ? ` · ${run}` : ''}`;
@@ -61,6 +62,7 @@ export function HistoryRow({ entry, compact }: { entry: HistoryEntry; compact?: 
       <div className="h-body stack" style={{ gap: 4, minWidth: 0, fontSize: compact ? 13.5 : undefined }}>
         <div style={{ display: 'flex', gap: 8, alignItems: 'baseline', flexWrap: 'wrap' }}>
           <span style={{ fontWeight: entry.type === 'routine' ? 400 : 600 }}>{v.title}</span>
+          {compact && entry.runId === 'inbox' && <span className="t-small">Question</span>}
           {v.link && !compact && (
             <Link to={v.link.to} style={{ fontSize: 13, fontWeight: 600, display: 'inline-flex', alignItems: 'center', gap: 2, minHeight: 32 }}>
               {v.link.label}<Icon name="chevron-right" size="sm" />
