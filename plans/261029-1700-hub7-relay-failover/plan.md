@@ -50,7 +50,9 @@ Found in the phone test (29/10/26 16:55). Contract `docs/hub-api.md` (v2) unchan
    `<iso> relay <transport> connected` (same style as the existing `ended` line).
 3. Tests with `FakeProxy` and a controllable clock:
    - websocket accepted then closed immediately → next cycle tries long-poll first (assert order via
-     `proxy.paths` / `websocketAttempts`), and websocket is tried again only after the 15 min window;
+     `proxy.paths` / `websocketAttempts`); websocket is still tried, but last, until the 15 min window
+     passes, then it is back in its normal place. Demoted transports are never skipped (if every
+     transport is demoted, the normal order applies);
    - a transport that stayed up ≥ 5 min (advance the clock) is not demoted when it ends.
 
 ## T3 web: recover fast and catch up (`hub/web/src/api/http/HttpHubClient.ts`, `hub/web/src/api/http/HttpHubClient.test.ts`)
