@@ -87,15 +87,15 @@ function BranchStep({ form: f }: { form: DecisionFormState }) {
       <legend style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
         <StepNumber n={2} /><span style={{ fontWeight: 600, fontSize: 16 }}>Which branch?</span>
       </legend>
-      <label className={`opt${f.branchMode === 'this' ? ' sel' : ''}`} style={{ alignItems: 'center' }}>
+      {f.thisBranch && <label className={`opt${f.branchMode === 'this' ? ' sel' : ''}`} style={{ alignItems: 'center' }}>
         <input type="radio" name="branch" value="this" checked={f.branchMode === 'this'} onChange={() => f.setBranchMode('this')} />
         <Icon name="branch" size="lg" style={{ color: 'var(--text-2)' }} />
         <span style={{ display: 'flex', flexDirection: 'column', flex: 1 }}>
-          <span className="lbl">This branch (<span className="mono">main</span>)</span>
+          <span className="lbl">This branch (<span className="mono">{f.thisBranch}</span>)</span>
           <span className="cons">The branch the run started from.</span>
         </span>
         <span className="radio" aria-hidden="true" />
-      </label>
+      </label>}
       <label className={`opt${f.branchMode === 'other' ? ' sel' : ''}`}>
         <input type="radio" name="branch" value="other" checked={f.branchMode === 'other'} onChange={() => f.setBranchMode('other')} />
         <Icon name="branch" size="lg" style={{ color: 'var(--text-2)', marginTop: 4 }} />
@@ -115,7 +115,7 @@ function BranchStep({ form: f }: { form: DecisionFormState }) {
             <p id="branch-hint" className="err-text"><Icon name="alert" size="sm" />{f.branchError}</p>
           ) : (
             <p id="branch-hint" className="hint"><Icon name="info" />
-              {f.branchText.trim() ? 'New name: the branch is created from main.' : 'An existing branch, or a new name to create it.'} agent/ branches aren’t allowed.
+              {f.branchText.trim() ? `New name: the branch is created from ${f.thisBranch ?? 'the base branch'}.` : 'An existing branch, or a new name to create it.'} agent/ branches aren’t allowed.
             </p>
           )}
         </div>

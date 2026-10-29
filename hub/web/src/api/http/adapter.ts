@@ -198,6 +198,13 @@ export function mapDecision(item: HubDecision, workspaceStatus: WorkspaceStatus)
     question: source.question,
     evidence: source.evidence,
     options: source.options.map((option) => ({ ...option, consequence: option.consequence ?? '' })),
+    followup: source.followup ? {
+      when: source.followup.when,
+      question: source.followup.question,
+      options: source.followup.options.map((option) => ({
+        key: option.key, label: option.label, value: option.value ?? undefined, input: !!option.input,
+      })),
+    } : undefined,
     recommend: source.recommend ?? undefined,
     status: mapDecisionStatus(item.hub_status, workspaceStatus),
     openedAt: timestamp(source.opened_at),

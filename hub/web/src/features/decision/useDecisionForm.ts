@@ -24,24 +24,33 @@ export function useDecisionForm(d: Decision | undefined) {
     if (!rejected) return;
     setPicked(rejected.choice);
     setNote(rejected.note ?? '');
-    if (rejected.branch && rejected.branch !== 'main') {
+    if (rejected.branch && rejected.branch !== d?.followup?.options.find((o) => !o.input)?.value) {
       setBranchMode('other');
       setBranchText(rejected.branch);
     }
   }, [rejected]);
 
-  const isFinish = d?.kind === 'finish';
-  const needsBranch = isFinish && (picked === 'A' || picked === 'B');
-  const branch = needsBranch ? (branchMode === 'this' ? 'main' : branchText.trim()) : undefined;
-  const bErr = needsBranch && branchMode === 'other' ? branchError(branchText) : null;
+  // The followup options come from the decision itself: a fixed one (this branch) and a typed one.
+  const followup = d?.followup;
+  const thisOpt = followup?.options.find((o) => !o.input && o.value);
+  const otherOpt = followup?.options.find((o) => o.input);
+  const thisBranch = thisOpt?.value;
+  const mode = thisOpt ? branchMode : 'other';
+  const needsBranch = !!picked && !!followup?.when.includes(picked);
+  const branch = needsBranch ? (mode === 'this' ? thisBranch : branchText.trim()) : undefined;
+  const bErr = needsBranch && mode === 'other' ? branchError(branchText) : null;
 
   const canReview = !chatOpen && !!picked && !bErr;
   const canReply = chatOpen && chatText.trim().length > 0;
 
-  const toInput = (): AnswerInput => ({ choice: picked!, note: note.trim() || undefined, branch });
+  const toInput = (): AnswerInput => ({
+    choice: picked!, note: note.trim() || undefined, branch,
+    followup: needsBranch ? (mode === 'this' ? thisOpt : otherOpt)?.key : undefined,
+    value: needsBranch && mode === 'other' ? branch : undefined,
+  });
 
   return {
-    picked, note, branchMode, branchText, chatOpen, chatText,
+    picked, note, branchMode: mode, branchText, chatOpen, chatText, thisBranch,
     needsBranch, branch, branchError: bErr, canReview, canReply, toInput,
     pick: (key: string) => { setPicked(key); setChatOpen(false); },
     setNote, setBranchMode, setBranchText, setChatText,

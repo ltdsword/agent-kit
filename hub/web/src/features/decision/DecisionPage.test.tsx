@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { act, render, screen, within } from '@testing-library/react';
+import { act, render, renderHook, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { createMemoryRouter, RouterProvider } from 'react-router-dom';
 import { MockHubClient } from '@/api/mock/MockHubClient';
@@ -7,7 +7,8 @@ import { HubProvider } from '@/state/HubProvider';
 import { AuthProvider } from '@/auth/AuthProvider';
 import { MockAuthClient } from '@/auth/MockAuthClient';
 import { routes } from '@/App';
-import { branchError } from './useDecisionForm';
+import type { Decision } from '@/api/types';
+import { branchError, useDecisionForm } from './useDecisionForm';
 
 let client: MockHubClient;
 afterEach(() => client?.dispose());
@@ -69,5 +70,30 @@ describe('branchError', () => {
     expect(branchError('agent/x')).toMatch(/reserved/);
     expect(branchError('  ')).toMatch(/type a branch/i);
     expect(branchError('release/v2')).toBeNull();
+  });
+});
+
+describe('finish followup', () => {
+  const finish = {
+    workspaceId: 'ws', runId: 'hub6', id: 'D1', kind: 'finish', agent: 'orchestrator', title: 'Merge run hub6?',
+    question: 'q', evidence: [], status: 'OPEN', openedAt: 0,
+    options: [{ key: 'A', label: 'Merge and push', consequence: '' }, { key: 'B', label: 'Merge locally', consequence: '' },
+      { key: 'C', label: 'Don’t merge', consequence: '' }],
+    followup: { when: ['A', 'B'], question: 'Which branch?', options: [
+      { key: 'A', label: 'This branch (hub/plan)', value: 'hub/plan' },
+      { key: 'B', label: 'Other branch', input: true },
+    ] },
+  } as Decision;
+
+  it('sends the decision’s own followup keys, with a value only for the typed option', () => {
+    const { result, rerender } = renderHook(() => useDecisionForm(finish));
+    act(() => result.current.pick('B'));
+    rerender();
+    expect(result.current.thisBranch).toBe('hub/plan');
+    expect(result.current.toInput()).toEqual({ choice: 'B', note: undefined, branch: 'hub/plan', followup: 'A', value: undefined });
+    act(() => { result.current.setBranchMode('other'); result.current.setBranchText('release/x'); });
+    expect(result.current.toInput()).toMatchObject({ branch: 'release/x', followup: 'B', value: 'release/x' });
+    act(() => result.current.pick('C'));
+    expect(result.current.toInput()).toMatchObject({ followup: undefined, value: undefined, branch: undefined });
   });
 });
