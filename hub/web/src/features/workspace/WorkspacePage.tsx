@@ -25,7 +25,8 @@ export function WorkspacePage() {
   const now = useNow();
   const [tab, setTab] = useState<Tab>('all');
   const w = workspaceById(hub, wsId);
-  if (!w) return <NotFound />;
+  // Until the workspace list has loaded once, a missing workspace means "still connecting", not "removed".
+  if (!w) return hub.loaded ? <NotFound /> : <Connecting />;
 
   const needCount = needsYou(hub, w.id).length;
   const show = (t: Tab) => tab === 'all' || tab === t;
@@ -84,6 +85,15 @@ export function WorkspacePage() {
           </div>
         )}
       </div>
+    </div>
+  );
+}
+
+function Connecting() {
+  return (
+    <div className="page page-mid" aria-busy="true">
+      <h1 className="t-h1">Connecting…</h1>
+      <p className="t-2">Loading this workspace from the hub.</p>
     </div>
   );
 }
