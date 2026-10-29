@@ -38,6 +38,8 @@ TASK_STATES = ("PENDING", "READY", "RUNNING", "REVIEW", "FIX_REQUIRED",
                "PASSED", "MERGED", "BLOCKED", "FAILED")
 WORKER_STATES = ("IDLE", "BUSY", "BLOCKED", "BROKEN")
 RUN_STATES = ("RUNNING", "DONE", "BLOCKED", "FAILED")
+INBOX_RUN_ID = "inbox"
+INBOX_DECISION_LIMIT = 100
 
 # Safe transition table. Anything not listed is rejected.
 TASK_TRANSITIONS = {
@@ -425,6 +427,12 @@ def validate_state(state: dict) -> None:
         raise SchedulerError("unsupported state schema_version")
     if state.get("status") not in RUN_STATES:
         raise SchedulerError(f"invalid run status {state.get('status')}")
+    if state.get("run_id") == INBOX_RUN_ID:
+        if state["status"] != "DONE" or state.get("tasks") != {} or state.get("workers") != {}:
+            raise SchedulerError("inbox must be a DONE run without tasks or workers")
+        if not isinstance(state.get("decisions"), dict) or not isinstance(state.get("research"), dict):
+            raise SchedulerError("inbox decisions or research state is invalid")
+        return
     tasks, workers = state["tasks"], state["workers"]
     legacy = "title" not in state or "goal" not in state or any("summary" not in task for task in tasks.values())
     validate_tasks(list(tasks.values()), len(tasks), allow_legacy=legacy)  # re-check DAG integrity
@@ -881,7 +889,7 @@ class Scheduler:
 
     # ---- run lifecycle
     def create_run(self, run_id: str, tasks: list, base: str = "HEAD", request_id: str | None = None,
-                   title=_UNSET, goal=_UNSET) -> dict:
+                   title=_UNSET, goal=_UNSET, plan_path: str | None = None) -> dict:
         if not isinstance(run_id, str) or not RUN_ID_RE.fullmatch(run_id):
             raise SchedulerError("run id must match ^[a-z0-9][a-z0-9-]{1,39}$")
         if title is not _UNSET and (not isinstance(title, str) or not 1 <= len(title) <= 80):
@@ -936,6 +944,7 @@ class Scheduler:
                 "base_sha": base_sha, "base_branch": base_branch,
                 "integration_branch": branch, "integration_worktree": str(iwt),
                 "integration_base_sha": base_sha, "integration_sha": base_sha,
+                "plan_path": plan_path,
                 "research": research,
                 "tasks": {tid: {"id": tid, "title": t["title"], "status": "PENDING",
                                 "summary": t["summary"], "depends_on": list(t["depends_on"]),
@@ -1491,7 +1500,7 @@ class Scheduler:
 
     def mark_reviewed(self, run_id: str, tid: str, verdict: str, notes: str = "",
                       accept_scope: bool = False, report: str = "", decision: str | None = None,
-                      known_issues: str = "") -> dict:
+                      known_issues: str = "", report_path: str | None = None) -> dict:
         if verdict not in REVIEW_VERDICTS:
             raise SchedulerError(f"verdict must be one of {REVIEW_VERDICTS}")
         with self.txn(run_id) as state:
@@ -1506,7 +1515,10 @@ class Scheduler:
                     "the task file and the final report; the user still decides the merge), or FAIL with a "
                     "user decision (kind abandon)")
             wt = Path(t["worktree"])
-            t.setdefault("reviews", []).append({"verdict": verdict, "notes": notes, "at": now()})
+            review_entry = {"verdict": verdict, "notes": notes, "at": now()}
+            if report_path:
+                review_entry["report_path"] = report_path
+            t.setdefault("reviews", []).append(review_entry)
             if verdict == "PASS":
                 head = git_out(wt, "rev-parse", "HEAD")
                 if t.get("needs_orchestrator_commit") or git_dirty_files(wt):
@@ -1934,7 +1946,9 @@ class Scheduler:
             if task and task not in state["tasks"]:
                 raise SchedulerError(f"unknown task {task}")
             decisions = state.setdefault("decisions", {})
-            did = f"D{len(decisions) + 1}"
+            previous = [int(match.group(1)) for decision_id in decisions
+                        if (match := re.fullmatch(r"D([0-9]+)", decision_id))]
+            did = f"D{max(previous, default=0) + 1}"
             d = {"id": did, "kind": kind, "task": task, "title": title, "question": question,
                  "options": parsed, "recommend": recommend, "evidence": parsed_evidence,
                  "note": note, "approval": approval, "status": "PENDING", "created_at": now(),
@@ -1965,6 +1979,70 @@ class Scheduler:
                          f"{run_id} --id {did} --choice <KEY> --quote \"...\"`")
         return {"decision": did, "status": "PENDING", "file": self.rel(path), "hub": "online" if hub_online else "offline",
                 "next": next_text}
+
+    def ensure_inbox(self) -> dict:
+        """Create the reserved, inactive question run on first use."""
+        path = self.store.state_path(INBOX_RUN_ID)
+        with self.store.lock():
+            if path.exists():
+                return self.store.load(INBOX_RUN_ID)
+            run_dir = self.store.run_dir(INBOX_RUN_ID)
+            state = {
+                "schema_version": SCHEMA_VERSION, "run_id": INBOX_RUN_ID,
+                "title": "Questions", "goal": "Questions from the user",
+                "status": "DONE", "created_at": now(),
+                "workspace_root": str(self.workspace_root), "project_root": str(self.project_root),
+                "base_branch": None, "integration_branch": "", "tasks": {}, "workers": {},
+                "decisions": {}, "events": [], "research": new_research(self.cfg, self.rel(run_dir)),
+            }
+            self.store.save(state)
+            return state
+
+    def inbox_ask(self, title: str, question: str, options: list[str], recommend: str,
+                  note: str | None = None) -> dict:
+        self.ensure_inbox()
+        result = self.decision_ask(INBOX_RUN_ID, "question", title, question, options,
+                                   recommend=recommend, note=note)
+        self.prune_inbox_decisions()
+        result.pop("next", None)
+        result["wait_command"] = f"scheduler.py decision wait --run {INBOX_RUN_ID} --id {result['decision']}"
+        return result
+
+    def prune_inbox_decisions(self) -> int:
+        """Keep the latest 100 inbox decisions plus every still-open decision."""
+        state_path = self.store.state_path(INBOX_RUN_ID)
+        if not state_path.exists():
+            return 0
+        removed = []
+        with self.store.lock():
+            state = self.store.load(INBOX_RUN_ID)
+            decisions = state.get("decisions", {})
+
+            def order(decision_item):
+                decision_id, decision = decision_item
+                created_at = decision.get("created_at")
+                try:
+                    created = _dt.datetime.fromisoformat(str(created_at).replace("Z", "+00:00"))
+                    if created.tzinfo is None:
+                        created = created.replace(tzinfo=_dt.timezone.utc)
+                    created_key = created.timestamp()
+                except (TypeError, ValueError, OverflowError):
+                    created_key = float("-inf")
+                number = int(decision_id[1:]) if re.fullmatch(r"D[0-9]+", decision_id) else -1
+                return created_key, number
+
+            ordered = sorted(decisions.items(), key=order)
+            newest = {decision_id for decision_id, _ in ordered[-INBOX_DECISION_LIMIT:]}
+            for decision_id, decision in ordered:
+                if decision_id not in newest and decision.get("status") not in ("PENDING", "OPEN"):
+                    decisions.pop(decision_id, None)
+                    removed.append(decision_id)
+            if removed:
+                self.store.save(state)
+                for decision_id in removed:
+                    with contextlib.suppress(OSError):
+                        (self.store.run_dir(INBOX_RUN_ID) / "decisions" / f"{decision_id}.md").unlink()
+        return len(removed)
 
     @staticmethod
     def _decision_details_text(evidence: list[dict], note: str | None, approval: dict | None) -> str:
@@ -2526,6 +2604,7 @@ def build_parser() -> argparse.ArgumentParser:
                    help='JSON file: {"title": "...", "goal": "...", "tasks": [...]}')
     c.add_argument("--base", default="HEAD")
     c.add_argument("--request-id", help="same id => same 3-round scout budget (default: run id)")
+    c.add_argument("--plan", help="workspace-relative plan document path")
     s = rs.add_parser("status")
     s.add_argument("--run", required=True)
     rs.add_parser("list")
@@ -2534,6 +2613,14 @@ def build_parser() -> argparse.ArgumentParser:
     cl.add_argument("--status", required=True, choices=["BLOCKED", "FAILED"])
     cl.add_argument("--reason", required=True)
     cl.add_argument("--decision", help="answered user decision (kind abandon)")
+
+    ask = sub.add_parser("ask", help="ask a user question through the workspace inbox")
+    ask.add_argument("--title", required=True)
+    ask.add_argument("--question", required=True)
+    ask.add_argument("--option", action="append", default=[], required=True,
+                     help="KEY=label [:: consequence] (repeat)")
+    ask.add_argument("--recommend", required=True, help="recommended option key")
+    ask.add_argument("--note", help="why the option is recommended")
 
     res = sub.add_parser("research", help="scout-round budget and architecture-readiness gate")
     rr = res.add_subparsers(dest="action", required=True)
@@ -2711,6 +2798,8 @@ def main(argv=None) -> int:
         a = args
         if a.cmd == "pool":
             out = s.pool_init() if a.action == "init" else {"workers": resolve_worker_settings(s.cfg)}
+        elif a.cmd == "ask":
+            out = s.inbox_ask(a.title, a.question, a.option, a.recommend, a.note)
         elif a.cmd == "run":
             if a.action == "create":
                 data = json.loads(a.tasks.read_text())
@@ -2722,7 +2811,7 @@ def main(argv=None) -> int:
                 if missing:
                     raise SchedulerError(f"run input missing keys: {', '.join(missing)}")
                 st = s.create_run(a.run, data["tasks"], a.base, a.request_id,
-                                  title=data["title"], goal=data["goal"])
+                                  title=data["title"], goal=data["goal"], plan_path=a.plan)
                 out = s.status(st["run_id"])
             elif a.action == "status":
                 out = s.status(a.run)
@@ -2762,8 +2851,9 @@ def main(argv=None) -> int:
                 review = a.report.read_text()
             except OSError as e:
                 raise SchedulerError(f"cannot read review report: {e}") from e
+            report_path = s.rel((workspace / a.report).resolve() if not a.report.is_absolute() else a.report.resolve())
             out = s.mark_reviewed(a.run, a.task, a.verdict, a.notes, a.accept_scope, review, a.decision,
-                                  a.known_issues)
+                                  a.known_issues, report_path)
         elif a.cmd == "repair":
             out = s.repair(a.run, a.task, a.packet, a.launch, a.relaunch, a.decision, a.reason)
         elif a.cmd == "integrate":

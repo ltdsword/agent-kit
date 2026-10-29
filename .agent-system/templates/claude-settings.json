@@ -16,6 +16,12 @@
     ],
     "UserPromptSubmit": [
       {"hooks": [{"type": "command", "command": "python3 \"$CLAUDE_PROJECT_DIR/.agent-system/scripts/record-session.py\""}]}
+    ],
+    "PreToolUse": [
+      {"matcher": "AskUserQuestion", "hooks": [{"type": "command", "command": "python3 \"$CLAUDE_PROJECT_DIR/.agent-system/scripts/hub-hooks.py\""}]}
+    ],
+    "PostToolUse": [
+      {"matcher": "Write|Edit", "hooks": [{"type": "command", "command": "python3 \"$CLAUDE_PROJECT_DIR/.agent-system/scripts/hub-hooks.py\""}]}
     ]
   }
 }

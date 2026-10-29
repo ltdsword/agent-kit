@@ -34,6 +34,12 @@ ID_ALPHABET = "abcdefghijklmnopqrstuvwxyz234567"
 MAX_DOCUMENT_BYTES = 1024 * 1024
 MAX_SNAPSHOT_BYTES = 256 * 1024
 MAX_BATCH_BYTES = 5 * 1024 * 1024
+MAX_PUBLISHED_BYTES = 512 * 1024
+HUB_RETRY_DELAYS = (1, 2, 4, 8, 16, 16, 16, 16)
+HUB_RETRY_INTERVAL = 32
+HUB_DELIVERY_TIMEOUT = 10 * 60
+HUB_HELD_REASON = "waiting for Opus to finish its current step"
+HUB_FAILED_REASON = "Opus stayed busy for 10 minutes; not delivered"
 SECRET_RE = re.compile(
     r"sk-[A-Za-z0-9_-]{16,}|AKIA[0-9A-Z]{16}|Bearer [A-Za-z0-9._~+/-]{16,}=*|"
     r"(?i:(?:password|passwd|secret|token)\s*[=:]\s*\S+)"
@@ -379,7 +385,9 @@ def load_runs(ws: Path) -> list[dict]:
             continue
         if isinstance(state, dict) and state.get("run_id"):
             runs.append(state)
-    return sorted(runs, key=lambda state: str(state.get("created_at") or ""), reverse=True)[:200]
+    ordered = sorted(runs, key=lambda state: str(state.get("created_at") or ""), reverse=True)
+    inbox = [state for state in ordered if state.get("run_id") == "inbox"]
+    return inbox[:1] + [state for state in ordered if state.get("run_id") != "inbox"][:199]
 
 
 def _herdr_record(name: str | None, runner=subprocess.run) -> tuple[dict | None, str]:
@@ -628,7 +636,9 @@ def make_snapshot(ws: Path, cfg: dict, session_id: str, runner=subprocess.run, p
     if not orch_session:
         orch_session = kitstart.saved_session(ws).get("session_id")
     runs, run_snapshots = prepared_runs or _snapshot_runs(load_runs(ws), ws, cfg)
-    newest = runs[0] if runs else None
+    visible_runs = [state for state in runs if state.get("run_id") != "inbox"]
+    visible_snapshots = [snapshot for snapshot in run_snapshots if snapshot.get("run_id") != "inbox"]
+    newest = visible_runs[0] if visible_runs else None
     worker_states = (newest or {}).get("workers") or {}
     worker_items = []
     for slot in cfg.get("pool", {}).get("slots", []):
@@ -645,7 +655,7 @@ def make_snapshot(ws: Path, cfg: dict, session_id: str, runner=subprocess.run, p
             "effort": cfg.get("worker", {}).get("reasoning_effort"),
             "herdr_state": herdr_state, "since": _newest_worker_since(newest, slot, worker) if newest else None
         })
-    newest_activity = max((event.get("at") for state in runs for event in state.get("events", [])
+    newest_activity = max((event.get("at") for state in visible_runs for event in state.get("events", [])
                            if isinstance(event.get("at"), str)), default=None)
     snapshot = {
         "protocol": PROTOCOL_VERSION, "workspace_id": config_hub(cfg).get("workspace_id"),
@@ -655,7 +665,7 @@ def make_snapshot(ws: Path, cfg: dict, session_id: str, runner=subprocess.run, p
                          "effort": orch.get("effort"), "herdr_state": orch_state,
                          "session_id": orch_session, "screen": orch_screen},
         "workers": worker_items, "scout": _scout_snapshot(newest),
-        "runs": run_snapshots,
+        "runs": visible_snapshots,
         "orchestrator_last_activity_at": newest_activity
     }
     snapshot = scrub(snapshot)
@@ -758,6 +768,82 @@ def secret_path(path: str) -> bool:
     return any(fnmatch.fnmatch(part, pattern) for part in Path(path).parts for pattern in S.SECRET_PATTERNS)
 
 
+def published_manifest_path(ws: Path) -> Path:
+    return ws / ".orchestrator" / "published.json"
+
+
+def publication_kind(path: str) -> str:
+    if re.fullmatch(r"plans/[^/]+/plan\.md", path):
+        return "plan"
+    if re.fullmatch(r"plans/reports/review-[^/]+\.md", path):
+        return "review"
+    return "other"
+
+
+def _publication_path(ws: Path, raw: str) -> tuple[str, Path] | None:
+    if not isinstance(raw, str) or not raw:
+        return None
+    candidate = Path(raw)
+    if candidate.is_absolute():
+        try:
+            candidate = candidate.resolve().relative_to(ws.resolve())
+        except (OSError, ValueError):
+            return None
+    raw_path = candidate.as_posix()
+    path = safe_document_path(ws, raw_path)
+    if path is None or secret_path(relative_path(ws, path)) or path.suffix not in (".md", ".txt", ".diff"):
+        return None
+    return relative_path(ws, path), path
+
+
+def load_published(ws: Path) -> list[dict]:
+    try:
+        entries = json.loads(published_manifest_path(ws).read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return []
+    except (OSError, ValueError):
+        return []
+    if not isinstance(entries, list):
+        return []
+    kinds = {"final_report", "final_diff", "decision", "research", "plan", "review", "other"}
+    return [entry for entry in entries if isinstance(entry, dict) and isinstance(entry.get("path"), str)
+            and entry.get("kind") in kinds and (entry.get("run_id") is None or isinstance(entry.get("run_id"), str))
+            and (entry.get("title") is None or isinstance(entry.get("title"), str))]
+
+
+def publish_document(ws: Path, raw: str, run_id: str | None = None,
+                     title: str | None = None) -> dict:
+    target = _publication_path(ws, raw)
+    if target is None:
+        raise ValueError("publish path must be a non-secret .md, .txt or .diff file inside the workspace")
+    path_text, path = target
+    if not path.is_file():
+        raise ValueError("publish path must name an existing file")
+    if path.stat().st_size > MAX_PUBLISHED_BYTES:
+        raise ValueError("published files must be 512 KB or smaller")
+    entry = {"path": path_text, "run_id": run_id,
+             "title": scrub(title.strip())[:300] if isinstance(title, str) and title.strip() else Path(path_text).name,
+             "kind": publication_kind(path_text)}
+    entries = [item for item in load_published(ws) if item.get("path") != path_text]
+    entries.append(entry)
+    atomic_write(published_manifest_path(ws), json.dumps(entries, ensure_ascii=False, indent=2) + "\n")
+    return entry
+
+
+def unpublish_document(ws: Path, raw: str) -> bool:
+    target = _publication_path(ws, raw)
+    if target is None:
+        raise ValueError("unpublish path must be a non-secret .md, .txt or .diff file inside the workspace")
+    path_text, _ = target
+    manifest = published_manifest_path(ws)
+    entries = load_published(ws)
+    kept = [item for item in entries if item.get("path") != path_text]
+    if len(kept) == len(entries):
+        return False
+    atomic_write(manifest, json.dumps(kept, ensure_ascii=False, indent=2) + "\n")
+    return True
+
+
 def safe_document_path(ws: Path, raw: str) -> Path | None:
     """Resolve a workspace-relative document and reject secrets or paths outside the workspace."""
     if not isinstance(raw, str) or not raw or Path(raw).is_absolute() or secret_path(raw):
@@ -784,6 +870,18 @@ def document_refs(ws: Path, runs: list[dict]) -> dict[str, tuple[str | None, str
             evidence = item.get("evidence_path")
             if evidence:
                 refs.setdefault(evidence, (run_id, "research"))
+        plan_path = state.get("plan_path")
+        if plan_path:
+            refs.setdefault(plan_path, (run_id, "plan"))
+        for task in (state.get("tasks") or {}).values():
+            for review in task.get("reviews", []):
+                report_path = review.get("report_path")
+                if report_path:
+                    refs.setdefault(report_path, (run_id, "review"))
+    for entry in load_published(ws):
+        raw_path, run_id, kind = entry.get("path"), entry.get("run_id"), entry.get("kind")
+        if isinstance(raw_path, str) and isinstance(kind, str):
+            refs.setdefault(raw_path, (run_id if isinstance(run_id, str) else None, kind))
     return refs
 
 
@@ -797,7 +895,8 @@ def managed_document_kind(path: str) -> str | None:
         return "decision"
     if "/research/" in path:
         return "research"
-    return None
+    kind = publication_kind(path)
+    return kind if kind != "other" else None
 
 
 def _truncate(content: str, original_bytes: int) -> tuple[str, bool]:
@@ -809,7 +908,8 @@ def _truncate(content: str, original_bytes: int) -> tuple[str, bool]:
     return encoded[:room].decode("utf-8", errors="ignore") + marker, True
 
 
-def make_document(ws: Path, raw_path: str, run_id: str | None, kind: str) -> dict | None:
+def make_document(ws: Path, raw_path: str, run_id: str | None, kind: str,
+                  title_override: str | None = None) -> dict | None:
     path = safe_document_path(ws, raw_path)
     if path is None or scrub(Path(raw_path).as_posix()) != Path(raw_path).as_posix():
         return None
@@ -822,7 +922,7 @@ def make_document(ws: Path, raw_path: str, run_id: str | None, kind: str) -> dic
     encoded = content.encode("utf-8")
     heading = next((match.group(1).strip() for line in content.splitlines()
                     if (match := re.match(r"^\s{0,3}#\s+(.+?)\s*#*\s*$", line))), None)
-    title = scrub(heading or Path(raw_path).name)
+    title = scrub(title_override or heading or Path(raw_path).name)
     fmt = "diff" if path.suffix == ".diff" else "markdown" if path.suffix == ".md" else "text"
     doc = {"path": Path(raw_path).as_posix(), "run_id": run_id, "kind": kind, "title": title[:300],
            "format": fmt, "sha256": digest(encoded), "bytes": len(encoded), "truncated": truncated,
@@ -847,6 +947,7 @@ def make_documents(ws: Path, runs: list[dict], cfg: dict, document_hashes: dict 
     """Build changed, safe documents, batches and disappeared paths."""
     upload = config_hub(cfg).get("upload", {})
     refs = document_refs(ws, runs)
+    published_entries = {item["path"]: item for item in load_published(ws)}
     remote = document_hashes or {}
     docs, deleted = [], []
     for raw_path, (run_id, kind) in sorted(refs.items()):
@@ -858,7 +959,13 @@ def make_documents(ws: Path, runs: list[dict], cfg: dict, document_hashes: dict 
         if path is None:
             continue
         if path.exists():
-            doc = make_document(ws, raw_path, run_id, kind)
+            if raw_path in published_entries and path.stat().st_size > MAX_PUBLISHED_BYTES:
+                if raw_path in remote:
+                    deleted.append(raw_path)
+                continue
+            entry = published_entries.get(raw_path, {})
+            title = entry.get("title") if isinstance(entry.get("title"), str) else None
+            doc = make_document(ws, raw_path, run_id, kind, title)
             if doc and remote.get(raw_path) != doc["sha256"]:
                 docs.append(doc)
         elif raw_path in remote:
@@ -870,10 +977,9 @@ def make_documents(ws: Path, runs: list[dict], cfg: dict, document_hashes: dict 
             deleted.append(raw_path)
             continue
         kind = managed_document_kind(raw_path)
-        enabled = kind == "final_report" or (kind == "final_diff" and upload.get("diffs", True)) or \
-            (kind is not None and kind not in ("final_report", "final_diff") and upload.get("documents", True))
+        eligible = (kind is not None or Path(raw_path).suffix in (".md", ".txt", ".diff"))
         path = safe_document_path(ws, raw_path)
-        if enabled and path is not None and not path.exists():
+        if eligible and path is not None:
             deleted.append(raw_path)
     return docs, document_batches(docs), deleted, refs
 
@@ -1068,12 +1174,22 @@ def _short_reason(error) -> str:
 
 def _type_hub_notice(name: str, text: str, cfg: dict, runner=subprocess.run) -> tuple[bool, str | None]:
     _, state = _herdr_record(name, runner)
-    if state == "blocked":
-        return False, "orchestrator is blocked"
-    if state not in ("idle", "working"):
-        return False, "orchestrator is not live"
+    if state != "idle":
+        return False, HUB_HELD_REASON
     S.Herdr(runner=runner).agent_prompt(name, scrub(text), cfg["herdr"]["prompt_ack_timeout_ms"])
     return True, None
+
+
+def _new_delivery_schedule(item_id: str, notice: str, started_at: float, **fields) -> dict:
+    return {"id": item_id, "notice": notice, "started_at": started_at,
+            "next_at": started_at + HUB_RETRY_DELAYS[0], "retries": 0, **fields}
+
+
+def _advance_delivery_schedule(item: dict) -> None:
+    item["retries"] += 1
+    delay = (HUB_RETRY_DELAYS[item["retries"]] if item["retries"] < len(HUB_RETRY_DELAYS)
+             else HUB_RETRY_INTERVAL)
+    item["next_at"] += delay
 
 
 def _answer_notice(scheduler: S.Scheduler, command: dict) -> tuple[dict, str]:
@@ -1122,11 +1238,15 @@ def _ack_command(client: HubClient, command_id: str, status: str, reason: str | 
 
 
 def _deliver_command(ws: Path, cfg: dict, name: str, runner, client: HubClient,
-                     command: dict, records: dict[str, dict], notice_retries: list[tuple[str, str]]) -> None:
+                     command: dict, records: dict[str, dict], notice_retries: list[dict],
+                     command_retries: dict[str, dict], clock=time.monotonic) -> None:
     command_id = command["id"]
     if command_id in records:
         record = records[command_id]
         _ack_command(client, command_id, record.get("status", "DELIVERED"), record.get("reason"))
+        return
+    if command_id in command_retries:
+        _ack_command(client, command_id, "HELD", HUB_HELD_REASON)
         return
 
     if command["type"] == "answer":
@@ -1150,10 +1270,10 @@ def _deliver_command(ws: Path, cfg: dict, name: str, runner, client: HubClient,
         try:
             delivered, _ = _type_hub_notice(name, notice, cfg, runner)
             if not delivered:
-                notice_retries.append((command_id, notice))
+                notice_retries.append(_new_delivery_schedule(command_id, notice, clock()))
         except Exception as error:
             log_action(ws, f"answer notice will retry locally: {_short_reason(error)}")
-            notice_retries.append((command_id, notice))
+            notice_retries.append(_new_delivery_schedule(command_id, notice, clock()))
         _ack_command(client, command_id, "DELIVERED")
         return
 
@@ -1167,11 +1287,9 @@ def _deliver_command(ws: Path, cfg: dict, name: str, runner, client: HubClient,
     except Exception as error:
         _ack_command(client, command_id, "FAILED", _short_reason(error))
         return
-    if state == "blocked":
-        _ack_command(client, command_id, "HELD", "orchestrator is blocked")
-        return
-    if state not in ("idle", "working"):
-        _ack_command(client, command_id, "HELD", "orchestrator is not live")
+    if state != "idle":
+        command_retries[command_id] = _new_delivery_schedule(command_id, notice, clock(), command=command)
+        _ack_command(client, command_id, "HELD", HUB_HELD_REASON)
         return
     try:
         _append_hub_log(ws, command, records)
@@ -1192,24 +1310,77 @@ def _deliver_command(ws: Path, cfg: dict, name: str, runner, client: HubClient,
 
 
 def _retry_hub_notices(ws: Path, name: str, cfg: dict, runner,
-                       notice_retries: list[tuple[str, str]]) -> None:
+                       notice_retries: list[dict], clock=time.monotonic) -> None:
     remaining = []
-    for command_id, notice in notice_retries:
+    now_mono = clock()
+    for item in notice_retries:
+        command_id, notice = item["id"], item["notice"]
+        if now_mono - item["started_at"] >= HUB_DELIVERY_TIMEOUT:
+            log_action(ws, f"answer notice dropped after 10 minutes for {command_id}")
+            continue
+        if now_mono < item["next_at"]:
+            remaining.append(item)
+            continue
         try:
             delivered, _ = _type_hub_notice(name, notice, cfg, runner)
         except Exception as error:
             log_action(ws, f"answer notice retry failed for {command_id}: {_short_reason(error)}")
             delivered = False
         if not delivered:
-            remaining.append((command_id, notice))
+            _advance_delivery_schedule(item)
+            remaining.append(item)
     notice_retries[:] = remaining
 
 
+def _retry_hub_commands(ws: Path, name: str, cfg: dict, runner, client: HubClient,
+                        records: dict[str, dict], command_retries: dict[str, dict],
+                        clock=time.monotonic) -> None:
+    now_mono = clock()
+    for command_id, item in list(command_retries.items()):
+        if now_mono - item["started_at"] >= HUB_DELIVERY_TIMEOUT:
+            command = item["command"]
+            try:
+                _append_hub_log(ws, command, records)
+                _update_hub_log(ws, command_id, "FAILED", HUB_FAILED_REASON, records)
+            except OSError as error:
+                log_action(ws, f"could not log expired hub command {command_id}: {_short_reason(error)}")
+            _ack_command(client, command_id, "FAILED", HUB_FAILED_REASON)
+            del command_retries[command_id]
+            continue
+        if now_mono < item["next_at"]:
+            continue
+        try:
+            _, state = _herdr_record(name, runner)
+            if state != "idle":
+                _advance_delivery_schedule(item)
+                continue
+            command = item["command"]
+            _append_hub_log(ws, command, records)
+            S.Herdr(runner=runner).agent_prompt(name, item["notice"], cfg["herdr"]["prompt_ack_timeout_ms"])
+        except Exception as error:
+            reason = _short_reason(error)
+            try:
+                if command_id in records:
+                    _update_hub_log(ws, command_id, "FAILED", reason, records)
+                else:
+                    _append_hub_log(ws, item["command"], records)
+                    _update_hub_log(ws, command_id, "FAILED", reason, records)
+            except OSError as log_error:
+                log_action(ws, f"could not update hub command log: {_short_reason(log_error)}")
+            _ack_command(client, command_id, "FAILED", reason)
+            del command_retries[command_id]
+            continue
+        _ack_command(client, command_id, "DELIVERED")
+        del command_retries[command_id]
+
+
 def _poll_hub_commands(ws: Path, cfg: dict, name: str, runner, client: HubClient,
-                       records: dict[str, dict], notice_retries: list[tuple[str, str]], wait: int = 25) -> None:
+                       records: dict[str, dict], notice_retries: list[dict],
+                       command_retries: dict[str, dict], wait: int = 25,
+                       clock=time.monotonic) -> None:
     commands = sorted(client.commands(wait=wait), key=lambda command: (command["created_at"], command["id"]))
     for command in commands:
-        _deliver_command(ws, cfg, name, runner, client, command, records, notice_retries)
+        _deliver_command(ws, cfg, name, runner, client, command, records, notice_retries, command_retries, clock)
 
 
 def watch(ws: Path, interval=5, no_orchestrator=False, runner=subprocess.run, sleep=time.sleep,
@@ -1262,6 +1433,14 @@ def watch(ws: Path, interval=5, no_orchestrator=False, runner=subprocess.run, sl
     orch_target = orch_name
     command_records = _load_hub_log(ws)
     notice_retries = []
+    command_retries = {}
+
+    def has_scheduled_delivery():
+        return bool(notice_retries or command_retries)
+
+    def prune_inbox():
+        S.Scheduler(ws, cfg=cfg).prune_inbox_decisions()
+
     log_action(ws, "connector started")
 
     def connect_and_sync():
@@ -1276,6 +1455,7 @@ def watch(ws: Path, interval=5, no_orchestrator=False, runner=subprocess.run, sl
         remote = {"event_cursors": response["event_cursors"], "decision_hashes": response["decision_hashes"],
                   "document_hashes": response["document_hashes"], "snapshot_hash": response["snapshot_hash"]}
         connected = True
+        prune_inbox()
         data = build_sync(ws, cfg, session_id, runner, remote)
         remote, sent = apply_sync(client, data, remote)
         last_send = clock()
@@ -1293,7 +1473,7 @@ def watch(ws: Path, interval=5, no_orchestrator=False, runner=subprocess.run, sl
             log_action(ws, "workspace id held by an earlier session; retrying until it expires")
         if clock() - duplicate_since < DUPLICATE_GRACE_S:
             write_hint(ws, False)
-            sleep(10)
+            sleep(1 if has_scheduled_delivery() else 10)
             return False
         print(f"workspace id is already online ({e.message}); run `agentctl reset-id`", file=sys.stderr)
         log_action(ws, "duplicate workspace id; reset-id required")
@@ -1310,7 +1490,7 @@ def watch(ws: Path, interval=5, no_orchestrator=False, runner=subprocess.run, sl
             connected = False
             log_action(ws, f"backend offline: {e}")
             write_hint(ws, False)
-            sleep(backoff)
+            sleep(min(backoff, 1) if has_scheduled_delivery() else backoff)
             backoff = min(backoff * 2, 60)
         write_hint(ws, connected)
         while not stop["value"] and (max_loops is None or loops < max_loops):
@@ -1340,11 +1520,12 @@ def watch(ws: Path, interval=5, no_orchestrator=False, runner=subprocess.run, sl
                 except Exception as e:
                     log_action(ws, f"backend offline: {e}")
                     write_hint(ws, False)
-                    sleep(backoff)
+                    sleep(min(backoff, 1) if has_scheduled_delivery() else backoff)
                     backoff = min(backoff * 2, 60)
                     continue
             elif changed or due:
                 try:
+                    prune_inbox()
                     data = build_sync(ws, cfg, session_id, runner, remote)
                     remote, sent = apply_sync(client, data, remote)
                     if sent:
@@ -1355,7 +1536,7 @@ def watch(ws: Path, interval=5, no_orchestrator=False, runner=subprocess.run, sl
                     connected = False
                     log_action(ws, f"backend offline: {e}")
                     write_hint(ws, False)
-                    sleep(backoff)
+                    sleep(min(backoff, 1) if has_scheduled_delivery() else backoff)
                     backoff = min(backoff * 2, 60)
             if connected and clock() - last_send >= 30:
                 try:
@@ -1366,19 +1547,22 @@ def watch(ws: Path, interval=5, no_orchestrator=False, runner=subprocess.run, sl
                     connected = False
                     log_action(ws, f"backend offline: {e}")
                     write_hint(ws, False)
-                    sleep(backoff)
+                    sleep(min(backoff, 1) if has_scheduled_delivery() else backoff)
                     backoff = min(backoff * 2, 60)
             if connected:
-                _retry_hub_notices(ws, orch_target, cfg, runner, notice_retries)
+                _retry_hub_notices(ws, orch_target, cfg, runner, notice_retries, clock)
+                _retry_hub_commands(ws, orch_target, cfg, runner, client, command_records, command_retries, clock)
                 try:
                     # Hold the long-poll only for one sync interval so snapshots keep their cadence.
                     _poll_hub_commands(ws, cfg, orch_target, runner, client, command_records, notice_retries,
-                                       wait=max(1, min(25, int(interval))))
+                                       command_retries,
+                                       wait=1 if has_scheduled_delivery() else max(1, min(25, int(interval))),
+                                       clock=clock)
                 except Exception as e:
                     connected = False
                     log_action(ws, f"command poll failed: {e}")
                     write_hint(ws, False)
-                    sleep(backoff)
+                    sleep(min(backoff, 1) if has_scheduled_delivery() else backoff)
                     backoff = min(backoff * 2, 60)
             write_hint(ws, connected)
             if max_loops is None or loops < max_loops:
@@ -1515,6 +1699,18 @@ def build_parser() -> argparse.ArgumentParser:
     watch_parser = sub.add_parser("watch", help="run the background connector")
     watch_parser.add_argument("--interval", type=float, default=5)
     watch_parser.add_argument("--no-orchestrator", action="store_true")
+    ask = sub.add_parser("ask", help="open a user question in the Agent Hub inbox")
+    ask.add_argument("--title", required=True)
+    ask.add_argument("--question", required=True)
+    ask.add_argument("--option", action="append", required=True)
+    ask.add_argument("--recommend", required=True)
+    ask.add_argument("--note")
+    publish = sub.add_parser("publish", help="publish a workspace document to Agent Hub")
+    publish.add_argument("path")
+    publish.add_argument("--run")
+    publish.add_argument("--title")
+    unpublish = sub.add_parser("unpublish", help="remove a workspace document from Agent Hub")
+    unpublish.add_argument("path")
     sub.add_parser("status", help="show connector status")
     sub.add_parser("stop", help="stop the connector")
     sub.add_parser("reset-id", help="assign a new workspace id")
@@ -1533,6 +1729,23 @@ def main(argv=None, workspace_root: Path | None = None, runner=subprocess.run, s
             return print_dry_run(ws, load_config(ws), args.json, runner)
         if args.command == "watch":
             return watch(ws, args.interval, args.no_orchestrator, runner, sleep)
+        if args.command == "ask":
+            forwarded = ["--workspace-root", str(ws), "ask", "--title", args.title,
+                         "--question", args.question]
+            for option in args.option:
+                forwarded.extend(("--option", option))
+            forwarded.extend(("--recommend", args.recommend))
+            if args.note:
+                forwarded.extend(("--note", args.note))
+            return S.main(forwarded)
+        if args.command == "publish":
+            entry = publish_document(ws, args.path, args.run, args.title)
+            print(json.dumps(entry, ensure_ascii=False))
+            return 0
+        if args.command == "unpublish":
+            removed = unpublish_document(ws, args.path)
+            print("unpublished" if removed else "not published")
+            return 0
         if args.command == "status":
             return command_status(ws)
         if args.command == "stop":

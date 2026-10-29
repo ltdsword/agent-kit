@@ -387,6 +387,101 @@ class AgentCtlTests(Base):
         self.assertIn(".orchestrator/runs/r1/research/round-1.md", paths)
         self.assertFalse(any(doc["kind"] == "review" for doc in docs))
 
+    def test_inbox_decisions_and_documents_sync_without_snapshot_run(self):
+        self.sample_run()
+        question = self.s.inbox_ask("Question", "Pick one.", ["A=Keep", "B=Change"], "A")
+        data = AC.build_sync(self.ws, self.cfg, "ses_abcdefghijklmnop", self.fake_herdr())
+        self.assertEqual([run["run_id"] for run in data["snapshot"]["runs"]], ["r1"])
+        decisions = [decision for batch in data["decisions"] for decision in batch["decisions"]]
+        self.assertTrue(any(item["run_id"] == "inbox" and item["decision_id"] == question["decision"]
+                            for item in decisions))
+        documents = [document for batch in data["documents"] for document in batch["documents"]]
+        self.assertTrue(any(document["path"] == f".orchestrator/runs/inbox/decisions/{question['decision']}.md"
+                            and document["run_id"] == "inbox" for document in documents))
+        self.assertIn("inbox", [state["run_id"] for state in AC.load_runs(self.ws)])
+
+    def test_plan_review_and_published_documents_are_uploaded_and_unpublish_deletes(self):
+        self.sample_run()
+        plan_path = self.ws / "plans" / "example" / "plan.md"
+        review_path = self.ws / "plans" / "reports" / "review-t1.md"
+        side_path = self.ws / "docs" / "notes.md"
+        for path, content in ((plan_path, "# Example plan\n"), (review_path, "# Review\n"),
+                              (side_path, "# Side note\n")):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(content)
+        state = self.s.store.load("r1")
+        state["plan_path"] = "plans/example/plan.md"
+        state["tasks"]["T1"]["reviews"] = [{"report_path": "plans/reports/review-t1.md"}]
+        self.s.store.save(state)
+        AC.publish_document(self.ws, "docs/notes.md", "r1", "Custom note")
+        manifest = json.loads(AC.published_manifest_path(self.ws).read_text())
+        self.assertEqual({entry["path"]: entry["kind"] for entry in manifest}, {
+            "docs/notes.md": "other"})
+        docs, _, _, refs = AC.make_documents(self.ws, AC.load_runs(self.ws), self.cfg)
+        by_path = {doc["path"]: doc for doc in docs}
+        self.assertEqual((by_path["plans/example/plan.md"]["kind"], by_path["plans/example/plan.md"]["run_id"]),
+                         ("plan", "r1"))
+        self.assertEqual((by_path["plans/reports/review-t1.md"]["kind"],
+                          by_path["plans/reports/review-t1.md"]["run_id"]), ("review", "r1"))
+        self.assertEqual(by_path["docs/notes.md"]["title"], "Custom note")
+        remote = {doc["path"]: doc["sha256"] for doc in docs}
+        self.assertTrue(AC.unpublish_document(self.ws, "docs/notes.md"))
+        review_path.unlink()
+        _, _, deleted, _ = AC.make_documents(self.ws, AC.load_runs(self.ws), self.cfg, remote)
+        self.assertIn("docs/notes.md", deleted)
+        self.assertIn("plans/reports/review-t1.md", deleted)
+
+    def test_publish_refuses_outside_secret_wrong_type_and_large_files(self):
+        outside = Path(self.tmp.name) / "outside.md"
+        outside.write_text("outside\n")
+        with self.assertRaisesRegex(ValueError, "inside the workspace"):
+            AC.publish_document(self.ws, str(outside))
+        secret = self.ws / "id_rsa.md"
+        secret.write_text("private placeholder\n")
+        with self.assertRaisesRegex(ValueError, "non-secret"):
+            AC.publish_document(self.ws, "id_rsa.md")
+        unsupported = self.ws / "script.py"
+        unsupported.write_text("pass\n")
+        with self.assertRaisesRegex(ValueError, "non-secret"):
+            AC.publish_document(self.ws, "script.py")
+        large = self.ws / "large.md"
+        large.write_bytes(b"x" * (AC.MAX_PUBLISHED_BYTES + 1))
+        with self.assertRaisesRegex(ValueError, "512 KB"):
+            AC.publish_document(self.ws, "large.md")
+
+    def test_agentctl_ask_forwards_to_scheduler_inbox(self):
+        output = StringIO()
+        with redirect_stdout(output):
+            code = AC.main(["ask", "--title", "Which?", "--question", "Choose.",
+                            "--option", "A=Keep", "--option", "B=Change", "--recommend", "A"],
+                           workspace_root=self.ws)
+        self.assertEqual(code, 0)
+        self.assertIn("decision: D1", output.getvalue())
+        self.assertIn("scheduler.py decision wait --run inbox --id D1", output.getvalue())
+
+    def test_hub_sync_prunes_old_non_open_inbox_decisions(self):
+        self.s = self.new_scheduler()
+        first = self.s.inbox_ask("Question 1", "Choose.", ["A=Keep", "B=Change"], "A")["decision"]
+        self.s.decision_answer("inbox", first, "A", quote="A")
+        state = self.s.store.load("inbox")
+        original = dict(state["decisions"][first], created_at="2026-10-28T00:00:00Z")
+        state["decisions"][first] = original
+        decisions_dir = self.s.store.run_dir("inbox") / "decisions"
+        for number in range(2, 102):
+            decision_id = f"D{number}"
+            decision = dict(original, id=decision_id, created_at=f"2026-10-29T00:00:{number % 60:02d}Z")
+            state["decisions"][decision_id] = decision
+            (decisions_dir / f"{decision_id}.md").write_text(f"# {decision_id}\n")
+        self.s.store.save(state)
+        with FakeBackend() as backend:
+            self.set_backend(backend)
+            with redirect_stdout(StringIO()), redirect_stderr(StringIO()):
+                self.assertEqual(AC.watch(self.ws, runner=self.fake_herdr(), sleep=lambda _: None,
+                                          no_orchestrator=True, max_loops=1), 0)
+        pruned = self.s.store.load("inbox")
+        self.assertNotIn(first, pruned["decisions"])
+        self.assertFalse((decisions_dir / f"{first}.md").exists())
+
     def test_document_truncation_and_secret_path_refusal(self):
         large = self.ws / "large.md"
         large.write_text("# Large file\n" + "z" * (AC.MAX_DOCUMENT_BYTES + 32))
@@ -522,10 +617,119 @@ class AgentCtlTests(Base):
             with redirect_stdout(StringIO()), redirect_stderr(StringIO()):
                 self.assertEqual(AC.watch(self.ws, runner=self.fake_herdr("blocked"), sleep=lambda _: None,
                                           no_orchestrator=True, max_loops=1), 0)
-        self.assertEqual(backend.acks[0]["body"], {"status": "HELD", "reason": "orchestrator is blocked"})
+        self.assertEqual(backend.acks[0]["body"], {"status": "HELD", "reason": AC.HUB_HELD_REASON})
         self.assertFalse((self.ws / ".orchestrator" / "hub-log.jsonl").exists())
 
-    def test_watch_retries_answer_notice_locally_after_typing_failure(self):
+    def test_watch_uses_one_second_poll_while_command_is_scheduled(self):
+        command = self.command("cmd_eeeeeeeeeeeeeeee", "prompt", {"text": "Please continue"},
+                               run_id=None, decision_id=None)
+        with FakeBackend(commands=[command]) as backend:
+            self.set_backend(backend)
+            with redirect_stdout(StringIO()), redirect_stderr(StringIO()):
+                self.assertEqual(AC.watch(self.ws, runner=self.fake_herdr("working"), sleep=lambda _: None,
+                                          no_orchestrator=True, max_loops=2), 0)
+        waits = [parse_qs(request["query"]).get("wait") for request in backend.requests
+                 if request["path"].endswith("/commands")]
+        self.assertEqual(waits, [["5"], ["1"]])
+        self.assertEqual([ack["body"]["status"] for ack in backend.acks], ["HELD", "HELD"])
+
+    def test_retry_schedule_timings_and_idle_only_held_delivery(self):
+        item = AC._new_delivery_schedule("notice", "text", 100)
+        due = [item["next_at"]]
+        for _ in range(8):
+            AC._advance_delivery_schedule(item)
+            due.append(item["next_at"])
+        self.assertEqual(due, [101, 103, 107, 115, 131, 147, 163, 179, 211])
+
+        class Client:
+            def __init__(self):
+                self.acks = []
+
+            def ack_command(self, command_id, status, reason=None):
+                self.acks.append((status, reason))
+
+        current = {"time": 0, "state": "working", "prompts": []}
+
+        def runner(args, **kwargs):
+            if args[1:3] == ["agent", "get"]:
+                result = {"result": {"agent": {"agent_status": current["state"]}}}
+                return subprocess.CompletedProcess(args, 0, json.dumps(result), "")
+            if args[1:3] == ["agent", "prompt"]:
+                current["prompts"].append(args[4])
+                return subprocess.CompletedProcess(args, 0, "{}", "")
+            return subprocess.CompletedProcess(args, 1, "", "agent not found")
+
+        client, records, notices, commands = Client(), {}, [], {}
+        command = self.command("cmd_iiiiiiiiiiiiiiii", "prompt", {"text": "Run it"},
+                               run_id=None, decision_id=None)
+        clock = lambda: current["time"]
+        AC._deliver_command(self.ws, self.cfg, "orch-repo", runner, client, command,
+                            records, notices, commands, clock)
+        next_at = commands[command["id"]]["next_at"]
+        AC._deliver_command(self.ws, self.cfg, "orch-repo", runner, client, command,
+                            records, notices, commands, clock)
+        self.assertEqual(commands[command["id"]]["next_at"], next_at)
+        self.assertEqual(client.acks, [("HELD", AC.HUB_HELD_REASON), ("HELD", AC.HUB_HELD_REASON)])
+        current["time"] = 0.9
+        AC._retry_hub_commands(self.ws, "orch-repo", self.cfg, runner, client, records, commands, clock)
+        self.assertEqual(current["prompts"], [])
+        current.update(time=1, state="working")
+        AC._retry_hub_commands(self.ws, "orch-repo", self.cfg, runner, client, records, commands, clock)
+        self.assertEqual(commands[command["id"]]["next_at"], 3)
+        current.update(time=3, state="idle")
+        AC._retry_hub_commands(self.ws, "orch-repo", self.cfg, runner, client, records, commands, clock)
+        self.assertEqual(current["prompts"], ["[hub] Run it"])
+        self.assertEqual(client.acks[-1], ("DELIVERED", None))
+        self.assertNotIn(command["id"], commands)
+
+    def test_held_command_fails_after_ten_minutes_and_answer_notice_retries(self):
+        class Client:
+            def __init__(self):
+                self.acks = []
+
+            def ack_command(self, command_id, status, reason=None):
+                self.acks.append((status, reason))
+
+        current = {"time": 0, "state": "working", "prompts": []}
+
+        def runner(args, **kwargs):
+            if args[1:3] == ["agent", "get"]:
+                return subprocess.CompletedProcess(args, 0, json.dumps({"result": {"agent": {
+                    "agent_status": current["state"]}}}), "")
+            if args[1:3] == ["agent", "prompt"]:
+                current["prompts"].append(args[4])
+                return subprocess.CompletedProcess(args, 0, "{}", "")
+            return subprocess.CompletedProcess(args, 1, "", "agent not found")
+
+        clock = lambda: current["time"]
+        client, records, commands = Client(), {}, {}
+        command = self.command("cmd_jjjjjjjjjjjjjjjj", "reply", {"text": "answer"},
+                               run_id=None, decision_id="D1")
+        AC._deliver_command(self.ws, self.cfg, "orch-repo", runner, client, command,
+                            records, [], commands, clock)
+        current["time"] = AC.HUB_DELIVERY_TIMEOUT
+        AC._retry_hub_commands(self.ws, "orch-repo", self.cfg, runner, client, records, commands, clock)
+        self.assertEqual(client.acks[-1], ("FAILED", AC.HUB_FAILED_REASON))
+        self.assertEqual(records[command["id"]]["status"], "FAILED")
+
+        current.update(time=0, state="working", prompts=[])
+        notices = [AC._new_delivery_schedule("answer-1", "[hub] answered", 0)]
+        AC._retry_hub_notices(self.ws, "orch-repo", self.cfg, runner, notices, clock)
+        current["time"] = 0.9
+        AC._retry_hub_notices(self.ws, "orch-repo", self.cfg, runner, notices, clock)
+        self.assertEqual(current["prompts"], [])
+        current.update(time=1, state="idle")
+        AC._retry_hub_notices(self.ws, "orch-repo", self.cfg, runner, notices, clock)
+        self.assertEqual(current["prompts"], ["[hub] answered"])
+        self.assertEqual(notices, [])
+        notices = [AC._new_delivery_schedule("answer-expired", "[hub] old answer", 0)]
+        current.update(time=AC.HUB_DELIVERY_TIMEOUT, state="working")
+        with mock.patch.object(AC, "log_action") as log_action:
+            AC._retry_hub_notices(self.ws, "orch-repo", self.cfg, runner, notices, clock)
+        self.assertEqual(notices, [])
+        self.assertIn("dropped after 10 minutes", log_action.call_args.args[1])
+
+    def test_watch_does_not_retry_answer_notice_before_first_delay(self):
         self.sample_run()
         command = self.command("cmd_ffffffffffffffff", "answer", {"choice": "A"})
         prompts, attempts = [], {"count": 0}
@@ -544,8 +748,7 @@ class AgentCtlTests(Base):
             with redirect_stdout(StringIO()), redirect_stderr(StringIO()):
                 self.assertEqual(AC.watch(self.ws, runner=runner, sleep=lambda _: None,
                                           no_orchestrator=True, max_loops=2), 0)
-        self.assertEqual(len(prompts), 2)
-        self.assertEqual(prompts[0], prompts[1])
+        self.assertEqual(len(prompts), 1)
         self.assertEqual([ack["body"]["status"] for ack in backend.acks], ["DELIVERED", "DELIVERED"])
 
     def test_watch_does_not_type_logged_command_after_restart(self):

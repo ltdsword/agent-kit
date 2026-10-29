@@ -105,6 +105,12 @@ decision files, and never route around a refusal.
 
 ## Agent Hub messages
 
+When the user is remote or connected through Agent Hub, ask every question with
+`agentctl ask --title "..." --question "..." --option "A=..." --option "B=..." --recommend A`
+(never plain text or `AskUserQuestion`). Pair every ask with a background
+`scheduler.py decision wait --run inbox --id D<n>` and wait for its answer before dependent work.
+Publish documents written for the user with `agentctl publish <path> [--run R] [--title T]`.
+
 Lines starting `[hub]` are the user's words from Agent Hub. An `answered` notice means the decision
 is already recorded: carry it out with `--decision <id>` and do not ask again. A `reply` or prompt is
 the user's message; treat it like chat.

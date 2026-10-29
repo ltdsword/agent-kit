@@ -199,6 +199,10 @@ class Base(unittest.TestCase):
 
 
 class TestDag(Base):
+    def test_create_run_stores_plan_path(self):
+        self.s.create_run("r1", [self.task("T1", trivial=True)], plan_path="plans/example/plan.md")
+        self.assertEqual(self.s.store.load("r1")["plan_path"], "plans/example/plan.md")
+
     def test_run_create_requires_task_sources_committed_at_base(self):
         packet = self.repo / "packets" / "T1.md"
         packet.write_text("# Task T1\n\n## Read first\n- `plans/context.md`\n")
@@ -888,6 +892,36 @@ class TestTaskFiles(Base):
 
 
 class TestDecisions(Base):
+    def test_inbox_ask_creates_inactive_run_increments_ids_and_prunes(self):
+        first = self.s.inbox_ask("Question 1", "Pick one.", ["A=Keep", "B=Change"], "A")
+        second = self.s.inbox_ask("Question 2", "Pick one.", ["A=Keep", "B=Change"], "A")
+        self.assertEqual((first["decision"], second["decision"]), ("D1", "D2"))
+        self.assertEqual(first["wait_command"], "scheduler.py decision wait --run inbox --id D1")
+        state = self.s.store.load("inbox")
+        self.assertEqual((state["status"], state["tasks"], state["workers"]), ("DONE", {}, {}))
+        self.assertFalse((self.s.worktree_root / "integration-inbox").exists())
+
+        for index in range(3, 106):
+            result = self.s.inbox_ask(f"Question {index}", "Pick one.", ["A=Keep", "B=Change"], "A")
+            self.s.decision_answer("inbox", result["decision"], "A", quote="A")
+        state = self.s.store.load("inbox")
+        ids = list(state["decisions"])
+        self.assertEqual(len(ids), 102)  # newest 100 plus the two still-open questions
+        self.assertEqual(ids[:2], ["D1", "D2"])
+        self.assertEqual(ids[-1], "D105")
+        self.assertFalse((self.s.store.run_dir("inbox") / "decisions" / "D3.md").exists())
+        self.assertEqual(self.s.inbox_ask("Question 106", "Pick one.", ["A=Keep", "B=Change"], "A")["decision"],
+                         "D106")
+
+    def test_mark_reviewed_stores_review_report_path(self):
+        self.s.create_run("r1", [self.task("T1", trivial=True)], plan_path="plans/example/plan.md")
+        self.s.dispatch_ready("r1", launch="none")
+        self.worker_commit("r1", "T1")
+        self.s.collect("r1", "T1")
+        self.s.mark_reviewed("r1", "T1", "PASS", report_path="plans/reports/review-t1.md")
+        review = self.s.store.load("r1")["tasks"]["T1"]["reviews"][-1]
+        self.assertEqual(review["report_path"], "plans/reports/review-t1.md")
+
     def test_decision_details_are_saved_and_shown(self):
         self.s.create_run("r1", [self.task("T1")])
         args = S.build_parser().parse_args([
@@ -1786,6 +1820,21 @@ class TestInstall(Base):
         self.kit("create", "--folder=repo")  # names the repo; repo.workspace does not exist yet
         self.assert_workspace()
         self.assertIn("Project notes: see the top of CLAUDE.md", (self.ws / "AGENTS.md").read_text())
+
+    def test_settings_merge_registers_every_template_hook_idempotently(self):
+        self.kit("create", "--folder=repo")
+        settings_path = self.ws / ".claude" / "settings.json"
+        for _ in range(2):
+            self.kit("update", "--folder=repo")
+        settings = json.loads(settings_path.read_text())
+        template = json.loads((self.KIT / ".agent-system" / "templates" / "claude-settings.json").read_text())
+        for event, entries in template["hooks"].items():
+            installed = settings["hooks"][event]
+            for entry in entries:
+                for hook in entry["hooks"]:
+                    occurrences = sum(1 for group in installed for item in group.get("hooks", [])
+                                     if item.get("command") == hook["command"])
+                    self.assertEqual(occurrences, 1, (event, hook["command"]))
 
     def test_create_inside_repo_without_folder(self):
         self.kit("create", cwd=self.repo)

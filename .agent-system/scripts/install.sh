@@ -151,9 +151,25 @@ if obsolete:
 hooks = cur.setdefault("hooks", {})
 for event, entries in json.load(open(tpl)).get("hooks", {}).items():
     have = hooks.setdefault(event, [])
-    if not any("record-session.py" in h.get("command", "") for e in have for h in e.get("hooks", [])):
-        have.extend(entries)
-        msg += f"; {event} hook added"
+    commands = {h.get("command") for entry in have for h in entry.get("hooks", [])
+                if isinstance(h, dict) and isinstance(h.get("command"), str)}
+    added = 0
+    for template_entry in entries:
+        missing = [hook for hook in template_entry.get("hooks", [])
+                   if hook.get("command") not in commands]
+        if not missing:
+            continue
+        matcher = template_entry.get("matcher")
+        target = next((entry for entry in have if entry.get("matcher") == matcher), None)
+        if target is None:
+            target = {key: value for key, value in template_entry.items() if key != "hooks"}
+            target["hooks"] = []
+            have.append(target)
+        target.setdefault("hooks", []).extend(missing)
+        commands.update(hook.get("command") for hook in missing)
+        added += len(missing)
+    if added:
+        msg += f"; {event} hook(s) added"
 if repo:
     dirs = perms.setdefault("additionalDirectories", [])
     if repo not in dirs:
