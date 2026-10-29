@@ -85,6 +85,17 @@ class HubCtlTests(Base):
         key.chmod(0o600)
         return key
 
+    def configure_workspace(self, workspace, enabled=True):
+        system = workspace / ".agent-system"
+        system.mkdir(parents=True, exist_ok=True)
+        cfg = json.loads(json.dumps(REAL_CONFIG))
+        cfg.pop("project", None)
+        cfg["pool"]["worktree_root"] = str(Path(self.tmp.name) / "wt")
+        cfg["hub"] = {"enabled": enabled, "url": "http://127.0.0.1:7420",
+                      "workspace_id": "ws_abcdefghijklmnop" if enabled else None}
+        (system / "config.json").write_text(json.dumps(cfg))
+        return cfg
+
     def test_create_and_reset_user_use_admin_routes_and_print_password(self):
         self.configure_admin()
         for command in ("create-user", "reset-password"):
@@ -170,7 +181,7 @@ class HubCtlTests(Base):
             self.assertTrue(key_path.is_file())
             return original_main(argv, **kwargs)
 
-        def live(_name):
+        def live(_name, **kwargs):
             events.append("live-check")
             return True
 
@@ -185,29 +196,110 @@ class HubCtlTests(Base):
         self.assertTrue(json.loads(config_path.read_text())["hub"]["enabled"])
 
     def test_hub_start_launches_backend_and_live_workspace_watcher(self):
-        system = self.repo / ".agent-system"
-        system.mkdir()
-        cfg = json.loads(json.dumps(REAL_CONFIG))
-        cfg.pop("project", None)
-        cfg["pool"]["worktree_root"] = str(Path(self.tmp.name) / "wt")
-        cfg["hub"] = {"enabled": True, "url": self.proxy.url, "workspace_id": "ws_abcdefghijklmnop"}
-        (system / "config.json").write_text(json.dumps(cfg))
+        self.configure_workspace(self.repo)
+        disabled = Path(self.tmp.name) / "disabled-workspace"
+        self.configure_workspace(disabled, enabled=False)
+        live = Path(self.tmp.name) / "already-running"
+        self.configure_workspace(live)
+        (live / ".orchestrator").mkdir()
+        (live / ".orchestrator" / "hub-connector.pid").write_text("999\n")
+        missing = Path(self.tmp.name) / "missing-workspace"
+        (self.config_dir / "workspaces.json").write_text(json.dumps({"workspaces": [
+            str(self.repo), str(disabled), str(live), str(missing)]}))
+        backend_calls = []
+        connector_calls = []
+
+        def popen(args, **kwargs):
+            backend_calls.append((args, kwargs))
+            return type("Process", (), {"pid": 500 + len(backend_calls)})()
+
+        def start_connector(workspace, cfg, **kwargs):
+            connector_calls.append((workspace, cfg, kwargs))
+
+        output = StringIO()
+        with mock.patch.object(HC, "node24", return_value=Path("/usr/bin/node")), \
+                mock.patch.object(HC.subprocess, "Popen", side_effect=popen), \
+                mock.patch.object(HC.agentctl, "pid_alive", side_effect=lambda pid: pid == 999), \
+                mock.patch.object(HC.agentctl.kitstart, "start_connector", side_effect=start_connector), \
+                redirect_stdout(output):
+            self.assertEqual(HC.hub_start(ROOT, self.repo), 0)
+        self.assertEqual(len(backend_calls), 1)
+        self.assertEqual([call[0] for call in connector_calls], [self.repo.resolve()])
+        self.assertEqual(connector_calls[0][2], {"no_orchestrator": True})
+        self.assertIn(f"hub workspace skipped (missing folder): {missing}", output.getvalue())
+
+    def test_hub_stop_stops_registered_connectors_before_backend(self):
+        first, second = Path(self.tmp.name) / "first", Path(self.tmp.name) / "second"
+        self.configure_workspace(first)
+        self.configure_workspace(second)
+        (self.config_dir / "workspaces.json").write_text(json.dumps({"workspaces": [str(first), str(second)]}))
+        self.data_dir.mkdir()
+        (self.data_dir / "hub.pid").write_text("456\n")
+        stopped, alive = [], iter([True, True, False, False])
+        with mock.patch.object(HC.agentctl, "main", side_effect=lambda args, workspace_root=None:
+                              stopped.append((args, workspace_root)) or 0), \
+                mock.patch.object(HC.agentctl, "pid_alive", side_effect=lambda _pid: next(alive)), \
+                mock.patch.object(HC.os, "kill"), redirect_stdout(StringIO()):
+            self.assertEqual(HC.hub_stop(sleep=lambda _: None, clock=lambda: 0), 0)
+        self.assertEqual(stopped, [(["stop"], first.resolve()), (["stop"], second.resolve())])
+
+    def test_hub_autostart_writes_unit_and_calls_systemctl(self):
+        calls = []
+
+        def runner(args, **kwargs):
+            calls.append(args)
+            value = "active\n" if args[2:3] == ["is-active"] else "enabled\n"
+            return subprocess.CompletedProcess(args, 0, value, "")
+
+        config_home = Path(self.tmp.name) / "xdg-config"
+        with mock.patch.dict(os.environ, {"XDG_CONFIG_HOME": str(config_home)}), \
+                mock.patch.object(HC.shutil, "which", return_value="/usr/bin/systemctl"), \
+                redirect_stdout(StringIO()):
+            self.assertEqual(HC.main(["hub", "autostart", "on"], runner=runner), 0)
+        unit = config_home / "systemd" / "user" / "agent-hub.service"
+        content = unit.read_text()
+        install = Path(HC.__file__).resolve().parent / "scripts" / "install.sh"
+        self.assertIn("Type=oneshot", content)
+        self.assertIn("RemainAfterExit=yes", content)
+        self.assertIn(f'ExecStart="{install}" hub start', content)
+        self.assertIn(f'ExecStop="{install}" hub stop', content)
+        self.assertIn("WantedBy=default.target", content)
+        self.assertEqual(calls, [["systemctl", "--user", "daemon-reload"],
+                                 ["systemctl", "--user", "enable", "--now", "agent-hub.service"]])
+
+        status_output = StringIO()
+        with mock.patch.dict(os.environ, {"XDG_CONFIG_HOME": str(config_home)}), \
+                mock.patch.object(HC.shutil, "which", return_value="/usr/bin/systemctl"), \
+                redirect_stdout(status_output):
+            self.assertEqual(HC.main(["hub", "autostart", "status"], runner=runner), 0)
+        self.assertIn("enabled: enabled", status_output.getvalue())
+        self.assertIn("active: active", status_output.getvalue())
+
+        with mock.patch.dict(os.environ, {"XDG_CONFIG_HOME": str(config_home)}), \
+                mock.patch.object(HC.shutil, "which", return_value="/usr/bin/systemctl"), \
+                redirect_stdout(StringIO()):
+            self.assertEqual(HC.main(["hub", "autostart", "off"], runner=runner), 0)
+        self.assertFalse(unit.exists())
+        self.assertEqual(calls[-2:], [["systemctl", "--user", "disable", "--now", "agent-hub.service"],
+                                      ["systemctl", "--user", "daemon-reload"]])
+
+    def test_start_connector_uses_no_orchestrator_flag(self):
+        cfg = self.configure_workspace(self.repo)
         calls = []
 
         def popen(args, **kwargs):
             calls.append((args, kwargs))
-            return type("Process", (), {"pid": 500 + len(calls)})()
+            return None
 
-        with mock.patch.object(HC.Path, "cwd", return_value=self.repo), \
-                mock.patch.object(HC, "node24", return_value=Path("/usr/bin/node")), \
-                mock.patch.object(HC.subprocess, "Popen", side_effect=popen), \
-                mock.patch.object(HC.agentctl, "_orchestrator_alive", return_value=True), \
-                redirect_stdout(StringIO()):
-            self.assertEqual(HC.main(["hub", "start"]), 0)
-        self.assertEqual(len(calls), 2)
-        self.assertEqual(calls[1][0][1:], [str(Path(HC.agentctl.__file__).resolve()), "watch"])
-        self.assertEqual(calls[1][1]["cwd"], str(self.repo))
-        self.assertTrue(calls[1][1]["start_new_session"])
+        HC.agentctl.kitstart.start_connector(self.repo, cfg, popen=popen, no_orchestrator=True)
+        self.assertEqual(calls[0][0][-2:], ["watch", "--no-orchestrator"])
+
+    def test_hub_autostart_reports_missing_systemctl(self):
+        output = StringIO()
+        with mock.patch.dict(os.environ, {"XDG_CONFIG_HOME": str(Path(self.tmp.name) / "xdg-config")}), \
+                mock.patch.object(HC.shutil, "which", return_value=None), redirect_stderr(output):
+            self.assertEqual(HC.main(["hub", "autostart", "on"]), 1)
+        self.assertIn("systemd is unavailable: systemctl was not found", output.getvalue())
 
     def test_hub_stop_waits_for_pid_exit(self):
         self.data_dir.mkdir()
@@ -241,6 +333,7 @@ class HubCtlTests(Base):
         commands = (("create-user", "--name=alice"), ("reset-password", "--name=alice"),
                     ("hub-login", "--name=alice", "--url=http://127.0.0.1:9999"),
                     ("hub", "start"), ("hub", "stop"), ("hub", "status"),
+                    ("hub", "autostart", "on"),
                     ("proxy-setup", "--rotate-admin-key", "--origins=https://example.invalid"))
         for args in commands:
             result = subprocess.run(["bash", str(installer), *args, "--dry-run"], cwd=self.repo,

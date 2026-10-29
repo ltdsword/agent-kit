@@ -26,6 +26,7 @@ import scheduler as S  # noqa: E402
 
 CONNECTOR_VERSION = "0.1.0"
 PROTOCOL_VERSION = 2
+LEGACY_RUN_LOGGED = set()
 ID_ALPHABET = "abcdefghijklmnopqrstuvwxyz234567"
 MAX_DOCUMENT_BYTES = 1024 * 1024
 MAX_SNAPSHOT_BYTES = 256 * 1024
@@ -99,6 +100,56 @@ def default_workspace() -> Path:
 def key_file(env=None) -> Path:
     env = os.environ if env is None else env
     return Path(env.get("AGENT_HUB_CONFIG", "~/.config/agent-hub")).expanduser() / "connector.key"
+
+
+def workspace_registry_path(env=None) -> Path:
+    env = os.environ if env is None else env
+    return Path(env.get("AGENT_HUB_CONFIG", "~/.config/agent-hub")).expanduser() / "workspaces.json"
+
+
+def load_workspace_registry(env=None) -> list[Path]:
+    path = workspace_registry_path(env)
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return []
+    except (OSError, ValueError) as error:
+        raise ValueError(f"could not read workspace registry: {path}") from error
+    if not isinstance(value, dict) or not isinstance(value.get("workspaces"), list) or \
+            not all(isinstance(item, str) for item in value["workspaces"]):
+        raise ValueError(f"invalid workspace registry: {path}")
+    return [Path(item).expanduser().resolve() for item in value["workspaces"]]
+
+
+def update_workspace_registry(ws: Path, enabled: bool) -> None:
+    path = workspace_registry_path()
+    workspaces = load_workspace_registry()
+    target = ws.resolve()
+    remaining = []
+    seen = set()
+    for workspace in workspaces:
+        key = str(workspace)
+        if workspace == target or key in seen:
+            continue
+        seen.add(key)
+        remaining.append(key)
+    if enabled:
+        remaining.append(str(target))
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    temp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            json.dump({"workspaces": remaining}, stream, ensure_ascii=False, indent=2)
+            stream.write("\n")
+        os.chmod(temp, 0o600)
+        os.replace(temp, path)
+        os.chmod(path, 0o600)
+    finally:
+        try:
+            temp.unlink()
+        except FileNotFoundError:
+            pass
 
 
 def read_key(env=None) -> str:
@@ -354,6 +405,123 @@ def _herdr_record(name: str | None, runner=subprocess.run) -> tuple[dict | None,
     return agent, state if state in ("idle", "working", "blocked", "done", "unknown", "absent") else "unknown"
 
 
+def _herdr_record_for_workspace(name: str, workspace: Path, kind: str,
+                                runner=subprocess.run) -> tuple[dict | None, str, str]:
+    """Find a named orchestrator, then an unnamed agent of the configured kind in this workspace."""
+    record, state = _herdr_record(name, runner)
+    if state != "absent":
+        return record, state, name
+    try:
+        result = runner(["herdr", "agent", "list"], capture_output=True, text=True, timeout=5)
+    except (FileNotFoundError, OSError, subprocess.TimeoutExpired):
+        return None, "unknown", name
+    if result.returncode:
+        return None, "unknown", name
+    try:
+        data = json.loads(result.stdout or "{}")
+    except ValueError:
+        return None, "unknown", name
+    result_data = data.get("result") if isinstance(data, dict) else None
+    agents = (result_data.get("agents") if isinstance(result_data, dict) else None)
+    if not isinstance(agents, list) and isinstance(data, dict):
+        agents = data.get("agents")
+    if not isinstance(agents, list):
+        return None, "unknown", name
+    expected_cwd = str(workspace.resolve())
+    for agent in agents:
+        if not isinstance(agent, dict) or (agent.get("kind") or agent.get("agent")) != kind:
+            continue
+        cwd = agent.get("cwd")
+        pane_id = agent.get("pane_id")
+        if not isinstance(cwd, str) or not isinstance(pane_id, str) or not pane_id:
+            continue
+        try:
+            if str(Path(cwd).resolve()) != expected_cwd:
+                continue
+        except (OSError, ValueError):
+            continue
+        state = agent.get("agent_status")
+        state = state if state in ("idle", "working", "blocked", "done", "unknown", "absent") else "unknown"
+        return agent, state, pane_id
+    return None, "absent", name
+
+
+def _legacy_run(state: dict) -> dict:
+    """Copy and normalize the fields whose pre-v2 shapes are known to be common."""
+    normalized = dict(state)
+    run_id = normalized.get("run_id")
+    if not isinstance(normalized.get("title"), str) or not normalized.get("title"):
+        normalized["title"] = run_id
+    if not isinstance(normalized.get("goal"), str) or not normalized.get("goal"):
+        normalized["goal"] = f"Legacy run {run_id}"
+
+    raw_tasks = normalized.get("tasks") or {}
+    if not isinstance(raw_tasks, dict):
+        return normalized
+    mapping = {}
+    for index, (key, raw_task) in enumerate(raw_tasks.items(), 1):
+        if not isinstance(raw_task, dict):
+            continue
+        old_id = raw_task.get("id", key)
+        new_id = old_id if isinstance(old_id, str) and re.fullmatch(r"T[1-9][0-9]{0,2}", old_id) else f"T{index}"
+        mapping[old_id] = new_id
+        mapping[key] = new_id
+    task_items = []
+    for index, (key, raw_task) in enumerate(raw_tasks.items(), 1):
+        if not isinstance(raw_task, dict):
+            task_items.append((key, raw_task))
+            continue
+        old_id = raw_task.get("id", key)
+        new_id = mapping[old_id]
+        task = dict(raw_task)
+        task["id"] = new_id
+        task["depends_on"] = [mapping.get(item, item) for item in task.get("depends_on", [])]
+        title = task.get("title")
+        title = title if isinstance(title, str) else ""
+        if len(title) > 60:
+            title = title[:59] + "…"
+        task["title"] = title
+        summary = task.get("summary")
+        if not isinstance(summary, str) or len(summary.strip()) < 20:
+            summary = f"(legacy task) {title}".ljust(20)
+        task["summary"] = summary[:300]
+        task_items.append((new_id, task))
+    normalized["tasks"] = dict(task_items)
+
+    decisions = normalized.get("decisions") or {}
+    if isinstance(decisions, dict):
+        normalized_decisions = {}
+        for decision_id, raw_decision in decisions.items():
+            if isinstance(raw_decision, dict):
+                decision = dict(raw_decision)
+                if decision.get("task") is not None:
+                    decision["task"] = mapping.get(decision["task"], decision["task"])
+                normalized_decisions[decision_id] = decision
+            else:
+                normalized_decisions[decision_id] = raw_decision
+        normalized["decisions"] = normalized_decisions
+    return normalized
+
+
+def _snapshot_runs(states: list[dict], ws: Path, cfg: dict) -> tuple[list[dict], list[dict]]:
+    """Normalize legacy run fields and omit invalid runs without failing their neighbors."""
+    valid_states, snapshots = [], []
+    for state in states:
+        run_id = state.get("run_id") if isinstance(state, dict) else None
+        try:
+            normalized = _legacy_run(state)
+            snapshot = _run_snapshot(normalized, ws, cfg)
+            validate("Run", snapshot)
+        except (ValueError, TypeError, KeyError, AttributeError) as error:
+            if run_id not in LEGACY_RUN_LOGGED:
+                LEGACY_RUN_LOGGED.add(run_id)
+                log_action(ws, f"skipping invalid run {run_id}: {error}")
+            continue
+        valid_states.append(normalized)
+        snapshots.append(snapshot)
+    return valid_states, snapshots
+
+
 def _screen(name: str | None, lines: int, runner=subprocess.run):
     if not name:
         return None
@@ -440,22 +608,23 @@ def _scout_snapshot(state: dict | None) -> dict | None:
             "max_rounds": research.get("max_scout_rounds", 3), "readiness": latest_readiness, "rounds": rounds}
 
 
-def make_snapshot(ws: Path, cfg: dict, session_id: str, runner=subprocess.run) -> dict:
+def make_snapshot(ws: Path, cfg: dict, session_id: str, runner=subprocess.run, prepared_runs=None) -> dict:
     """Build the protocol snapshot from run state, config and best-effort Herdr observations."""
     ws = ws.resolve()
     repo = S.project_root_for(ws, cfg)
     repo_name = repo.name
     orch = cfg.get("orchestrator", {})
     orch_name = kitstart.agent_name(repo_name)
-    orch_record, orch_state = _herdr_record(orch_name, runner)
+    orch_record, orch_state, orch_target = _herdr_record_for_workspace(
+        orch_name, ws, orch.get("kind", "claude"), runner)
     upload = config_hub(cfg).get("upload", {})
     screen_on = bool(upload.get("orchestrator_screen", True))
     screen_lines = config_hub(cfg).get("screen_lines", 40)
-    orch_screen = _screen(orch_name, screen_lines, runner) if screen_on else None
+    orch_screen = _screen(orch_target, screen_lines, runner) if screen_on else None
     orch_session = ((orch_record or {}).get("agent_session") or {}).get("value")
     if not orch_session:
         orch_session = kitstart.saved_session(ws).get("session_id")
-    runs = load_runs(ws)
+    runs, run_snapshots = prepared_runs or _snapshot_runs(load_runs(ws), ws, cfg)
     newest = runs[0] if runs else None
     worker_states = (newest or {}).get("workers") or {}
     worker_items = []
@@ -483,7 +652,7 @@ def make_snapshot(ws: Path, cfg: dict, session_id: str, runner=subprocess.run) -
                          "effort": orch.get("effort"), "herdr_state": orch_state,
                          "session_id": orch_session, "screen": orch_screen},
         "workers": worker_items, "scout": _scout_snapshot(newest),
-        "runs": [_run_snapshot(state, ws, cfg) for state in runs],
+        "runs": run_snapshots,
         "orchestrator_last_activity_at": newest_activity
     }
     snapshot = scrub(snapshot)
@@ -727,9 +896,9 @@ def build_sync(ws: Path, cfg: dict, session_id: str | None = None, runner=subpro
     """Build and validate the hello, snapshot, decisions, events and document batches."""
     ws, remote = ws.resolve(), remote or {}
     session_id = session_id or new_id("ses_")
-    runs = load_runs(ws)
+    runs, run_snapshots = _snapshot_runs(load_runs(ws), ws, cfg)
     hello = make_hello(ws, cfg, session_id)
-    snapshot = make_snapshot(ws, cfg, session_id, runner)
+    snapshot = make_snapshot(ws, cfg, session_id, runner, (runs, run_snapshots))
     snapshot_hash = snapshot_digest(snapshot)
     decisions = [decision for decision in make_decisions(runs)
                  if remote.get("decision_hashes", {}).get(f"{decision['run_id']}/{decision['decision_id']}")
@@ -834,8 +1003,12 @@ def _state_mtimes(ws: Path) -> tuple:
     return tuple(result)
 
 
-def _orchestrator_alive(name: str, runner=subprocess.run) -> bool:
-    _, state = _herdr_record(name, runner)
+def _orchestrator_alive(name: str, runner=subprocess.run, workspace: Path | None = None,
+                        kind: str = "claude") -> bool:
+    if workspace is not None:
+        _, state, _ = _herdr_record_for_workspace(name, workspace, kind, runner)
+    else:
+        _, state = _herdr_record(name, runner)
     return state not in ("absent", "unknown")
 
 
@@ -1082,6 +1255,8 @@ def watch(ws: Path, interval=5, no_orchestrator=False, runner=subprocess.run, sl
     last_send, last_check, last_mtimes = clock(), 0.0, None
     reason = "signal"
     orch_name = kitstart.agent_name(S.project_root_for(ws, cfg).name)
+    orch_kind = cfg.get("orchestrator", {}).get("kind", "claude")
+    orch_target = orch_name
     command_records = _load_hub_log(ws)
     notice_retries = []
     log_action(ws, "connector started")
@@ -1127,8 +1302,9 @@ def watch(ws: Path, interval=5, no_orchestrator=False, runner=subprocess.run, sl
             changed = last_mtimes is None or mtimes != last_mtimes
             due = now_mono - last_check >= max(interval, 0)
             last_mtimes = mtimes
+            orch_record, orch_state, orch_target = _herdr_record_for_workspace(orch_name, ws, orch_kind, runner)
             if not no_orchestrator:
-                if _orchestrator_alive(orch_name, runner):
+                if orch_state not in ("absent", "unknown"):
                     gone_count = 0
                 else:
                     gone_count += 1
@@ -1175,10 +1351,10 @@ def watch(ws: Path, interval=5, no_orchestrator=False, runner=subprocess.run, sl
                     sleep(backoff)
                     backoff = min(backoff * 2, 60)
             if connected:
-                _retry_hub_notices(ws, orch_name, cfg, runner, notice_retries)
+                _retry_hub_notices(ws, orch_target, cfg, runner, notice_retries)
                 try:
                     # Hold the long-poll only for one sync interval so snapshots keep their cadence.
-                    _poll_hub_commands(ws, cfg, orch_name, runner, client, command_records, notice_retries,
+                    _poll_hub_commands(ws, cfg, orch_target, runner, client, command_records, notice_retries,
                                        wait=max(1, min(25, int(interval))))
                 except Exception as e:
                     connected = False
@@ -1223,6 +1399,7 @@ def command_enable(ws: Path, url: str | None) -> int:
     hub.setdefault("screen_lines", 40)
     cfg["hub"] = hub
     save_config(ws, cfg)
+    update_workspace_registry(ws, True)
     try:
         key = read_key()
     except RuntimeError as e:
@@ -1234,6 +1411,17 @@ def command_enable(ws: Path, url: str | None) -> int:
         print(f"Agent Hub backend check failed at {hub['url']}: {e}", file=sys.stderr)
         return 1
     print(f"hub enabled for {hub['workspace_id']} ({display_url(hub['url'])})")
+    return 0
+
+
+def command_disable(ws: Path) -> int:
+    cfg = load_config(ws)
+    hub = config_hub(cfg)
+    hub["enabled"] = False
+    cfg["hub"] = hub
+    save_config(ws, cfg)
+    update_workspace_registry(ws, False)
+    print("hub disabled")
     return 0
 
 
@@ -1302,6 +1490,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
     enable = sub.add_parser("enable", help="enable the Agent Hub connector")
     enable.add_argument("--url")
+    sub.add_parser("disable", help="disable the Agent Hub connector")
     sync = sub.add_parser("sync", help="preview a sync without network access")
     sync.add_argument("--dry-run", action="store_true", required=True)
     sync.add_argument("--json", action="store_true")
@@ -1320,6 +1509,8 @@ def main(argv=None, workspace_root: Path | None = None, runner=subprocess.run, s
     try:
         if args.command == "enable":
             return command_enable(ws, args.url)
+        if args.command == "disable":
+            return command_disable(ws)
         if args.command == "sync":
             return print_dry_run(ws, load_config(ws), args.json, runner)
         if args.command == "watch":

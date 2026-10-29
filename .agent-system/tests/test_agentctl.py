@@ -215,6 +215,93 @@ class AgentCtlTests(Base):
         self.assertRegex(saved["hub"]["workspace_id"], r"^ws_[a-z2-7]{16}$")
         self.assertEqual(S.validate_config(saved), [])
 
+    def test_enable_and_disable_update_private_workspace_registry(self):
+        with mock.patch.object(AC, "ping", return_value={}), redirect_stdout(StringIO()):
+            self.assertEqual(AC.command_enable(self.ws, None), 0)
+        registry = AC.workspace_registry_path()
+        self.assertEqual(registry.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(json.loads(registry.read_text())["workspaces"], [str(self.ws.resolve())])
+        with redirect_stdout(StringIO()):
+            self.assertEqual(AC.command_disable(self.ws), 0)
+        self.assertFalse(json.loads(self.config_path.read_text())["hub"]["enabled"])
+        self.assertEqual(json.loads(registry.read_text())["workspaces"], [])
+
+    def _write_legacy_run(self, run_id, task_status="PENDING"):
+        run_dir = self.ws / ".orchestrator" / "runs" / run_id
+        run_dir.mkdir(parents=True, exist_ok=True)
+        state = {"run_id": run_id, "status": "RUNNING", "created_at": "2026-10-29T00:00:00Z",
+                 "base_branch": "main", "integration_branch": f"agent/integration-{run_id}",
+                 "tasks": {
+                     "register-validation": {"id": "register-validation", "title": "L" * 70,
+                                               "summary": None, "status": task_status, "worker": None,
+                                               "depends_on": [], "major_repairs": 0, "known_issues": None},
+                     "zadn-ui": {"id": "zadn-ui", "title": "Review UI", "summary": "tiny",
+                                 "status": "PENDING", "worker": None,
+                                 "depends_on": ["register-validation"], "major_repairs": 0,
+                                 "known_issues": None}},
+                 "decisions": {"D1": {"task": "register-validation", "status": "PENDING",
+                                       "created_at": "2026-10-29T00:00:00Z"},
+                               "D2": {"task": "zadn-ui", "status": "PENDING",
+                                      "created_at": "2026-10-29T00:00:00Z"}},
+                 "events": []}
+        (run_dir / "state.json").write_text(json.dumps(state))
+        return state
+
+    def test_legacy_run_is_mapped_and_validated(self):
+        self._write_legacy_run("legacy")
+        data = AC.build_sync(self.ws, self.cfg, "ses_abcdefghijklmnop", self.fake_herdr())
+        hubschema.validate("Snapshot", data["snapshot"])
+        run = data["snapshot"]["runs"][0]
+        hubschema.validate("Run", run)
+        self.assertEqual((run["title"], run["goal"]), ("legacy", "Legacy run legacy"))
+        tasks = {task["id"]: task for task in run["tasks"]}
+        self.assertEqual(set(tasks), {"T1", "T2"})
+        self.assertEqual(len(tasks["T1"]["title"]), 60)
+        self.assertTrue(tasks["T1"]["title"].endswith("…"))
+        self.assertGreaterEqual(len(tasks["T1"]["summary"]), 20)
+        self.assertLessEqual(len(tasks["T1"]["summary"]), 300)
+        self.assertTrue(tasks["T1"]["summary"].startswith("(legacy task)"))
+        self.assertEqual(tasks["T2"]["depends_on"], ["T1"])
+        decisions = {decision["decision_id"]: decision for batch in data["decisions"]
+                     for decision in batch["decisions"]}
+        self.assertEqual((decisions["D1"]["task_id"], decisions["D2"]["task_id"]), ("T1", "T2"))
+
+    def test_unfixable_run_is_skipped_and_logged_once(self):
+        self._write_legacy_run("legacy-invalid", task_status="NOT_A_STATUS")
+        AC.LEGACY_RUN_LOGGED.discard("legacy-invalid")
+        with mock.patch.object(AC, "log_action") as log_action:
+            first = AC.make_snapshot(self.ws, self.cfg, "ses_abcdefghijklmnop", self.fake_herdr())
+            second = AC.make_snapshot(self.ws, self.cfg, "ses_abcdefghijklmnop", self.fake_herdr())
+        hubschema.validate("Snapshot", first)
+        hubschema.validate("Snapshot", second)
+        self.assertEqual(first["runs"], [])
+        self.assertEqual(second["runs"], [])
+        self.assertEqual(log_action.call_count, 1)
+        self.assertIn("legacy-invalid", log_action.call_args.args[1])
+
+    def test_orchestrator_falls_back_to_matching_workspace_agent(self):
+        calls = []
+
+        def runner(args, **kwargs):
+            calls.append(args)
+            if args[1:3] == ["agent", "get"]:
+                return subprocess.CompletedProcess(args, 1, "", "agent not found")
+            if args[1:3] == ["agent", "list"]:
+                agents = {"result": {"agents": [{"agent": "claude", "agent_status": "idle",
+                                                    "cwd": str(self.ws.resolve()), "pane_id": "w9:p1",
+                                                    "agent_session": {"kind": "id", "value": "fallback-session"}}]}}
+                return subprocess.CompletedProcess(args, 0, json.dumps(agents), "")
+            if args[1:3] == ["agent", "read"]:
+                return subprocess.CompletedProcess(args, 0, "fallback screen\n", "")
+            return subprocess.CompletedProcess(args, 1, "", "agent not found")
+
+        snapshot = AC.make_snapshot(self.ws, self.cfg, "ses_abcdefghijklmnop", runner)
+        self.assertEqual(snapshot["orchestrator"]["herdr_state"], "idle")
+        self.assertEqual(snapshot["orchestrator"]["session_id"], "fallback-session")
+        self.assertEqual(snapshot["orchestrator"]["screen"], ["fallback screen"])
+        self.assertIn(["herdr", "agent", "read", "w9:p1", "--source", "visible", "--lines", "40"], calls)
+        self.assertTrue(AC._orchestrator_alive("orch-repo", runner, self.ws, "claude"))
+
     def test_enable_rewrites_only_hub_object_and_keeps_key_order(self):
         source = ('{\n  "first" : [1,  2],\n "hub" : {"enabled": false, "workspace_id": null},\n'
                   '\t"last":{"nested":true}\n}\n')

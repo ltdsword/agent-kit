@@ -61,10 +61,11 @@ Prefix every command with `python3 .agent-system/scheduler.py`. Add `--json` bef
 | Command | What it does |
 |---|---|
 | `doctor` | Validate config, tools, scout agent, Codex profile, cached model catalog |
-| `agentctl enable [--url URL]` / `sync --dry-run [--json]` / `watch [--interval 5] [--no-orchestrator]` / `status` / `stop` / `reset-id` | Configure and inspect the optional Agent Hub connector (`python3 .agent-system/agentctl.py <command>`) |
+| `agentctl enable [--url URL]` / `disable` / `sync --dry-run [--json]` / `watch [--interval 5] [--no-orchestrator]` / `status` / `stop` / `reset-id` | Configure and inspect the optional Agent Hub connector (`python3 .agent-system/agentctl.py <command>`); enable/disable also registers or removes the workspace for autostart |
 | `agent-kit create-user --name=<u>` / `reset-password --name=<u>` | Admin-only account setup; prints the generated password once |
 | `agent-kit hub-login --name=<u> [--url=<proxy>] [--computer-name=<n>]` | Register this computer; in a kit workspace, start the backend, wait for its connector key, enable the connector, and start its watcher when the orchestrator is live |
-| `agent-kit hub start\|stop\|status` | Start the local backend and eligible workspace watcher, stop it with a 10-second wait, or inspect status |
+| `agent-kit hub start\|stop\|status` | Start the local backend and connectors for enabled registered workspaces, stop them and the backend with a 10-second wait, or inspect status |
+| `agent-kit hub autostart on\|off\|status` | Install, remove, or inspect the systemd user service for Agent Hub |
 | `agent-kit proxy-setup [--rotate-admin-key] [--origins ...]` | Provision the shared Agent Hub proxy |
 | `pool init` / `pool show` | Create the worktree root, show slot paths/state; show per-slot model resolution |
 | `run create --run ID --tasks FILE [--base REF] [--request-id ID]` | Validate run title/goal and task DAG (1..`max_tasks_per_request`), create `agent/integration-ID` worktree |

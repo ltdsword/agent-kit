@@ -6,7 +6,7 @@
 #   agent-kit start  [--folder=<repo>] [--dry-run] [--no-attach]   open Herdr + launch the orchestrator
 #   agent-kit continue [--folder=<repo>] [--session=ID] [--force] [--dry-run] [--no-attach]
 #   agent-kit create-user|reset-password --name=<u> | hub-login --name=<u> [--url=<proxy>] [--computer-name=<n>]
-#   agent-kit hub start|stop|status | proxy-setup [--rotate-admin-key] [--origins ...]
+#   agent-kit hub start|stop|status | hub autostart on|off|status | proxy-setup [--rotate-admin-key] [--origins ...]
 #                     restart the orchestrator with the current config, in its last chat
 #   model options: --model-orchestrator=M --effort-orchestrator=E --model-scout=M --effort-scout=E
 #                  --model-worker=M --effort-worker=E  (M: model or alias, or <program>/<model>)

@@ -170,10 +170,60 @@ def _start_workspace_connector(workspace: Path) -> None:
         if not agentctl.config_hub(cfg).get("enabled"):
             return
         project = agentctl.S.project_root_for(workspace, cfg)
-        if agentctl._orchestrator_alive(agentctl.kitstart.agent_name(project.name)):
+        kind = cfg.get("orchestrator", {}).get("kind", "claude")
+        if agentctl._orchestrator_alive(agentctl.kitstart.agent_name(project.name), workspace=workspace,
+                                        kind=kind):
             agentctl.kitstart.start_connector(workspace, cfg)
     except Exception as error:
         print(f"hub connector could not be started: {agentctl.scrub(str(error))}", file=sys.stderr)
+
+
+def _start_registered_connectors() -> None:
+    try:
+        workspaces = agentctl.load_workspace_registry()
+    except (OSError, ValueError) as error:
+        print(f"hub workspace registry could not be read: {agentctl.scrub(str(error))}", file=sys.stderr)
+        return
+    for workspace in workspaces:
+        if not workspace.is_dir():
+            print(f"hub workspace skipped (missing folder): {workspace}")
+            continue
+        if not (workspace / ".agent-system" / "config.json").is_file():
+            continue
+        try:
+            cfg = agentctl.load_config(workspace)
+            if not agentctl.config_hub(cfg).get("enabled"):
+                continue
+            pidfile = workspace / ".orchestrator" / "hub-connector.pid"
+            try:
+                pid = int(pidfile.read_text(encoding="ascii").strip())
+            except (OSError, ValueError):
+                pid = None
+            if pid and pid > 0 and agentctl.pid_alive(pid):
+                continue
+            agentctl.kitstart.start_connector(workspace, cfg, no_orchestrator=True)
+        except Exception as error:
+            print(f"hub connector could not be started for {workspace}: {agentctl.scrub(str(error))}",
+                  file=sys.stderr)
+
+
+def _stop_registered_connectors() -> int:
+    try:
+        workspaces = agentctl.load_workspace_registry()
+    except (OSError, ValueError) as error:
+        print(f"hub workspace registry could not be read: {agentctl.scrub(str(error))}", file=sys.stderr)
+        return 1
+    status = 0
+    for workspace in workspaces:
+        if not workspace.is_dir():
+            continue
+        try:
+            status = max(status, agentctl.main(["stop"], workspace_root=workspace))
+        except Exception as error:
+            status = 1
+            print(f"hub connector could not be stopped for {workspace}: {agentctl.scrub(str(error))}",
+                  file=sys.stderr)
+    return status
 
 
 def hub_login(name: str, url: str | None, computer_name: str | None, workspace: Path) -> int:
@@ -209,7 +259,8 @@ def hub_login(name: str, url: str | None, computer_name: str | None, workspace: 
             raise HubCtlError("registration was saved, but agentctl enable failed")
         cfg = agentctl.load_config(workspace)
         project = agentctl.S.project_root_for(workspace, cfg)
-        if agentctl._orchestrator_alive(agentctl.kitstart.agent_name(project.name)):
+        if agentctl._orchestrator_alive(agentctl.kitstart.agent_name(project.name), workspace=workspace,
+                                        kind=cfg.get("orchestrator", {}).get("kind", "claude")):
             agentctl.kitstart.start_connector(workspace, cfg)
     return 0
 
@@ -255,7 +306,7 @@ def hub_start(source: Path, workspace: Path | None = None, start_connector=True)
         if agentctl.pid_alive(pid):
             print(f"Agent Hub backend is already running (pid {pid})")
             if start_connector:
-                _start_workspace_connector(workspace)
+                _start_registered_connectors()
             return 0
     node = node24(source)
     cli = source / "hub" / "server" / "src" / "cli.ts"
@@ -275,21 +326,22 @@ def hub_start(source: Path, workspace: Path | None = None, start_connector=True)
     os.replace(temp, pidfile)
     print(f"started Agent Hub backend (pid {process.pid}); log: {logfile}")
     if start_connector:
-        _start_workspace_connector(workspace)
+        _start_registered_connectors()
     return 0
 
 
 def hub_stop(sleep=time.sleep, clock=time.monotonic) -> int:
+    connector_status = _stop_registered_connectors()
     pidfile = data_dir() / "hub.pid"
     try:
         pid = int(pidfile.read_text(encoding="ascii").strip())
     except (OSError, ValueError):
         print("Agent Hub backend is not running")
-        return 0
+        return connector_status
     if not agentctl.pid_alive(pid):
         pidfile.unlink(missing_ok=True)
         print("Agent Hub backend pid is stale")
-        return 0
+        return connector_status
     try:
         os.kill(pid, signal.SIGTERM)
     except OSError as error:
@@ -304,6 +356,81 @@ def hub_stop(sleep=time.sleep, clock=time.monotonic) -> int:
         print(f"still running (pid {pid})")
     else:
         print("stopped")
+    return connector_status
+
+
+def _systemd_unit_path() -> Path:
+    config_home = Path(os.environ.get("XDG_CONFIG_HOME", "~/.config")).expanduser()
+    return config_home / "systemd" / "user" / "agent-hub.service"
+
+
+def _systemd_exec(path: Path, action: str) -> str:
+    escaped = str(path).replace("\\", "\\\\").replace('"', '\\"')
+    return f'"{escaped}" hub {action}'
+
+
+def hub_autostart(action: str, runner=subprocess.run) -> int:
+    if shutil.which("systemctl") is None:
+        print("systemd is unavailable: systemctl was not found", file=sys.stderr)
+        return 1
+    unit = _systemd_unit_path()
+    if action == "on":
+        install = Path(__file__).resolve().parent / "scripts" / "install.sh"
+        content = ("[Unit]\n"
+                   "Description=Agent Hub backend and workspace connectors\n\n"
+                   "[Service]\n"
+                   "Type=oneshot\n"
+                   "RemainAfterExit=yes\n"
+                   f"ExecStart={_systemd_exec(install, 'start')}\n"
+                   f"ExecStop={_systemd_exec(install, 'stop')}\n\n"
+                   "[Install]\n"
+                   "WantedBy=default.target\n")
+        unit.parent.mkdir(parents=True, exist_ok=True)
+        unit.write_text(content, encoding="utf-8")
+        commands = [["--user", "daemon-reload"], ["--user", "enable", "--now", "agent-hub.service"]]
+    elif action == "off":
+        status = 0
+        try:
+            result = runner(["systemctl", "--user", "disable", "--now", "agent-hub.service"],
+                            capture_output=True, text=True, check=False)
+            status = max(status, result.returncode)
+        except (OSError, subprocess.TimeoutExpired):
+            status = 1
+        unit.unlink(missing_ok=True)
+        try:
+            result = runner(["systemctl", "--user", "daemon-reload"], capture_output=True, text=True,
+                            check=False)
+            status = max(status, result.returncode)
+        except (OSError, subprocess.TimeoutExpired):
+            status = 1
+        print("Agent Hub autostart disabled")
+        return status
+    elif action == "status":
+        states = []
+        for check in ("is-enabled", "is-active"):
+            try:
+                result = runner(["systemctl", "--user", check, "agent-hub.service"],
+                                capture_output=True, text=True, check=False)
+                state = result.stdout.strip() if result.returncode == 0 else (
+                    "disabled" if check == "is-enabled" else "inactive")
+            except (OSError, subprocess.TimeoutExpired):
+                state = "unknown"
+            states.append(state)
+        print(f"enabled: {states[0]}\nactive: {states[1]}")
+        return 0
+    else:
+        raise ValueError("autostart action must be on, off or status")
+
+    for args in commands:
+        try:
+            result = runner(["systemctl", *args], capture_output=True, text=True, check=False)
+        except (OSError, subprocess.TimeoutExpired):
+            print("systemctl could not manage agent-hub.service", file=sys.stderr)
+            return 1
+        if result.returncode:
+            print(f"systemctl {' '.join(args)} failed", file=sys.stderr)
+            return result.returncode
+    print("Agent Hub autostart enabled")
     return 0
 
 
@@ -366,14 +493,18 @@ def build_parser() -> argparse.ArgumentParser:
     login.add_argument("--url")
     login.add_argument("--computer-name")
     hub = sub.add_parser("hub")
-    hub.add_argument("action", choices=("start", "stop", "status"))
+    hub_actions = hub.add_subparsers(dest="hub_action", required=True)
+    for action in ("start", "stop", "status"):
+        hub_actions.add_parser(action)
+    autostart = hub_actions.add_parser("autostart")
+    autostart.add_argument("action", choices=("on", "off", "status"))
     setup = sub.add_parser("proxy-setup")
     setup.add_argument("--rotate-admin-key", action="store_true")
     setup.add_argument("--origins")
     return parser
 
 
-def main(argv=None) -> int:
+def main(argv=None, runner=subprocess.run) -> int:
     args = build_parser().parse_args(argv)
     try:
         if args.command == "create-user":
@@ -383,8 +514,10 @@ def main(argv=None) -> int:
         if args.command == "hub-login":
             return hub_login(args.name, args.url, args.computer_name, Path.cwd())
         if args.command == "hub":
+            if args.hub_action == "autostart":
+                return hub_autostart(args.action, runner=runner)
             return {"start": lambda: hub_start(args.source, Path.cwd()), "stop": hub_stop,
-                    "status": hub_status}[args.action]()
+                    "status": hub_status}[args.hub_action]()
         if args.command == "proxy-setup":
             return proxy_setup(args.source, args.rotate_admin_key, args.origins)
     except (HubCtlError, OSError, ValueError) as error:

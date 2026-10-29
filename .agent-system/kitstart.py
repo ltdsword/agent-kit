@@ -214,7 +214,7 @@ def describe(p: dict) -> str:
     return "\n".join(lines)
 
 
-def start_connector(ws: Path, cfg: dict, popen=None, log=None) -> None:
+def start_connector(ws: Path, cfg: dict, popen=None, log=None, no_orchestrator=False) -> None:
     """Start the optional hub connector after the orchestrator, without affecting the start result."""
     if not (cfg.get("hub") or {}).get("enabled"):
         return
@@ -238,8 +238,11 @@ def start_connector(ws: Path, cfg: dict, popen=None, log=None) -> None:
     logpath = ws / ".orchestrator" / "hub-connector.log"
     logpath.parent.mkdir(parents=True, exist_ok=True)
     try:
+        args = [sys.executable, str(Path(__file__).resolve().with_name("agentctl.py")), "watch"]
+        if no_orchestrator:
+            args.append("--no-orchestrator")
         with open(logpath, "a") as output:
-            popen([sys.executable, str(Path(__file__).resolve().with_name("agentctl.py")), "watch"],
+            popen(args,
                   cwd=str(ws), stdout=output, stderr=output, stdin=subprocess.DEVNULL,
                   start_new_session=True, env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"})
         log(f"hub connector started (log: {logpath})")
