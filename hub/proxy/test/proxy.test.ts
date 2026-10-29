@@ -498,21 +498,16 @@ describe("protocol-v2 proxy", () => {
     expect(offline.status).toBe(503);
     expect((await readJson(offline, "ApiError")).error.code).toBe("computer_offline");
 
+    const contentWorkspace = `ws_${"e".repeat(16)}`;
+    await seedIndex(computer, contentWorkspace, "content workspace");
     const timeoutWorkspace = `ws_${"d".repeat(16)}`;
     await seedIndex(computer, timeoutWorkspace, "timeout workspace");
     const socket = await connectClient(computer.id, computer.key);
     try {
-      const pending = fetch(`${baseUrl}/api/v1/workspaces/${timeoutWorkspace}/documents`, { headers: headers(account.token) });
-      const timeoutRequest = await socket.nextMessage() as Record<string, unknown>;
-      expectDefinition("RelayRequest", timeoutRequest);
-      const timeout = await pending;
-      expect(timeout.status).toBe(504);
-      expect((await readJson(timeout, "ApiError")).error.code).toBe("computer_timeout");
-
-      const contentWorkspace = `ws_${"e".repeat(16)}`;
-      await seedIndex(computer, contentWorkspace, "content workspace");
       const content = fetch(`${baseUrl}/api/v1/workspaces/${contentWorkspace}/documents/content?path=report`, { headers: headers(account.token) });
-      const start = await socket.nextMessage() as Record<string, unknown>;
+      const start = await socket.nextMessage().catch((cause: unknown) => {
+        throw new Error("Timed out waiting for the streamed relay request.", { cause });
+      }) as Record<string, unknown>;
       expect(start.stream).toBe(true);
       const initial = { type: "res", id: start.id, status: 200, body: null };
       const document = {
@@ -539,6 +534,15 @@ describe("protocol-v2 proxy", () => {
       const response = await content;
       expect(response.status).toBe(200);
       expect(await readJson(response, "DocumentContent")).toEqual(document);
+
+      const pending = fetch(`${baseUrl}/api/v1/workspaces/${timeoutWorkspace}/documents`, { headers: headers(account.token) });
+      const timeoutRequest = await socket.nextMessage().catch((cause: unknown) => {
+        throw new Error("Timed out waiting for the timeout relay request.", { cause });
+      }) as Record<string, unknown>;
+      expectDefinition("RelayRequest", timeoutRequest);
+      const timeout = await pending;
+      expect(timeout.status).toBe(504);
+      expect((await readJson(timeout, "ApiError")).error.code).toBe("computer_timeout");
     } finally {
       socket.close();
     }
@@ -556,14 +560,141 @@ describe("protocol-v2 proxy", () => {
     const relay = new ComputerRelay(state as never, { DB: db } as never);
     const frame = { type: "workspaces", workspaces: [{ workspace_id: "ws_aaaaaaaaaaaaaaaa", name: "kit", status: "ONLINE", last_seen_at: "2026-10-29T00:00:00.000Z" }] };
     expectDefinition("RelayWorkspaces", frame);
-    await relay.webSocketMessage({ readyState: 1, send() {}, close() {} } as never, JSON.stringify(frame));
+    await relay.webSocketMessage({ readyState: 1, send() {}, close() {}, serializeAttachment() {}, deserializeAttachment: () => ({ lastSeenAt: Date.now() }) } as never, JSON.stringify(frame));
     expect(writes.some((values) => values[0] === "ws_aaaaaaaaaaaaaaaa" && values[1] === "c_aaaaaaaaaaaaaaaa")).toBe(true);
+  });
+
+  it("queues relay requests when the only WebSocket has been silent for over 75 seconds", async () => {
+    const now = 100_000;
+    const sent: Record<string, unknown>[] = [];
+    const closed: Array<[number, string]> = [];
+    let attachment: unknown = { lastSeenAt: now - 75_001 };
+    const socket = {
+      readyState: 1,
+      serializeAttachment(value: unknown) { attachment = value; },
+      deserializeAttachment() { return attachment; },
+      send(value: string) { sent.push(JSON.parse(value) as Record<string, unknown>); },
+      close(code: number, reason: string) { closed.push([code, reason]); this.readyState = 2; },
+    };
+    const stored = new Map<string, unknown>([["last_poll_at", now]]);
+    const state = {
+      getWebSockets: () => [socket],
+      storage: { get: async (key: string) => stored.get(key), put: async (key: string, value: unknown) => { stored.set(key, value); }, delete: async () => false },
+    };
+    const db = { prepare: () => ({ bind: () => ({ run: async () => ({}) }) }) };
+    const relay = new ComputerRelay(state as never, { DB: db } as never, () => now);
+    const frame = {
+      type: "req", id: "stale-socket-request", method: "GET", path: "/api/v1/stream", query: "",
+      body: null, assertion: "test-assertion", stream: false,
+    };
+    const pending = relay.fetch(new Request("https://relay/internal/computers/c_aaaaaaaaaaaaaaaa/relay", {
+      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(frame),
+    }));
+
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(sent).toEqual([]);
+    expect(closed).toEqual([[4001, "stale"]]);
+    const poll = await relay.fetch(new Request("https://relay/api/v1/computers/c_aaaaaaaaaaaaaaaa/poll?wait=0"));
+    expect((await poll.json()).frames).toEqual([frame]);
+    await relay.fetch(new Request("https://relay/api/v1/computers/c_aaaaaaaaaaaaaaaa/frames", {
+      method: "POST", body: JSON.stringify({ frames: [{ type: "res", id: frame.id, status: 200, body: { ok: true } }] }),
+    }));
+    expect((await pending).status).toBe(200);
+  });
+
+  it("lets a long-poll hello replace an open WebSocket", async () => {
+    const now = Date.now();
+    const closed: Array<[number, string]> = [];
+    const socket = {
+      readyState: 1,
+      serializeAttachment() {},
+      deserializeAttachment: () => ({ lastSeenAt: now }),
+      send() {},
+      close(code: number, reason: string) { closed.push([code, reason]); this.readyState = 2; },
+    };
+    const stored = new Map<string, unknown>([["last_poll_at", now]]);
+    const state = {
+      getWebSockets: () => [socket],
+      storage: { get: async (key: string) => stored.get(key), put: async (key: string, value: unknown) => { stored.set(key, value); }, delete: async () => false },
+    };
+    const db = { prepare: () => ({ bind: () => ({ run: async () => ({}) }) }) };
+    const relay = new ComputerRelay(state as never, { DB: db } as never, () => now);
+    const hello = { type: "hello", protocol: 2, computer_id: "c_aaaaaaaaaaaaaaaa", backend_version: "test", workspaces: [] };
+    const started = await relay.fetch(new Request("https://relay/api/v1/computers/c_aaaaaaaaaaaaaaaa/frames", {
+      method: "POST", body: JSON.stringify({ frames: [hello] }),
+    }));
+    expect(started.status).toBe(204);
+    expect(closed).toEqual([[4000, "replaced"]]);
+
+    const frame = {
+      type: "req", id: "long-poll-after-hello", method: "GET", path: "/api/v1/stream", query: "",
+      body: null, assertion: "test-assertion", stream: false,
+    };
+    const pending = relay.fetch(new Request("https://relay/internal/computers/c_aaaaaaaaaaaaaaaa/relay", {
+      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(frame),
+    }));
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    const poll = await relay.fetch(new Request("https://relay/api/v1/computers/c_aaaaaaaaaaaaaaaa/poll?wait=0"));
+    expect((await poll.json()).frames).toEqual([frame]);
+    await relay.fetch(new Request("https://relay/api/v1/computers/c_aaaaaaaaaaaaaaaa/frames", {
+      method: "POST", body: JSON.stringify({ frames: [{ type: "res", id: frame.id, status: 200, body: { ok: true } }] }),
+    }));
+    expect((await pending).status).toBe(200);
+  });
+
+  it("fails only requests sent on a closed WebSocket", async () => {
+    const now = Date.now();
+    const sent: Record<string, unknown>[] = [];
+    const socket = {
+      readyState: 1,
+      serializeAttachment() {},
+      deserializeAttachment: () => ({ lastSeenAt: now }),
+      send(value: string) { sent.push(JSON.parse(value) as Record<string, unknown>); },
+      close() { this.readyState = 2; },
+    };
+    const sockets: typeof socket[] = [];
+    const stored = new Map<string, unknown>([["last_poll_at", now]]);
+    const state = {
+      getWebSockets: () => sockets,
+      storage: { get: async (key: string) => stored.get(key), put: async (key: string, value: unknown) => { stored.set(key, value); }, delete: async () => false },
+    };
+    const db = { prepare: () => ({ bind: () => ({ run: async () => ({}) }) }) };
+    const relay = new ComputerRelay(state as never, { DB: db } as never, () => now);
+    const longPollFrame = {
+      type: "req", id: "long-poll-pending", method: "GET", path: "/api/v1/stream", query: "",
+      body: null, assertion: "test-assertion", stream: false,
+    };
+    const longPollPending = relay.fetch(new Request("https://relay/internal/computers/c_aaaaaaaaaaaaaaaa/relay", {
+      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(longPollFrame),
+    }));
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    sockets.push(socket);
+    const socketFrame = {
+      type: "req", id: "socket-pending", method: "GET", path: "/api/v1/stream", query: "",
+      body: null, assertion: "test-assertion", stream: false,
+    };
+    const socketPending = relay.fetch(new Request("https://relay/internal/computers/c_aaaaaaaaaaaaaaaa/relay", {
+      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(socketFrame),
+    }));
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(sent).toEqual([socketFrame]);
+
+    relay.webSocketClose(socket as never);
+    expect((await socketPending).status).toBe(503);
+    await relay.fetch(new Request("https://relay/api/v1/computers/c_aaaaaaaaaaaaaaaa/frames", {
+      method: "POST", body: JSON.stringify({ frames: [{ type: "res", id: longPollFrame.id, status: 200, body: { ok: true } }] }),
+    }));
+    expect((await longPollPending).status).toBe(200);
   });
 
   it("sends cancel when the relay request is aborted", async () => {
     const sent: Record<string, unknown>[] = [];
+    let attachment: unknown = { lastSeenAt: Date.now() };
     const socket = {
       readyState: 1,
+      serializeAttachment(value: unknown) { attachment = value; },
+      deserializeAttachment() { return attachment; },
       send(value: string) { sent.push(JSON.parse(value) as Record<string, unknown>); },
       close() {},
     };
@@ -591,8 +722,11 @@ describe("protocol-v2 proxy", () => {
 
   it("forwards a canceled stream to the backend as a cancel frame", async () => {
     const sent: Record<string, unknown>[] = [];
+    let attachment: unknown = { lastSeenAt: Date.now() };
     const socket = {
       readyState: 1,
+      serializeAttachment(value: unknown) { attachment = value; },
+      deserializeAttachment() { return attachment; },
       send(value: string) { sent.push(JSON.parse(value) as Record<string, unknown>); },
       close() {},
     };

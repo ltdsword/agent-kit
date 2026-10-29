@@ -5,9 +5,15 @@ type Frame = Record<string, unknown> & { type: string };
 type Pending = {
   timer: ReturnType<typeof setTimeout>;
   stream: boolean;
+  socket?: WebSocket;
   resolve: (response: Response) => void;
   controller?: ReadableStreamDefaultController<Uint8Array>;
   responseStarted: boolean;
+};
+
+type RelaySocket = WebSocket & {
+  serializeAttachment(attachment: unknown): void;
+  deserializeAttachment(): unknown;
 };
 
 const encoder = new TextEncoder();
@@ -75,12 +81,14 @@ export class ComputerRelay {
   private readonly pending = new Map<string, Pending>();
   private readonly queuedFrames: string[] = [];
   private readonly pollWaiters = new Set<() => void>();
+  private readonly now: () => number;
   private malformedFrames = 0;
   private computerId = "";
 
-  constructor(ctx: DurableObjectState, bindings: Env) {
+  constructor(ctx: DurableObjectState, bindings: Env, now: () => number = Date.now) {
     this.state = ctx;
     this.db = bindings.DB;
+    this.now = now;
   }
 
   private async knownComputerId(): Promise<string> {
@@ -123,6 +131,7 @@ export class ComputerRelay {
   }
 
   async webSocketMessage(socket: WebSocket, message: string | ArrayBuffer): Promise<void> {
+    (socket as RelaySocket).serializeAttachment({ lastSeenAt: this.now() });
     const bytes = typeof message === "string" ? encoder.encode(message).byteLength : message.byteLength;
     if (bytes > LIMITS.relayFrameBytes) {
       this.countMalformedFrame();
@@ -138,8 +147,9 @@ export class ComputerRelay {
     await this.processFrame(frame, socket);
   }
 
-  webSocketClose(): void {
+  webSocketClose(socket: WebSocket): void {
     for (const [id, pending] of this.pending) {
+      if (pending.socket !== socket) continue;
       clearTimeout(pending.timer);
       this.pending.delete(id);
       if (pending.responseStarted && pending.controller) {
@@ -150,14 +160,31 @@ export class ComputerRelay {
     }
   }
 
-  webSocketError(): void {
-    this.webSocketClose();
+  webSocketError(socket: WebSocket): void {
+    this.webSocketClose(socket);
   }
 
   private async isOnline(): Promise<boolean> {
-    if (this.state.getWebSockets().some((socket) => socket.readyState === WebSocket.OPEN)) return true;
+    if (this.liveSocket()) return true;
     const lastPoll = await this.state.storage.get<number>("last_poll_at");
-    return typeof lastPoll === "number" && Date.now() - lastPoll <= 40_000;
+    return typeof lastPoll === "number" && this.now() - lastPoll <= 40_000;
+  }
+
+  private liveSocket(): WebSocket | undefined {
+    const now = this.now();
+    for (const socket of this.state.getWebSockets()) {
+      if (socket.readyState !== WebSocket.OPEN) continue;
+      let attachment: unknown;
+      try { attachment = (socket as RelaySocket).deserializeAttachment(); } catch {}
+      if (isRecord(attachment) && typeof attachment.lastSeenAt === "number" && now - attachment.lastSeenAt <= 75_000) {
+        return socket;
+      } else {
+        try { socket.close(4001, "stale"); } catch {}
+        // Closing it ourselves may not fire webSocketClose, so fail what was sent on it now.
+        this.webSocketClose(socket);
+      }
+    }
+    return undefined;
   }
 
   private connect(request: Request): Response {
@@ -170,6 +197,7 @@ export class ComputerRelay {
     const pair = new WebSocketPair();
     const client = pair[0];
     this.state.acceptWebSocket(pair[1]);
+    (pair[1] as RelaySocket).serializeAttachment({ lastSeenAt: this.now() });
     return new Response(null, { status: 101, webSocket: client });
   }
 
@@ -194,13 +222,14 @@ export class ComputerRelay {
     }
     const requestFrame = frame as Frame;
     const id = requestFrame.id as string;
-    const websocket = this.state.getWebSockets().find((candidate) => candidate.readyState === WebSocket.OPEN);
+    const websocket = this.liveSocket();
     if (!websocket && !await this.isOnline()) return error("computer_offline", "Computer is offline.", 503);
 
     return new Promise<Response>((resolve) => {
       const pending: Pending = {
         timer: setTimeout(() => this.timeout(id), LIMITS.relayTimeoutSeconds * 1000),
         stream: requestFrame.stream === true,
+        socket: websocket,
         resolve,
         responseStarted: false,
       };
@@ -234,7 +263,7 @@ export class ComputerRelay {
     if (!Number.isFinite(requested) || requested < 0) return error("bad_request", "wait must be a non-negative number.", 400);
     const waitSeconds = Math.min(Math.floor(requested), LIMITS.relayPollSeconds);
     await this.touchComputer(computerId);
-    await this.state.storage.put("last_poll_at", Date.now());
+    await this.state.storage.put("last_poll_at", this.now());
     if (this.queuedFrames.length === 0 && waitSeconds > 0) await this.waitForPoll(Math.min(waitSeconds * 1000, LIMITS.relayPollSeconds * 1000));
     const frames = this.queuedFrames.splice(0, 50).map((encoded) => JSON.parse(encoded));
     return json({ frames });
@@ -255,6 +284,12 @@ export class ComputerRelay {
       if (!isRecord(frame) || typeof frame.type !== "string" || !validResponseFrame(frame as Frame)) {
         this.countMalformedFrame();
         continue;
+      }
+      if (frame.type === "hello") {
+        for (const socket of this.state.getWebSockets()) {
+          try { socket.close(4000, "replaced"); } catch {}
+          this.webSocketClose(socket);
+        }
       }
       await this.processFrame(frame);
     }
@@ -405,7 +440,7 @@ export class ComputerRelay {
       }
     }
     const cancelFrame = JSON.stringify({ type: "cancel", id });
-    const websocket = this.state.getWebSockets().find((candidate) => candidate.readyState === WebSocket.OPEN);
+    const websocket = this.liveSocket();
     if (websocket) {
       try { websocket.send(cancelFrame); } catch {}
     } else {
