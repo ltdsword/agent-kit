@@ -1,5 +1,6 @@
+import { useState } from 'react';
 import { Link } from 'react-router-dom';
-import type { Workspace } from '@/api/types';
+import type { Decision, Workspace } from '@/api/types';
 import { useHub, useNow } from '@/state/HubProvider';
 import { decisionPath, inFlight, needsYou } from '@/state/selectors';
 import { DECISION_STATUS } from '@/lib/status';
@@ -7,6 +8,15 @@ import { duration } from '@/lib/time';
 import { KindChip, StatusChip } from '@/components/Chips';
 import { EmptyState, SectionCard } from '@/components/ui';
 import { Icon } from '@/components/Icon';
+
+type Category = 'Finish' | 'Blocker' | 'Other';
+const CATEGORIES: Category[] = ['Finish', 'Blocker', 'Other'];
+
+function category(d: Decision): Category {
+  if (d.kind === 'finish') return 'Finish';
+  if (d.kind === 'blocker') return 'Blocker';
+  return 'Other';
+}
 
 export function NeedsYouSection({ workspace }: { workspace: Workspace }) {
   const hub = useHub();
@@ -16,6 +26,11 @@ export function NeedsYouSection({ workspace }: { workspace: Workspace }) {
   const all = hub.decisions
     .filter((decision) => decision.workspaceId === workspace.id)
     .sort((a, b) => b.openedAt - a.openedAt);
+  // "All decisions" folds away (it grows with every run) and filters by category; open ones stay above, unfiltered.
+  const [expanded, setExpanded] = useState(false);
+  const [hidden, setHidden] = useState<Record<Category, boolean>>({ Finish: false, Blocker: false, Other: false });
+  const present = CATEGORIES.filter((c) => all.some((d) => category(d) === c));
+  const shown = all.filter((d) => !hidden[category(d)]);
 
   return (
     <SectionCard id="needs" title="Decisions" icon="bell" tone={needs.length ? 'needs' : undefined}
@@ -51,9 +66,27 @@ export function NeedsYouSection({ workspace }: { workspace: Workspace }) {
           </>
         )}
       </div>
-      <section role="region" aria-labelledby="all-decisions-h" style={{ borderTop: '1px solid var(--border)' }}>
-        <h3 id="all-decisions-h" className="t-label" style={{ padding: '10px 16px 2px' }}>All decisions</h3>
-        {all.map((d) => (
+      <section role="region" aria-label="All decisions" style={{ borderTop: '1px solid var(--border)' }}>
+        <h3 className="t-label" style={{ margin: 0 }}>
+          <button type="button" className="row" aria-expanded={expanded} aria-controls="all-decisions-list"
+            onClick={() => setExpanded((v) => !v)} style={{ width: '100%', background: 'none', border: 0, font: 'inherit', color: 'inherit', cursor: 'pointer' }}>
+            <span style={{ flex: 1, textAlign: 'left' }}>All decisions</span>
+            <span className="count">{all.length}</span>
+            <Icon name={expanded ? 'chevron-down' : 'chevron-right'} style={{ color: 'var(--text-3)' }} />
+          </button>
+        </h3>
+        {expanded && <div id="all-decisions-list">
+        {present.length > 1 && (
+          <div role="group" aria-label="Filter decisions" style={{ display: 'flex', flexWrap: 'wrap', gap: 8, padding: '4px 16px 10px' }}>
+            {present.map((c) => (
+              <button key={c} type="button" className="seg" aria-pressed={!hidden[c]} style={{ minHeight: 44 }}
+                onClick={() => setHidden((current) => ({ ...current, [c]: !current[c] }))}>
+                {c} <span className="t-small">{all.filter((d) => category(d) === c).length}</span>
+              </button>
+            ))}
+          </div>
+        )}
+        {shown.map((d) => (
           <Link key={`${d.runId}/${d.id}`} className="row" to={decisionPath(d)} style={{ minHeight: 64 }}>
             <span className="t-small mono" style={{ whiteSpace: 'nowrap' }}>Run {d.runId}</span>
             <span className="mono" style={{ fontWeight: 600, width: 28 }}>{d.id}</span>
@@ -67,6 +100,8 @@ export function NeedsYouSection({ workspace }: { workspace: Workspace }) {
           </Link>
         ))}
         {all.length === 0 && <p className="t-2" style={{ padding: '8px 16px 16px' }}>No decisions recorded.</p>}
+        {all.length > 0 && shown.length === 0 && <p className="t-2" style={{ padding: '8px 16px 16px' }}>No decisions match these filters.</p>}
+        </div>}
       </section>
     </SectionCard>
   );

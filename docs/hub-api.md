@@ -165,7 +165,7 @@ the proxy fills in the computer ID.
 | `PATCH /workspaces/:ws` | `{"archived": boolean}` → `WorkspaceSummary`. Archived workspaces are hidden by default and return when the connector says hello. |
 | `GET /workspaces/:ws/decisions?status=&run=` | `List<HubDecision>`, newest `opened_at` first. |
 | `GET /workspaces/:ws/decisions/:run/:id` | `HubDecision`. |
-| `POST .../decisions/:run/:id/answer` | `AnswerRequest` → `201 UserCommand`. The status must be OPEN or REJECTED. Choice and followup values must match the decision; a required input value is required and forbidden otherwise. Invalid choices return `422 invalid_option`; unanswerable decisions return `409 decision_not_answerable`. Answers may queue while the workspace is offline. |
+| `POST .../decisions/:run/:id/answer` | `AnswerRequest` → `201 UserCommand`. The status must be OPEN or REJECTED. Choice and followup values must match the decision; a required input value is required and forbidden otherwise. Invalid choices return `422 invalid_option`; unanswerable decisions return `409 decision_not_answerable`, except that the same user repeating their current answer (same choice and followup) gets `200` with the existing `UserCommand`. Answers may queue while the workspace is offline. |
 | `POST .../decisions/:run/:id/reply` | `TextRequest` → `201 UserCommand`. Decision must be OPEN, SENT or REJECTED and workspace ONLINE; otherwise `409 workspace_not_online`. |
 | `POST /workspaces/:ws/prompts` | `TextRequest` → `201 UserCommand`, expiring after 30 minutes. Workspace must be ONLINE or gets `409 workspace_not_online`. |
 | `GET /workspaces/:ws/commands` | `List<UserCommand>`, newest first. |

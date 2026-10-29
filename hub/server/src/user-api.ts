@@ -127,7 +127,15 @@ export function mountUserApi(app: Hono, deps: UserApiDependencies): void {
     const decision = db.getDecisionBody(ws, runId, decisionId);
     if (!decision) return apiError(c, "not_found", "decision not found");
     const state = hubDecision(db, ws, decision);
-    if (state.hub_status !== "OPEN" && state.hub_status !== "REJECTED") return apiError(c, "decision_not_answerable", "decision is not open or rejected");
+    if (state.hub_status !== "OPEN" && state.hub_status !== "REJECTED") {
+      // The same person sending the same answer again (a repeated request) gets the existing command, not an error.
+      const previous = db.latestAnswerCommand(ws, runId, decisionId);
+      if (previous && previous.status !== "REJECTED" && previous.by === assertionFrom(c).sub
+          && previous.body.choice === body.value.choice && previous.body.followup === body.value.followup) {
+        return c.json(previous, 200);
+      }
+      return apiError(c, "decision_not_answerable", "decision is not open or rejected");
+    }
     if (!decision.options.some((option) => option.key === body.value.choice)) return apiError(c, "invalid_option", "choice is not one of the decision options");
     let selectedFollowupValue: string | undefined;
     const followup = decision.followup;

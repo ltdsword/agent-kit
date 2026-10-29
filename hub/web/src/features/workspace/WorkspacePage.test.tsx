@@ -35,12 +35,20 @@ describe('Workspace Decisions and Documents', () => {
     ]);
 
     const all = screen.getByRole('region', { name: 'All decisions' });
+    expect(within(all).queryAllByRole('link')).toEqual([]);
+    await user.click(within(all).getByRole('button', { name: /All decisions/ }));
     expect(within(all).getAllByRole('link').map((link) => link.getAttribute('href'))).toEqual([
       '/w/ws_k3m9q2/d/r4/D3', '/w/ws_k3m9q2/d/r4/D4',
       '/w/ws_k3m9q2/d/r4/D2', '/w/ws_k3m9q2/d/r3/D4',
     ]);
     expect(within(all).getAllByText('alice')[0]?.parentElement?.parentElement?.textContent).toContain('B: Narrow T4 to the API layer');
     expect(within(all).getByText('Run r3')).toBeTruthy();
+
+    // Category filters: hiding Finish drops the r3 finish decision, the rest stay.
+    const filters = within(all).getByRole('group', { name: 'Filter decisions' });
+    await user.click(within(filters).getByRole('button', { name: /Finish/ }));
+    expect(within(all).getAllByRole('link').map((link) => link.getAttribute('href'))).not.toContain('/w/ws_k3m9q2/d/r3/D4');
+    expect(within(all).getAllByRole('link').length).toBe(3);
   });
 
   it('searches documents by title, path, and run, and filters each kind group', async () => {

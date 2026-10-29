@@ -124,6 +124,10 @@ it("validates protocol-2 connector and user responses and attributes commands to
   valid("CommandsResponse", poll); valid("Command", poll.commands[0]); expect(poll.commands[0].by).toBe("alice");
   const answer = await req(`/workspaces/${ws}/decisions/r4/D3/answer`, { method: "POST", body: { choice: "A" } });
   expect(answer.status).toBe(201); const answerCommand = await answer.json(); valid("UserCommand", answerCommand); expect(answerCommand.by).toBe("alice");
+  const repeat = await req(`/workspaces/${ws}/decisions/r4/D3/answer`, { method: "POST", body: { choice: "A" } });
+  expect(repeat.status).toBe(200); expect((await repeat.json()).id).toBe(answerCommand.id);
+  const changed = await req(`/workspaces/${ws}/decisions/r4/D3/answer`, { method: "POST", body: { choice: "B" } });
+  expect(changed.status).toBe(409);
   const archive = await req(`/workspaces/${ws}`, { method: "PATCH", body: { archived: true } });
   valid("WorkspaceSummary", await archive.json());
   expect((await req("/workspaces?archived=true")).status).toBe(200);
