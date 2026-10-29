@@ -460,6 +460,18 @@ describe("relay client", () => {
     } finally { await proxy.close(); }
   });
 
+  it("keeps retrying when workspace changes arrive during the retry delay", async () => {
+    const proxy = new FakeProxy(); proxy.websocket = false; proxy.failPolls = true; await proxy.listen();
+    const ticker = setInterval(() => events.publish({ type: "workspace", workspace_id: ws, at: "2026-10-28T08:00:00Z", ref: ws }), 50);
+    try {
+      const client = await startRelay(proxy, relayApp({ cancelled: false, started: false }));
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      proxy.failPolls = false;
+      await proxy.waitFor((frame) => frame.type === "hello", 6000);
+      await client.stop();
+    } finally { clearInterval(ticker); await proxy.close(); }
+  }, 15000);
+
   it("retries a long-poll request that never answers", async () => {
     const proxy = new FakeProxy(); proxy.websocket = false; proxy.hangPolls = true; await proxy.listen();
     try {

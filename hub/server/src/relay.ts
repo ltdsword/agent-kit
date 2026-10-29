@@ -43,6 +43,7 @@ export class RelayClient {
   private running?: Promise<void>;
   private sendWorkspaces?: () => void;
   private backoffMs = 1_000;
+  private workspaceTimer?: ReturnType<typeof setTimeout>;
   // A dead network path can leave a socket or request open forever; these bound every wait so the loop always retries.
   readonly timeouts = { connectMs: 15_000, heartbeatMs: LIMITS.heartbeatSeconds * 1000, silenceMs: LIMITS.heartbeatSeconds * 3000, requestMs: 15_000, pollMs: (LIMITS.relayPollSeconds + 15) * 1000 };
 
@@ -61,13 +62,12 @@ export class RelayClient {
     this.currentStatus = { transport: null, connected: false, owner: computer.username, pid: process.pid, updated_at: new Date(clock()).toISOString() };
     this.unsubscribe = events.subscribe((event) => {
       if (event.type !== "workspace") return;
-      for (const timer of this.timers) clearTimeout(timer);
-      this.timers.clear();
-      const timer = setTimeout(() => {
-        this.timers.delete(timer);
+      // Debounce with its own timer: clearing the shared set would also cancel a pending retry delay and hang the loop.
+      if (this.workspaceTimer) clearTimeout(this.workspaceTimer);
+      this.workspaceTimer = setTimeout(() => {
+        this.workspaceTimer = undefined;
         this.sendWorkspaces?.();
       }, 2_000);
-      this.timers.add(timer);
     });
   }
 
@@ -83,6 +83,7 @@ export class RelayClient {
     this.currentSocket?.close();
     for (const controller of this.requests.values()) controller.abort();
     for (const timer of this.timers) clearTimeout(timer);
+    if (this.workspaceTimer) clearTimeout(this.workspaceTimer);
     for (const interval of this.intervals) clearInterval(interval);
     this.timers.clear();
     this.intervals.clear();
