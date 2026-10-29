@@ -45,3 +45,54 @@ The scheduler ignores stale reports, forwards unblock notes to workers, keeps pa
 
 ---
 <!-- Do not edit above this line after dispatch. scheduler.py appends: Worker result, Review, Integration, Final gate. -->
+
+## Worker result - attempt 1 (29/10/26 10:51)
+
+- Status: **done** (worker worker-3, branch `agent/hub6-t2`)
+- Commits: none, changes left uncommitted (orchestrator commits after review)
+- Files: `.agent-system/scheduler.py`, `.agent-system/tests/test_scheduler.py`
+- Scope: OK
+- Tests reported:
+  - `python3 -m unittest discover -s .agent-system/tests` -> exit 0
+- Risks: none
+- Not done: none
+- Full diff: `.orchestrator/runs/hub6/reports/T2.diff`
+
+````text
+ .agent-system/scheduler.py            | 163 +++++++++++++++++++++++++++--
+ .agent-system/tests/test_scheduler.py | 189 +++++++++++++++++++++++++++++++---
+ 2 files changed, 328 insertions(+), 24 deletions(-)
+````
+
+(diff is 562 lines; read the full diff file)
+
+## Review round 1: PASS (29/10/26 10:52)
+
+- Verdict: **PASS** -> task is now PASSED (fix rounds used: 0/2)
+- Reviewed HEAD: f22d657485d5, commits f22d657485d5
+
+# Review: hub6 T2, scheduler fixes (`.agent-system/scheduler.py`)
+
+Verdict: **PASS**
+
+## Checked (re-run by lead)
+- Kit suite in the worktree: 151 OK.
+- **Stale reports:** on dispatch and relaunch, `_archive_report` moves `reports/<T>.json` to `<T>.attempt<N>.json` (with a suffix if that name is taken) and records a fresh `dispatched_at`. A report is accepted only if its task id matches and it is newer than `dispatched_at`; old state without `dispatched_at` still works.
+- **Unblock notes:** `task-unblock --note` is stored as `lead_note` and shown as "Lead note: ..." in the dispatch/relaunch prompt and the packet header.
+- **Partial work:** a re-dispatched BLOCKED/FIX_REQUIRED task with a dirty worktree reuses its own slot and branch when that slot is free. Otherwise it saves the changes as a `WIP: preserve <T> partial work` commit on the recorded branch, and refuses (with a clear error) if the worktree is on a different branch. Nothing is discarded.
+- **`run create`:** refuses packets, and `plans/`/`gen-tasks/` files named under "Read first", that aren't tracked and unmodified at the base.
+- **Test isolation:** `TestStart` uses the template config with the hub disabled.
+
+## Integration: merged (29/10/26 10:52)
+
+- On `agent/integration-hub6` at 5b2f4ab032b7; `.agent-system/scripts/verify.sh --quick` passed (log `.orchestrator/runs/hub6/logs/post-merge-T2-a1.log`)
+
+## Final gate: PASS (29/10/26 10:53)
+
+- `.agent-system/scripts/verify.sh` exit 0 on agent/integration-hub6 at 5b2f4ab032b7 (log `.orchestrator/runs/hub6/logs/verify-1793245949.log`)
+- Task MERGED; run DONE
+
+## Final gate: PASS (29/10/26 10:53)
+
+- `.agent-system/scripts/verify.sh` exit 0 on agent/integration-hub6 at 5b2f4ab032b7 (log `.orchestrator/runs/hub6/logs/verify-1793245994.log`)
+- Task MERGED; run DONE
