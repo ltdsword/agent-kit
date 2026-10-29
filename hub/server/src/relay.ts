@@ -43,6 +43,8 @@ export class RelayClient {
   private running?: Promise<void>;
   private sendWorkspaces?: () => void;
   private backoffMs = 1_000;
+  // A dead network path can leave a socket or request open forever; these bound every wait so the loop always retries.
+  readonly timeouts = { connectMs: 15_000, heartbeatMs: LIMITS.heartbeatSeconds * 1000, silenceMs: LIMITS.heartbeatSeconds * 3000, requestMs: 15_000, pollMs: (LIMITS.relayPollSeconds + 15) * 1000 };
 
   private readonly app: Hono;
   private readonly db: HubDatabase;
@@ -149,23 +151,34 @@ export class RelayClient {
       if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify(frame));
     };
     this.sendWorkspaces = () => send(this.workspaceFrame(), "RelayWorkspaces");
+    let lastMessageAt = Date.now();
     try {
       await new Promise<void>((resolve, reject) => {
         const finish = (error?: Error) => error ? reject(error) : resolve();
         this.abort.signal.addEventListener("abort", () => { socket.close(); finish(new Error("relay stopped")); }, { once: true });
+        const connectTimer = setTimeout(() => {
+          this.timers.delete(connectTimer);
+          if (socket.readyState !== WebSocket.OPEN) { socket.close(); finish(new Error("relay websocket connect timed out")); }
+        }, this.timeouts.connectMs);
+        this.timers.add(connectTimer);
         socket.addEventListener("open", () => {
+          clearTimeout(connectTimer); this.timers.delete(connectTimer);
           if (this.abort.signal.aborted) { socket.close(); finish(new Error("relay stopped")); return; }
           this.preferred = "websocket";
           this.backoffMs = 1_000;
           void this.setStatus("websocket", true);
           send(this.hello(), "RelayHello");
+          lastMessageAt = Date.now();
           const heartbeat = setInterval(() => {
+            // The proxy answers every ping, so silence means the connection is gone even if no close event arrived.
+            if (Date.now() - lastMessageAt > this.timeouts.silenceMs) { socket.close(); finish(new Error("relay websocket silent")); return; }
             if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: "ping" }));
-          }, LIMITS.heartbeatSeconds * 1000);
+          }, this.timeouts.heartbeatMs);
           this.intervals.add(heartbeat);
           this.sendWorkspaces = () => send(this.workspaceFrame(), "RelayWorkspaces");
         });
         socket.addEventListener("message", (event) => {
+          lastMessageAt = Date.now();
           void this.receive(event.data, (frame) => {
             if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify(frame));
           }).catch(() => undefined);
@@ -197,7 +210,7 @@ export class RelayClient {
         while (outgoing.length) {
           const frames = outgoing.splice(0, 50);
           const response = await undiciFetch(framesUrl, {
-            method: "POST", dispatcher, signal: this.abort.signal,
+            method: "POST", dispatcher, signal: AbortSignal.any([this.abort.signal, AbortSignal.timeout(this.timeouts.requestMs)]),
             headers: { Authorization: `Bearer ${this.computer.computer_key}`, "Content-Type": "application/json" },
             body: JSON.stringify({ frames }),
           });
@@ -222,7 +235,8 @@ export class RelayClient {
         if (flushError) throw flushError;
         const url = new URL(base);
         url.searchParams.set("wait", String(LIMITS.relayPollSeconds));
-        const response = await undiciFetch(url, { dispatcher, signal: this.abort.signal,
+        const pollTimeout = AbortSignal.timeout(this.timeouts.pollMs);
+        const response = await undiciFetch(url, { dispatcher, signal: AbortSignal.any([this.abort.signal, pollTimeout]),
           headers: { Authorization: `Bearer ${this.computer.computer_key}` } });
         if (!response.ok) throw new Error("relay poll failed");
         const payload: unknown = await response.json();

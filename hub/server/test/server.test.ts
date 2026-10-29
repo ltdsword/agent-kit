@@ -254,6 +254,8 @@ class FakeProxy {
   port = 0;
   websocket = true;
   failPolls = false;
+  hangUpgrade = false;
+  hangPolls = false;
   websocketAttempts = 0;
   authHeaders: string[] = [];
   private waiters: Array<{ predicate: (frame: any) => boolean; resolve: (frame: any) => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout> }> = [];
@@ -261,6 +263,7 @@ class FakeProxy {
   async listen(): Promise<void> {
     this.server.on("upgrade", (request, socket, head) => {
       this.websocketAttempts++;
+      if (this.hangUpgrade) { this.sockets.add(socket); return; }
       if (!this.websocket) { socket.end("HTTP/1.1 426 Upgrade Required\r\nConnection: close\r\n\r\n"); return; }
       this.authHeaders.push(String(request.headers.authorization ?? ""));
       const key = request.headers["sec-websocket-key"];
@@ -310,6 +313,7 @@ class FakeProxy {
     if (path.endsWith("/connect")) { response.writeHead(426).end(); return; }
     if (path.endsWith("/poll")) {
       if (this.failPolls) { response.writeHead(503).end(); return; }
+      if (this.hangPolls) return;
       const frame = this.queued.shift();
       setTimeout(() => response.end(JSON.stringify({ frames: frame === undefined ? [] : [frame] })), 20);
       return;
@@ -348,9 +352,10 @@ function relayApp(signals: { cancelled: boolean; started: boolean }): Hono {
   return relayApp;
 }
 
-async function startRelay(proxy: FakeProxy, relayAppInstance: Hono, dbInstance = db): Promise<RelayClient> {
+async function startRelay(proxy: FakeProxy, relayAppInstance: Hono, dbInstance = db, timeouts: Partial<RelayClient["timeouts"]> = {}): Promise<RelayClient> {
   const relayConfig = { ...config, port: proxy.port, computer: { ...config.computer!, proxy_url: `http://127.0.0.1:${proxy.port}` } };
   const relay = new RelayClient(relayAppInstance, dbInstance, relayConfig, relayConfig.computer!, events, () => now);
+  Object.assign(relay.timeouts, timeouts);
   relayClients.push(relay);
   relay.start();
   return relay;
@@ -434,6 +439,38 @@ describe("relay client", () => {
       await client.stop();
     } finally { await proxy.close(); }
   }, 15000);
+
+  it("reconnects when the WebSocket goes silent without a close event", async () => {
+    const proxy = new FakeProxy(); await proxy.listen();
+    try {
+      const client = await startRelay(proxy, relayApp({ cancelled: false, started: false }), db, { heartbeatMs: 50, silenceMs: 200 });
+      await proxy.waitFor((frame) => frame.type === "hello");
+      await proxy.waitFor(() => proxy.messages.filter((frame) => frame.type === "hello").length >= 2, 5000);
+      await client.stop();
+    } finally { await proxy.close(); }
+  });
+
+  it("gives up on an upgrade that never completes and falls back to long-poll", async () => {
+    const proxy = new FakeProxy(); proxy.hangUpgrade = true; await proxy.listen();
+    try {
+      const client = await startRelay(proxy, relayApp({ cancelled: false, started: false }), db, { connectMs: 200 });
+      await proxy.waitFor((frame) => frame.type === "hello", 3000);
+      expect(client.status().transport).toBe("long-poll-direct");
+      await client.stop();
+    } finally { await proxy.close(); }
+  });
+
+  it("retries a long-poll request that never answers", async () => {
+    const proxy = new FakeProxy(); proxy.websocket = false; proxy.hangPolls = true; await proxy.listen();
+    try {
+      const client = await startRelay(proxy, relayApp({ cancelled: false, started: false }), db, { pollMs: 200 });
+      const polls = () => proxy.paths.filter((path) => path.endsWith("/poll")).length;
+      const until = Date.now() + 5000;
+      while (polls() < 2 && Date.now() < until) await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(polls()).toBeGreaterThanOrEqual(2);
+      await client.stop();
+    } finally { await proxy.close(); }
+  });
 });
 
 it("streams published changes as named server-sent events", async () => {
