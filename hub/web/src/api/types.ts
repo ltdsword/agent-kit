@@ -116,6 +116,20 @@ export interface DecisionOption {
   consequence: string;
 }
 
+/** Second question a decision asks for some choices (finish: which branch). */
+export interface FollowupOption {
+  key: string;
+  label: string;
+  value?: string;
+  input?: boolean;
+}
+
+export interface Followup {
+  when: string[];
+  question: string;
+  options: FollowupOption[];
+}
+
 export interface Evidence {
   code: string;
   note: string;
@@ -145,6 +159,7 @@ export interface Decision {
   question: string;
   evidence: Evidence[];
   options: DecisionOption[];
+  followup?: Followup;
   recommend?: string;
   status: DecisionStatus;
   openedAt: number;
@@ -211,5 +226,9 @@ export interface HubSnapshot {
 export interface AnswerInput {
   choice: string;
   note?: string;
+  /** Resulting branch, for display and the mock. */
   branch?: string;
+  /** Followup option key and, for a typed option, the typed value: sent as-is to the hub. */
+  followup?: string;
+  value?: string;
 }

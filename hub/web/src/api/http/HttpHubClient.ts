@@ -68,8 +68,8 @@ export class HttpHubClient implements HubClient {
     await this.request('POST', path, {
       choice: input.choice,
       note: input.note,
-      followup: input.branch ? 'branch' : undefined,
-      value: input.branch,
+      followup: input.followup,
+      value: input.value,
     }, { workspaceId: ws });
   }
 

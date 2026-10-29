@@ -80,7 +80,7 @@ function FinishReport({ decision: d }: { decision: Decision }) {
         </details>
       )}
       {diff && (
-        <Link className="card" to={`/w/${d.workspaceId}/docs/${diff.id}`} style={{ padding: '12px 14px', display: 'flex', alignItems: 'center', gap: 10, color: 'var(--text)' }}>
+        <Link className="card" to={`/w/${d.workspaceId}/docs/${encodeURIComponent(diff.id)}`} style={{ padding: '12px 14px', display: 'flex', alignItems: 'center', gap: 10, color: 'var(--text)' }}>
           <span className="doc-ico diff"><Icon name="diff" /></span>
           <span style={{ fontWeight: 600 }}>{files.length} files changed</span>
           <span className="plus mono">+{add}</span><span className="minus mono">−{del}</span>

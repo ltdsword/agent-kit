@@ -301,6 +301,13 @@ export class MockHubClient implements HubClient, Simulator {
         { key: 'B', label: 'Merge locally only, no push', consequence: 'Nothing leaves your computer. You can push later yourself.' },
         { key: 'C', label: 'Don’t merge', consequence: 'agent/integration-r4 stays as it is for you to inspect.' },
       ],
+      followup: {
+        when: ['A', 'B'], question: 'What branch do you choose to merge?',
+        options: [
+          { key: 'A', label: 'This branch (main)', value: 'main' },
+          { key: 'B', label: 'Other branch (type its name; a new name creates that branch)', input: true },
+        ],
+      },
       recommend: 'A', status: 'OPEN', openedAt: now, appliedNote: 'Used by finish apply --decision D6.',
     };
     this.set((s) => this.touch({
