@@ -9,6 +9,7 @@ import {
   collectPages, mapDecisions, mapDocumentContent, mapHistoryItem, mapPrompt,
   mapWorkspaceDetail, mapWorkspaceSummary,
 } from './adapter';
+import { NEEDS_YOU } from '../../lib/status';
 import { SSEParser } from './sse';
 
 class HubApiError extends Error {
@@ -22,6 +23,8 @@ type RetryableResource = 'decisions' | 'commands' | 'documents' | 'history';
 
 const STREAM_SILENCE_TIMEOUT_MS = 45_000;
 const RESOURCE_RETRY_INTERVAL_MS = 5_000;
+const ANSWER_CHECK_INTERVAL_MS = 3_000;
+const ANSWER_CHECK_ATTEMPTS = 20;
 
 const routePath = (template: string, values: Record<string, string>) => Object.entries(values)
   .reduce((path, [key, value]) => path.replace(`:${key}`, encodeURIComponent(value)), template.split('?')[0]!);
@@ -78,12 +81,33 @@ export class HttpHubClient implements HubClient {
 
   async answerDecision(ws: string, run: string, id: string, input: AnswerInput): Promise<void> {
     const path = routePath(USER_ROUTES.answer.path, { ws, run, id });
-    await this.request('POST', path, {
-      choice: input.choice,
-      note: input.note,
-      followup: input.followup,
-      value: input.value,
-    }, { workspaceId: ws });
+    try {
+      await this.request('POST', path, {
+        choice: input.choice,
+        note: input.note,
+        followup: input.followup,
+        value: input.value,
+      }, { workspaceId: ws });
+    } catch (error) {
+      // The answer may have been saved even though its reply was lost on the way back: check before reporting failure.
+      if (!(error instanceof HubApiError) || !['computer_timeout', 'hub_unreachable'].includes(error.code)) throw error;
+      if (!(await this.confirmAnswered(ws, run, id))) throw new HubApiError('answer_unconfirmed', 'The answer was not confirmed.');
+    }
+  }
+
+  /** Re-reads the decisions every 3 s for up to 60 s; true once this decision no longer needs an answer. */
+  private async confirmAnswered(ws: string, run: string, id: string): Promise<boolean> {
+    for (let attempt = 0; attempt < ANSWER_CHECK_ATTEMPTS && !this.disposed; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, ANSWER_CHECK_INTERVAL_MS));
+      try {
+        await this.refreshDecisions(ws);
+      } catch {
+        continue;
+      }
+      const decision = this.snap.decisions.find((item) => item.workspaceId === ws && item.runId === run && item.id === id);
+      if (decision && !NEEDS_YOU.has(decision.status)) return true;
+    }
+    return false;
   }
 
   async replyToDecision(ws: string, run: string, id: string, text: string): Promise<void> {

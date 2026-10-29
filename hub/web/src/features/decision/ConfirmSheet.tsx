@@ -55,7 +55,7 @@ export function ConfirmSheet({ decision: d, workspace: w, form: f, busy, onSend,
         </dl>
         <div className="stack" style={{ gap: 8, paddingTop: 4 }}>
           <button ref={sendRef} type="button" className="btn btn-primary btn-block" style={{ minHeight: 48, fontSize: 15 }} disabled={busy || !w.computerOnline} onClick={onSend}>
-            <Icon name="send" />Send answer {opt.key}
+            <Icon name="send" />{busy ? 'Sending… (checking delivery)' : `Send answer ${opt.key}`}
           </button>
           <button type="button" className="btn btn-ghost btn-block" onClick={onBack}>Back</button>
         </div>

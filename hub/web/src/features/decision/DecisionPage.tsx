@@ -20,6 +20,7 @@ const ERRORS: Record<string, string> = {
   decision_not_open: 'This decision is no longer open. Nothing was sent.',
   decision_not_answerable: 'This decision was already answered or closed, so nothing new was sent. The page now shows its current status.',
   workspace_stopped: 'This workspace isn’t running. Nothing was sent.',
+  answer_unconfirmed: 'The connection dropped and the answer could not be confirmed. Check the decision status, then send again if it is still open.',
 };
 
 const INTERRUPTED: Partial<Record<DecisionStatus, (id: string, t: string) => string>> = {

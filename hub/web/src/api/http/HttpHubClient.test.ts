@@ -359,4 +359,71 @@ describe('HttpHubClient', () => {
     await vi.advanceTimersByTimeAsync(5_000);
     expect(listRequests).toBe(1);
   });
+
+  const answerFetch = (statusAfterAnswer: string) => {
+    let answered = false;
+    const decision = (status: string) => ({
+      workspace_id: 'ws_aaaaaaaaaaaaaaaa',
+      decision: {
+        run_id: 'run_1', decision_id: 'D1', kind: 'question', agent: 'agent', title: 'Pick',
+        question: 'Pick one?', evidence: [], options: [{ key: 'A', label: 'Yes' }],
+      },
+      hub_status: status,
+    });
+    return vi.fn(async (input: string, init?: RequestInit) => {
+      const path = new URL(input).pathname;
+      if (path.endsWith('/computers/c_1/stream')) {
+        return new Response(new ReadableStream<Uint8Array>(), { status: 200, headers: { 'Content-Type': 'text/event-stream' } });
+      }
+      if (path.endsWith('/workspaces')) return json({ items: [summary('c_1')], next: null });
+      if (path.endsWith('/workspaces/ws_aaaaaaaaaaaaaaaa')) {
+        return json({ workspace: summary(null), snapshot: null, decisions_open: [], commands_recent: [] });
+      }
+      if (path.endsWith('/answer') && init?.method === 'POST') {
+        // The computer saves the answer, but its reply is lost on the way back.
+        answered = true;
+        return new Response(JSON.stringify({ error: { code: 'computer_timeout', message: 'Computer did not reply in time.' } }), {
+          status: 504, headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      if (path.endsWith('/decisions')) return json({ items: [decision(answered ? statusAfterAnswer : 'OPEN')], next: null });
+      return json({ items: [], next: null });
+    });
+  };
+
+  it('treats a timed-out answer as sent once a later check shows it was delivered', async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal('fetch', answerFetch('DELIVERED'));
+    const client = new HttpHubClient('https://hub.example', () => 'token', () => {});
+    try {
+      await vi.advanceTimersByTimeAsync(0);
+      let settled: string | undefined;
+      void client.answerDecision('ws_aaaaaaaaaaaaaaaa', 'run_1', 'D1', { choice: 'A' } as never)
+        .then(() => { settled = 'sent'; }, (error: Error) => { settled = error.message; });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(settled).toBeUndefined();
+      await vi.advanceTimersByTimeAsync(3_000);
+      expect(settled).toBe('sent');
+    } finally {
+      client.dispose();
+    }
+  });
+
+  it('reports an unconfirmed answer when 60 seconds of checks never see it delivered', async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal('fetch', answerFetch('OPEN'));
+    const client = new HttpHubClient('https://hub.example', () => 'token', () => {});
+    try {
+      await vi.advanceTimersByTimeAsync(0);
+      let settled: string | undefined;
+      void client.answerDecision('ws_aaaaaaaaaaaaaaaa', 'run_1', 'D1', { choice: 'A' } as never)
+        .then(() => { settled = 'sent'; }, (error: Error) => { settled = error.message; });
+      await vi.advanceTimersByTimeAsync(57_000);
+      expect(settled).toBeUndefined();
+      await vi.advanceTimersByTimeAsync(3_000);
+      expect(settled).toBe('answer_unconfirmed');
+    } finally {
+      client.dispose();
+    }
+  });
 });
