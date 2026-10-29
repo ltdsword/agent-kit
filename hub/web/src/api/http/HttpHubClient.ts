@@ -347,7 +347,11 @@ export class HttpHubClient implements HubClient {
     if (workspace.computerId) this.syncStreams(workspaces);
   }
 
-  private replaceWorkspace(workspace: Workspace): void {
+  private replaceWorkspace(detail: Workspace): void {
+    // Only the proxy's listing knows which computer a workspace is on; the computer's own detail reply
+    // leaves computer_id empty, and dropping it would close the live stream and mark the workspace offline.
+    const known = this.workspace(detail.id);
+    const workspace = known ? { ...detail, computerId: known.computerId, computerOnline: known.computerOnline } : detail;
     const workspaces = [...this.snap.workspaces.filter((item) => item.id !== workspace.id), workspace];
     this.emit({ workspaces });
     this.syncStreams(workspaces);

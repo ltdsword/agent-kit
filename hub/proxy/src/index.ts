@@ -426,10 +426,10 @@ async function handleWorkspaces(request: Request, env: Env, session: Session, ur
   const unlisted = new Map(liveResults.filter((result) => !result.status.listed).map((result) => [result.status.id, result.status.online]));
   if (unlisted.size) {
     const indexes = await env.DB.prepare(
-      `SELECT wi.workspace_id, wi.name, wi.last_seen_at, c.id AS computer_id
+      `SELECT wi.workspace_id, wi.name, wi.status, wi.last_seen_at, c.id AS computer_id
        FROM workspace_index wi JOIN computers c ON c.id = wi.computer_id
        WHERE c.user_id = ? AND wi.last_seen_at >= ? ORDER BY wi.last_seen_at DESC`,
-    ).bind(session.id, recentCutoff).all<{ workspace_id: string; name: string; last_seen_at: string | null; computer_id: string }>();
+    ).bind(session.id, recentCutoff).all<{ workspace_id: string; name: string; status: string; last_seen_at: string | null; computer_id: string }>();
     const seen = new Set(items.map((item) => item.id));
     for (const index of indexes.results ?? []) {
       if (!unlisted.has(index.computer_id) || seen.has(index.workspace_id)) continue;
@@ -437,7 +437,8 @@ async function handleWorkspaces(request: Request, env: Env, session: Session, ur
         id: index.workspace_id,
         name: index.name,
         path: null,
-        status: "OFFLINE",
+        // A reachable computer keeps the status it last reported; an unreachable one is offline.
+        status: unlisted.get(index.computer_id) === true ? index.status : "OFFLINE",
         last_seen_at: index.last_seen_at,
         kit_version: null,
         kit_outdated: false,

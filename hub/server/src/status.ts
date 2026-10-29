@@ -9,7 +9,8 @@ export function decisionStatus(
   if (decision.local_status === "DECIDED_BY_OPUS") return { status: "ROUTINE", reason: null };
   if (decision.local_status === "CANCELLED") return { status: "CANCELLED", reason: decision.cancel_reason };
   if (decision.local_status === "ANSWERED") {
-    if (decision.consumed_by) return { status: "APPLIED", reason: null };
+    // A question needs no follow-up command: once Opus has the answer it is final, so nothing will ever consume it.
+    if (decision.consumed_by || decision.kind === "question") return { status: "APPLIED", reason: null };
     if (decision.answer?.channel === "hub") return { status: "DELIVERED", reason: null };
     if (decision.answer?.channel === "chat") return { status: "ANSWERED_ELSEWHERE", reason: null };
     return { status: "APPLIED", reason: null };

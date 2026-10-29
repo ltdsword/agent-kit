@@ -666,7 +666,7 @@ describe("protocol-v2 proxy", () => {
       socket.sendText(JSON.stringify({ type: "res", id: request.id, status: 503, body: { error: { code: "unavailable", message: "busy" } } }));
       const list = await readJson(await listing, "List");
       expect(list.items).toEqual(expect.arrayContaining([
-        expect.objectContaining({ id: indexedId, computer_id: computer.id, computer_online: true }),
+        expect.objectContaining({ id: indexedId, status: "ONLINE", computer_id: computer.id, computer_online: true }),
       ]));
     } finally {
       socket.close();

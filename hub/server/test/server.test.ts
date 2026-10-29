@@ -12,6 +12,7 @@ import { verifyAssertion } from "../src/auth.ts";
 import { HubDatabase } from "../src/db.ts";
 import type { ComputerConfig, ServerConfig } from "../src/config.ts";
 import { RelayClient } from "../src/relay.ts";
+import { decisionStatus } from "../src/status.ts";
 import { EventHub } from "../src/stream.ts";
 
 const connector = "connector-test-token-with-enough-entropy";
@@ -500,4 +501,10 @@ it("streams published changes as named server-sent events", async () => {
   expect(text).toContain(`"ref":"r4/D3"`);
   controller.abort();
   await reader.cancel().catch(() => undefined);
+});
+
+it("treats an answered question as applied, since nothing consumes it", () => {
+  const base = { local_status: "ANSWERED", consumed_by: null, answer: { channel: "hub" } } as never as Parameters<typeof decisionStatus>[0];
+  expect(decisionStatus({ ...base, kind: "question" }, undefined).status).toBe("APPLIED");
+  expect(decisionStatus({ ...base, kind: "blocker" }, undefined).status).toBe("DELIVERED");
 });
