@@ -178,11 +178,13 @@ it("verifies Ed25519 assertions, expiry, owner, computer, and relay-frame bindin
   for (const token of invalid) expect(verifyAssertion(token, computer, now, "req-1")).toBeNull();
 });
 
-it("derives REPLY_SENT only after a delivered reply while the local decision is still pending", async () => {
+it("derives REPLY_SENT once a reply is queued or held, and keeps it after delivery, while the local decision is still pending", async () => {
   await seed();
   const response = await req(`/workspaces/${ws}/decisions/r4/D3/reply`, { method: "POST", body: { text: "I suggest A" } });
   expect(response.status).toBe(201); const command = await response.json(); valid("UserCommand", command); expect(command.by).toBe("alice");
-  expect((await (await req(`/workspaces/${ws}/decisions/r4/D3`)).json()).hub_status).toBe("OPEN");
+  expect((await (await req(`/workspaces/${ws}/decisions/r4/D3`)).json()).hub_status).toBe("REPLY_SENT");
+  expect((await req(`/agent/workspaces/${ws}/commands/${command.id}/ack`, { method: "POST", token: connector, body: { status: "HELD", reason: "waiting for Opus to finish its current step" } })).status).toBe(204);
+  expect((await (await req(`/workspaces/${ws}/decisions/r4/D3`)).json()).hub_status).toBe("REPLY_SENT");
   expect((await req(`/agent/workspaces/${ws}/commands/${command.id}/ack`, { method: "POST", token: connector, body: { status: "DELIVERED", reason: null } })).status).toBe(204);
   const decision = await (await req(`/workspaces/${ws}/decisions/r4/D3`)).json();
   expect(decision.hub_status).toBe("REPLY_SENT"); valid("HubDecision", decision);

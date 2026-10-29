@@ -61,7 +61,9 @@ describe('Decision screen', () => {
     await user.type(screen.getByLabelText(/reply to opus instead/i), 'rebase, keep T1 wording');
     await user.click(screen.getByRole('button', { name: /send reply to opus/i }));
     expect(c.getSnapshot().decisions.find((d) => d.id === 'D3')!.status).toBe('REPLY_SENT');
-    expect(await screen.findByText(/reply sent\./i)).toBeTruthy();
+    // The reply gets its own status card at the top, like an answer's Sent screen.
+    expect(await screen.findByText(/your reply: “rebase, keep T1 wording”/i)).toBeTruthy();
+    expect(screen.getByRole('list', { name: /delivery status/i })).toBeTruthy();
   });
 });
 

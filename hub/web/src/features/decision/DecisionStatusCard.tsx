@@ -9,6 +9,9 @@ function stepsFor(d: Decision): Step[] | null {
     case 'WAITING': return [{ label: 'Waiting for your computer', state: 'wait', icon: 'clock' }, { label: 'Delivered', state: 'todo' }, { label: 'Applied', state: 'todo' }];
     case 'DELIVERED': return [{ label: 'Sent', state: 'done', icon: 'check' }, { label: 'Delivered to your computer', state: 'done', icon: 'check' }, { label: 'Applied', state: 'cur' }];
     case 'APPLIED': return [{ label: 'Sent', state: 'done', icon: 'check' }, { label: 'Delivered to your computer', state: 'done', icon: 'check' }, { label: 'Applied', state: 'done', icon: 'check' }];
+    case 'REPLY_SENT': return d.deliveredAt
+      ? [{ label: 'Reply sent', state: 'done', icon: 'check' }, { label: 'Delivered to Opus', state: 'done', icon: 'check' }, { label: 'Opus answers', state: 'cur' }]
+      : [{ label: 'Reply sent', state: 'done', icon: 'check' }, { label: 'Waiting for Opus', state: 'wait', icon: 'clock' }, { label: 'Delivered to Opus', state: 'todo' }];
     case 'REJECTED': return [{ label: 'Sent', state: 'done', icon: 'check' }, { label: 'Rejected', state: 'bad', icon: 'alert' }];
     default: return null;
   }
@@ -26,6 +29,9 @@ export function DecisionStatusCard({ decision: d, workspace: w }: { decision: De
     DELIVERED: `Recorded on your computer${d.deliveredAt ? ` at ${hhmm(d.deliveredAt)}` : ''} and typed to Opus. Final now.`,
     APPLIED: `${d.appliedNote ?? 'Opus acted on it.'}${d.appliedAt ? ` (${hhmm(d.appliedAt)})` : ''}`,
     ANSWERED_ELSEWHERE: `You answered in the terminal${a ? ` at ${hhmm(a.at)}` : ''}. Read-only.`,
+    REPLY_SENT: `Your reply: “${d.replyText ?? ''}”. ${d.deliveredAt
+      ? `Typed to Opus at ${hhmm(d.deliveredAt)}. Opus records it as your answer or asks again.`
+      : 'Opus is busy; it is delivered as soon as Opus finishes its current step.'} You can still pick an option below.`,
     CANCELLED: `Opus withdrew ${d.id}: “${d.cancelReason ?? ''}”`,
   };
 

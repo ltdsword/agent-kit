@@ -15,7 +15,8 @@ export function decisionStatus(
     if (decision.answer?.channel === "chat") return { status: "ANSWERED_ELSEWHERE", reason: null };
     return { status: "APPLIED", reason: null };
   }
-  if (decision.answer === null && decision.local_status === "PENDING" && latest?.type === "reply" && latest.status === "DELIVERED") {
+  if (decision.answer === null && decision.local_status === "PENDING" && latest?.type === "reply" && ["QUEUED", "HELD", "DELIVERED"].includes(latest.status)) {
+    // Sent as soon as it is queued: while Opus is busy the connector holds it (hub9), and the page still shows it as sent.
     return { status: "REPLY_SENT", reason: null };
   }
   if (latestAnswer) {

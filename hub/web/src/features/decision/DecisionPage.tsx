@@ -68,7 +68,7 @@ export function DecisionPage() {
     finally { setBusy(false); }
   };
   const send = () => run(async () => { await client.answerDecision(d.workspaceId, d.runId, d.id, form.toInput()); setConfirm(false); });
-  const reply = () => run(async () => { await client.replyToDecision(d.workspaceId, d.runId, d.id, form.chatText.trim()); form.clearChat(); });
+  const reply = () => run(async () => { await client.replyToDecision(d.workspaceId, d.runId, d.id, form.chatText.trim()); form.clearChat(); window.scrollTo({ top: 0, behavior: 'smooth' }); });
 
   const reviewLabel = !form.picked ? 'Choose an option'
     : d.kind === 'finish' ? ({ A: 'Review: merge and push', B: 'Review: merge locally', C: 'Review: don’t merge' } as Record<string, string>)[form.picked] ?? 'Review answer'
@@ -107,7 +107,7 @@ export function DecisionPage() {
 
         <DecisionContext decision={d} />
 
-        {(!open || d.status === 'REJECTED') && <DecisionStatusCard decision={d} workspace={w} />}
+        {(!open || d.status === 'REJECTED' || d.status === 'REPLY_SENT') && <DecisionStatusCard decision={d} workspace={w} />}
         {d.status === 'REJECTED' && (
           <Banner tone="error" icon="alert" role="alert">
             <strong>Your computer refused the answer.</strong> {d.rejectReason} Nothing was applied. Fix it below and send again.

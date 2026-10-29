@@ -12,11 +12,6 @@ export function DecisionForm({ decision: d, workspace: w, form: f }: { decision:
       {w.status !== 'RUNNING' && (
         <Banner icon="wifi-off" role="status">{w.name} is offline. You can answer now; it’s delivered when your computer reconnects.</Banner>
       )}
-      {d.status === 'REPLY_SENT' && (
-        <Banner tone="info" icon="message" role="status">
-          <strong>Reply sent.</strong> “{d.replyText}” Opus records it as your answer or asks again. You can still pick an option.
-        </Banner>
-      )}
       {d.opusNote && (
         <div className="inset" style={{ padding: '10px 12px', display: 'flex', gap: 10, fontSize: 13.5 }}>
           <Icon name="hub" style={{ color: 'var(--text-2)', marginTop: 2 }} />
