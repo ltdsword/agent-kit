@@ -80,7 +80,7 @@ export function DecisionPage() {
     <div className="fade-in stack" style={{ width: '100%', maxWidth: 720, margin: '0 auto', flex: 1 }}>
       <div style={{ padding: '10px 8px 0', display: 'flex', alignItems: 'center', gap: 8 }}>
         <Link className="btn btn-ghost btn-sm" to={`/w/${w.id}`} style={{ minHeight: 44 }}><Icon name="chevron-left" />{w.name}</Link>
-        <span className="t-small" style={{ marginLeft: 'auto', paddingRight: 8 }}>Decision <span className="mono">{d.id}</span> · run {d.runId}</span>
+        <span className="t-small" style={{ marginLeft: 'auto', paddingRight: 8 }}>{d.runId === 'inbox' ? <>Question <span className="mono">{d.id.replace(/^D/, 'Q')}</span></> : <>Decision <span className="mono">{d.id}</span> · run {d.runId}</>}</span>
       </div>
 
       <div className="stack" style={{ padding: '10px 16px 24px', gap: 18, flex: 1 }}>

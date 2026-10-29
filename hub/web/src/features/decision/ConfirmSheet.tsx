@@ -25,7 +25,7 @@ export function ConfirmSheet({ decision: d, workspace: w, form: f, busy, onSend,
       <section className="dialog" role="dialog" aria-modal="true" aria-labelledby="confirm-h">
         <div className="grab" aria-hidden="true" />
         <div className="stack" style={{ gap: 4 }}>
-          <h2 id="confirm-h" style={{ fontSize: 19, fontWeight: 600 }}>Send answer to {d.id}?</h2>
+          <h2 id="confirm-h" style={{ fontSize: 19, fontWeight: 600 }}>Send answer to {d.runId === 'inbox' ? d.id.replace(/^D/, 'Q') : d.id}?</h2>
           <p className="t-2" style={{ fontSize: 13.5 }}>{d.title}</p>
         </div>
         <div className="opt sel" style={{ cursor: 'default' }}>

@@ -109,3 +109,7 @@ Verdict: PASS (2 small hook fixes by Opus before commit)
 
 - `.agent-system/scripts/verify.sh` exit 0 on agent/integration-hub9 at c7aed2b45378 (log `.orchestrator/runs/hub9/logs/verify-1793300785.log`)
 - Task MERGED; run DONE
+
+## Finished (30/10/26 02:16)
+
+- merged into hub/plan (decision D1)
