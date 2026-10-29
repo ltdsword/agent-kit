@@ -18,6 +18,10 @@ class HubApiError extends Error {
 }
 
 type RequestOptions = { body?: unknown; workspaceId?: string; signal?: AbortSignal };
+type RetryableResource = 'decisions' | 'commands' | 'documents' | 'history';
+
+const STREAM_SILENCE_TIMEOUT_MS = 45_000;
+const RESOURCE_RETRY_INTERVAL_MS = 5_000;
 
 const routePath = (template: string, values: Record<string, string>) => Object.entries(values)
   .reduce((path, [key, value]) => path.replace(`:${key}`, encodeURIComponent(value)), template.split('?')[0]!);
@@ -46,13 +50,22 @@ export class HttpHubClient implements HubClient {
   private streams = new Map<string, AbortController>();
   private streamDown = new Set<string>();
   private pollTimers = new Map<string, ReturnType<typeof setInterval>>();
+  private resourceRetryTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  private resourceRetryPending = new Set<string>();
+  private workspaceListRetryTimer: ReturnType<typeof setTimeout> | undefined;
   private disposed = false;
+  private readonly onVisibilityChange = () => {
+    if (typeof document !== 'undefined' && document.visibilityState === 'visible') this.restartForBrowserEvent();
+  };
+  private readonly onOnline = () => this.restartForBrowserEvent();
 
   constructor(
     private readonly baseUrl: string,
     private readonly token: () => string | null,
     private readonly onUnauthorized: () => void,
   ) {
+    if (typeof document !== 'undefined') document.addEventListener('visibilitychange', this.onVisibilityChange);
+    if (typeof window !== 'undefined') window.addEventListener('online', this.onOnline);
     void this.fetchAll();
   }
 
@@ -95,12 +108,30 @@ export class HttpHubClient implements HubClient {
     void this.fetchAll();
   }
 
+  private restartForBrowserEvent(): void {
+    if (this.disposed) return;
+    this.streams.forEach((controller) => controller.abort());
+    this.streams.clear();
+    this.streamDown.clear();
+    this.pollTimers.forEach((timer) => clearInterval(timer));
+    this.pollTimers.clear();
+    this.syncStreams(this.snap.workspaces);
+    void this.fetchAll();
+  }
+
   dispose(): void {
     this.disposed = true;
+    if (typeof document !== 'undefined') document.removeEventListener('visibilitychange', this.onVisibilityChange);
+    if (typeof window !== 'undefined') window.removeEventListener('online', this.onOnline);
     this.streams.forEach((controller) => controller.abort());
     this.streams.clear();
     this.pollTimers.forEach((timer) => clearInterval(timer));
     this.pollTimers.clear();
+    this.resourceRetryTimers.forEach((timer) => clearTimeout(timer));
+    this.resourceRetryTimers.clear();
+    this.resourceRetryPending.clear();
+    if (this.workspaceListRetryTimer !== undefined) clearTimeout(this.workspaceListRetryTimer);
+    this.workspaceListRetryTimer = undefined;
     this.listeners.clear();
   }
 
@@ -156,13 +187,25 @@ export class HttpHubClient implements HubClient {
     try {
       const listPath = `${routePath(USER_ROUTES.workspaces.path, {})}?archived=false`;
       const summaries = await this.list<WorkspaceSummary>(listPath);
+      if (this.workspaceListRetryTimer !== undefined) clearTimeout(this.workspaceListRetryTimer);
+      this.workspaceListRetryTimer = undefined;
       this.emit({ workspaces: summaries.map((summary) => mapWorkspaceSummary(summary)), loaded: true, lastEventAt: Date.now() });
       this.syncStreams(this.snap.workspaces);
       await Promise.all(summaries.map((summary) => this.refreshWorkspaceAll(summary.id, summary.computer_online)));
       this.setConnection();
     } catch (error) {
-      if ((error as Error).message !== 'unauthorized' && !this.isOffline(error)) this.emit({ connection: 'lost', loaded: true });
+      if ((error as Error).message === 'unauthorized' || this.isOffline(error)) return;
+      this.emit({ connection: 'lost' });
+      if (!this.snap.loaded) this.scheduleWorkspaceListRetry();
     }
+  }
+
+  private scheduleWorkspaceListRetry(): void {
+    if (this.disposed || this.snap.loaded || this.workspaceListRetryTimer !== undefined) return;
+    this.workspaceListRetryTimer = setTimeout(() => {
+      this.workspaceListRetryTimer = undefined;
+      void this.fetchAll();
+    }, RESOURCE_RETRY_INTERVAL_MS);
   }
 
   private async refreshWorkspaceAll(workspaceId: string, online: boolean): Promise<void> {
@@ -174,13 +217,82 @@ export class HttpHubClient implements HubClient {
       if (this.isOffline(error)) return;
       throw error;
     }
-    try {
-      await Promise.all([
-        this.refreshDecisions(workspaceId), this.refreshCommands(workspaceId),
-        this.refreshDocuments(workspaceId), this.refreshHistory(workspaceId),
-      ]);
-    } catch (error) {
-      if (!this.isOffline(error)) throw error;
+    const resources: RetryableResource[] = ['decisions', 'commands', 'documents', 'history'];
+    const results = await Promise.allSettled(resources.map((resource) => this.refreshResource(workspaceId, resource)));
+    results.forEach((result, index) => {
+      const resource = resources[index]!;
+      if (result.status === 'fulfilled') {
+        this.clearResourceRetry(workspaceId, resource);
+      } else if (this.canRetryResource(workspaceId, result.reason)) {
+        this.scheduleResourceRetry(workspaceId, resource);
+      } else {
+        this.clearResourceRetry(workspaceId, resource);
+      }
+    });
+    this.setConnection();
+  }
+
+  private refreshResource(workspaceId: string, resource: RetryableResource): Promise<void> {
+    if (resource === 'decisions') return this.refreshDecisions(workspaceId);
+    if (resource === 'commands') return this.refreshCommands(workspaceId);
+    if (resource === 'documents') return this.refreshDocuments(workspaceId);
+    return this.refreshHistory(workspaceId);
+  }
+
+  private resourceRetryKey(workspaceId: string, resource: RetryableResource): string {
+    return `${workspaceId}\0${resource}`;
+  }
+
+  private canRetryResource(workspaceId: string, error: unknown): boolean {
+    return !this.disposed
+      && !(error instanceof HubApiError && error.code === 'unauthorized')
+      && this.workspace(workspaceId)?.computerOnline === true;
+  }
+
+  private scheduleResourceRetry(workspaceId: string, resource: RetryableResource): void {
+    const key = this.resourceRetryKey(workspaceId, resource);
+    if (!this.canRetryResource(workspaceId, null)) {
+      this.clearResourceRetry(workspaceId, resource);
+      this.setConnection();
+      return;
+    }
+    this.resourceRetryPending.add(key);
+    if (!this.resourceRetryTimers.has(key)) {
+      const timer = setTimeout(() => {
+        this.resourceRetryTimers.delete(key);
+        if (!this.canRetryResource(workspaceId, null)) {
+          this.clearResourceRetry(workspaceId, resource);
+          this.setConnection();
+          return;
+        }
+        void this.refreshResource(workspaceId, resource).then(
+          () => this.clearResourceRetry(workspaceId, resource),
+          (error) => {
+            if (this.canRetryResource(workspaceId, error)) this.scheduleResourceRetry(workspaceId, resource);
+            else this.clearResourceRetry(workspaceId, resource);
+          },
+        ).finally(() => this.setConnection());
+      }, RESOURCE_RETRY_INTERVAL_MS);
+      this.resourceRetryTimers.set(key, timer);
+    }
+    this.setConnection();
+  }
+
+  private clearResourceRetry(workspaceId: string, resource: RetryableResource): void {
+    const key = this.resourceRetryKey(workspaceId, resource);
+    const timer = this.resourceRetryTimers.get(key);
+    if (timer !== undefined) clearTimeout(timer);
+    this.resourceRetryTimers.delete(key);
+    this.resourceRetryPending.delete(key);
+  }
+
+  private clearWorkspaceRetries(workspaceId: string): void {
+    const prefix = `${workspaceId}\0`;
+    for (const key of this.resourceRetryPending) {
+      if (key.startsWith(prefix)) {
+        const resource = key.slice(prefix.length) as RetryableResource;
+        this.clearResourceRetry(workspaceId, resource);
+      }
     }
   }
 
@@ -232,6 +344,9 @@ export class HttpHubClient implements HubClient {
   }
 
   private syncStreams(workspaces: Workspace[]): void {
+    for (const workspace of workspaces) {
+      if (!workspace.computerOnline) this.clearWorkspaceRetries(workspace.id);
+    }
     const desired = new Set(workspaces.filter((item) => item.computerOnline && item.computerId).map((item) => item.computerId!));
     for (const [computerId, controller] of this.streams) {
       if (!desired.has(computerId)) {
@@ -253,9 +368,24 @@ export class HttpHubClient implements HubClient {
   private async streamLoop(computerId: string, signal: AbortSignal): Promise<void> {
     let delay = 1000;
     while (!signal.aborted && !this.disposed) {
+      const attemptController = new AbortController();
+      let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
+      let watchdog: ReturnType<typeof setTimeout> | undefined;
+      let rejectSilence!: (error: Error) => void;
+      let rejectAbort!: (error: Error) => void;
+      const silence = new Promise<never>((_, reject) => { rejectSilence = reject; });
+      const aborted = new Promise<never>((_, reject) => { rejectAbort = reject; });
+      void aborted.catch(() => {});
+      const abortAttempt = () => {
+        attemptController.abort();
+        rejectAbort(new Error('stream_aborted'));
+      };
+      if (signal.aborted) return;
+      signal.addEventListener('abort', abortAttempt, { once: true });
+      let failure: unknown;
       try {
         const path = routePath(USER_ROUTES.computerStream.path, { c: computerId });
-        const response = await fetch(`${this.baseUrl}${API_PREFIX}${path}`, { headers: this.headers(), signal });
+        const response = await fetch(`${this.baseUrl}${API_PREFIX}${path}`, { headers: this.headers(), signal: attemptController.signal });
         if (response.status === ERRORS.unauthorized) {
           this.onUnauthorized();
           throw new HubApiError('unauthorized', 'The session expired.', response.status);
@@ -280,10 +410,19 @@ export class HttpHubClient implements HubClient {
         }
         delay = 1000;
         const parser = new SSEParser();
-        const reader = response.body.getReader();
+        reader = response.body.getReader();
         const decoder = new TextDecoder();
+        const resetWatchdog = () => {
+          if (watchdog !== undefined) clearTimeout(watchdog);
+          watchdog = setTimeout(() => {
+            attemptController.abort();
+            rejectSilence(new HubApiError('stream_silent', 'The event stream was silent.'));
+          }, STREAM_SILENCE_TIMEOUT_MS);
+        };
+        resetWatchdog();
         while (!signal.aborted) {
-          const { value, done } = await reader.read();
+          const { value, done } = await Promise.race([reader.read(), silence, aborted]);
+          resetWatchdog();
           const messages = parser.push(done ? decoder.decode() : decoder.decode(value, { stream: true }));
           for (const message of messages) {
             try {
@@ -303,13 +442,18 @@ export class HttpHubClient implements HubClient {
         }
         return;
       } catch (error) {
-        if (signal.aborted || this.disposed || (error as Error).message === 'unauthorized') return;
-        this.streamDown.add(computerId);
-        this.setConnection();
-        this.startPoll(computerId);
-        await this.wait(delay, signal);
-        delay = Math.min(delay * 2, 5_000);
+        failure = error;
+      } finally {
+        if (watchdog !== undefined) clearTimeout(watchdog);
+        signal.removeEventListener('abort', abortAttempt);
+        if (reader) void reader.cancel().catch(() => {});
       }
+      if (signal.aborted || this.disposed || (failure as Error)?.message === 'unauthorized') return;
+      this.streamDown.add(computerId);
+      this.setConnection();
+      this.startPoll(computerId);
+      await this.wait(delay, signal);
+      delay = Math.min(delay * 2, 5_000);
     }
   }
 
@@ -345,11 +489,13 @@ export class HttpHubClient implements HubClient {
   private markWorkspaceOffline(workspaceId: string): void {
     const workspace = this.workspace(workspaceId);
     if (!workspace) return;
+    this.clearWorkspaceRetries(workspaceId);
     const workspaces = this.snap.workspaces.map((item) => item.id === workspaceId
       ? { ...item, computerOnline: false, status: 'OFFLINE' as const }
       : item);
     this.emit({ workspaces });
     if (workspace.computerId) this.syncStreams(workspaces);
+    else this.setConnection();
   }
 
   private replaceWorkspace(detail: Workspace): void {
@@ -371,6 +517,6 @@ export class HttpHubClient implements HubClient {
   }
 
   private setConnection(): void {
-    this.emit({ connection: this.streamDown.size ? 'lost' : 'live' });
+    this.emit({ connection: this.streamDown.size || this.resourceRetryPending.size ? 'lost' : 'live' });
   }
 }
