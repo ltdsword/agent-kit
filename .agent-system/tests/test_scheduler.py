@@ -2017,3 +2017,11 @@ class AgentStateShapeTests(unittest.TestCase):
         res = {"agent": {"agent": "codex", "agent_session": {"agent": "codex", "kind": "id", "value": "x"},
                          "agent_status": "blocked", "name": "worker-3-hub5"}, "type": "agent"}
         self.assertEqual(S._agent_state(res), "blocked")
+
+
+class FinishAskCliTests(unittest.TestCase):
+    def test_finish_ask_requires_a_recommendation(self):
+        parser = S.build_parser()
+        with self.assertRaises(SystemExit), redirect_stderr(StringIO()):
+            parser.parse_args(["finish", "ask", "--run", "r1"])
+        self.assertEqual(parser.parse_args(["finish", "ask", "--run", "r1", "--recommend", "B"]).recommend, "B")

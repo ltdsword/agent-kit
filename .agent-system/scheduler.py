@@ -2653,7 +2653,8 @@ def build_parser() -> argparse.ArgumentParser:
     fis = fi.add_subparsers(dest="action", required=True)
     fa = fis.add_parser("ask", help="open the user's decision: merge+push / merge only / don't, then the branch")
     fa.add_argument("--run", required=True)
-    fa.add_argument("--recommend", choices=["A", "B", "C"])
+    # Required: the user should always see which option Opus recommends (chat and hub).
+    fa.add_argument("--recommend", choices=["A", "B", "C"], required=True)
     fp = fis.add_parser("apply", help="carry out the user's answered finish decision")
     fp.add_argument("--run", required=True)
     fp.add_argument("--decision", required=True)
