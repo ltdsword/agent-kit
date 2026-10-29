@@ -72,6 +72,7 @@ SECRET_PATTERNS = (".env", ".env.*", "*.pem", "*.key", "*.p12", "*.pfx", "id_rsa
 
 # User-held decisions. Problems and blockers are escalated to the user; the commands that act on
 # them refuse to run without an answered decision of the matching kind (see decision_* below).
+REPLY_CHOICE = "reply"  # answer key for a question answered by a typed reply instead of an option
 DECISION_KINDS = ("blocker", "repair", "scope_exception", "abandon", "worker_approval", "question", "finish")
 # kind -> commands that require it. worker_approval / question are policy-only (no command to gate).
 GATED_KINDS = ("blocker", "repair", "scope_exception", "abandon")
@@ -2092,6 +2093,9 @@ class Scheduler:
             if d["status"] != "PENDING":
                 raise SchedulerError(f"{did} is {d['status']}, not PENDING")
             opt = next((o for o in d["options"] if o["key"].lower() == choice.lower()), None)
+            # A question also accepts a typed reply as its answer (the reply text is the quote).
+            if not opt and choice.lower() == REPLY_CHOICE and d.get("kind") == "question":
+                opt = {"key": REPLY_CHOICE, "label": "Replied in text"}
             if not opt:
                 raise SchedulerError(f"{choice!r} is not an option of {did}: {[o['key'] for o in d['options']]}")
             fu_answer = None

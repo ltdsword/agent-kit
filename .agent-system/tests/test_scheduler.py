@@ -892,6 +892,12 @@ class TestTaskFiles(Base):
 
 
 class TestDecisions(Base):
+    def test_question_accepts_a_typed_reply_as_its_answer(self):
+        question = self.s.inbox_ask("Push?", "Push now?", ["A=Push", "B=Not yet"], "A")["decision"]
+        answer = self.s.decision_answer("inbox", question, "reply", "Later", quote="Later")
+        self.assertEqual((answer["choice"], answer["label"]), ("reply", "Replied in text"))
+        self.assertEqual(self.s.store.load("inbox")["decisions"][question]["status"], "ANSWERED")
+
     def test_inbox_ask_creates_inactive_run_increments_ids_and_prunes(self):
         first = self.s.inbox_ask("Question 1", "Pick one.", ["A=Keep", "B=Change"], "A")
         second = self.s.inbox_ask("Question 2", "Pick one.", ["A=Keep", "B=Change"], "A")

@@ -1215,6 +1215,30 @@ def _answer_notice(scheduler: S.Scheduler, command: dict) -> tuple[dict, str]:
     return result, scrub(text)
 
 
+def _is_question_reply(ws: Path, cfg: dict, command: dict) -> bool:
+    """A typed reply to an open question counts as its answer, like choosing an option."""
+    run_id, decision_id = command.get("run_id"), command.get("decision_id")
+    if command.get("type") != "reply" or not isinstance(run_id, str) or not isinstance(decision_id, str):
+        return False
+    try:
+        decision = S.Scheduler(ws, cfg=cfg).store.load(run_id).get("decisions", {}).get(decision_id, {})
+    except Exception:
+        return False
+    return decision.get("kind") == "question" and decision.get("status") == "PENDING"
+
+
+def _reply_answer_notice(scheduler: S.Scheduler, command: dict) -> tuple[dict, str]:
+    text = scrub(command["body"]).get("text")
+    if not isinstance(text, str) or not text.strip():
+        raise ValueError("reply command is missing text")
+    run_id, decision_id = command["run_id"], command["decision_id"]
+    result = scheduler.decision_answer(run_id, decision_id, S.REPLY_CHOICE, text, channel="hub",
+                                       by=command["by"], quote=text)
+    notice = (f'[hub] {decision_id} answered by {command["by"]} with a reply: "{text}". '
+              f"It is recorded; carry it out with --decision {decision_id}.")
+    return result, scrub(notice)
+
+
 def _command_notice(command: dict) -> str:
     body = scrub(command["body"])
     if command["type"] == "reply":
@@ -1249,14 +1273,15 @@ def _deliver_command(ws: Path, cfg: dict, name: str, runner, client: HubClient,
         _ack_command(client, command_id, "HELD", HUB_HELD_REASON)
         return
 
-    if command["type"] == "answer":
+    if command["type"] == "answer" or _is_question_reply(ws, cfg, command):
         try:
             scheduler = S.Scheduler(ws, cfg=cfg, herdr=S.Herdr(runner=runner))
         except Exception as error:
             _ack_command(client, command_id, "FAILED", _short_reason(error))
             return
         try:
-            _, notice = _answer_notice(scheduler, command)
+            _, notice = (_answer_notice(scheduler, command) if command["type"] == "answer"
+                         else _reply_answer_notice(scheduler, command))
         except S.SchedulerError as error:
             _ack_command(client, command_id, "REJECTED", scrub(str(error))[:2000])
             return

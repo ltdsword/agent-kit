@@ -573,6 +573,33 @@ class AgentCtlTests(Base):
         self.assertTrue(all(r["authorized"] for r in backend.requests))
         self.assertFalse(backend.invalid)
 
+    def test_watch_reply_to_open_question_is_recorded_as_its_answer(self):
+        self.sample_run()
+        question = self.s.decision_ask("r1", "question", "Push now?", "Push the branch?",
+                                       ["A=Push", "B=Not yet"])["decision"]
+        command = self.command("cmd_iiiiiiiiiiiiiiii", "reply", {"text": "Fix the wording first"},
+                               decision_id=question)
+        prompts = []
+
+        def runner(args, **kwargs):
+            if args[1:3] == ["agent", "prompt"]:
+                prompts.append(args[4])
+                return subprocess.CompletedProcess(args, 0, "{}", "")
+            return self.fake_herdr()(args, **kwargs)
+
+        with FakeBackend(commands=[command]) as backend:
+            self.set_backend(backend)
+            with redirect_stdout(StringIO()), redirect_stderr(StringIO()):
+                self.assertEqual(AC.watch(self.ws, runner=runner, sleep=lambda _: None,
+                                          no_orchestrator=True, max_loops=1), 0)
+        decision = self.s.store.load("r1")["decisions"][question]
+        self.assertEqual(decision["status"], "ANSWERED")
+        self.assertEqual((decision["answer"]["choice"], decision["answer"]["label"], decision["answer"]["quote"]),
+                         ("reply", "Replied in text", "Fix the wording first"))
+        self.assertEqual(backend.acks[0]["body"], {"status": "DELIVERED", "reason": None})
+        self.assertEqual(prompts, [f'[hub] {question} answered by alice with a reply: "Fix the wording first". '
+                                   f"It is recorded; carry it out with --decision {question}."])
+
     def test_watch_scheduler_refusal_is_rejected_with_exact_message(self):
         self.sample_run()
         command = self.command("cmd_bbbbbbbbbbbbbbbb", "answer", {"choice": "Z"})
