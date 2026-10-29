@@ -2,3 +2,6 @@ __pycache__/
 .orchestrator/
 dist/
 worktrees/
+
+# local wrangler test runs (logs only)
+.wrangler-home/

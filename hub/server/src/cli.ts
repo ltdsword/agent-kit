@@ -47,7 +47,11 @@ async function serveHub(): Promise<void> {
     closing = true;
     clearInterval(offlineTimer);
     clearInterval(retentionTimer);
-    const finish = () => server.close(() => db.close());
+    const finish = () => {
+      server.close(() => db.close());
+      // Open streams and keep-alive sockets would otherwise hold shutdown for many seconds.
+      (server as { closeAllConnections?: () => void }).closeAllConnections?.();
+    };
     if (relay) void relay.stop().finally(finish);
     else finish();
   };

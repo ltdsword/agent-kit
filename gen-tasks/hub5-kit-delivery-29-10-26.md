@@ -99,3 +99,7 @@ Verdict: **PASS**, with one lead fix.
 
 - `.agent-system/scripts/verify.sh` exit 0 on agent/integration-hub5 at 8f6674994aaa (log `.orchestrator/runs/hub5/logs/verify-1793215699.log`)
 - Task MERGED; run DONE
+
+## Finished (29/10/26 02:30)
+
+- merged into hub/plan (decision D1)
