@@ -1,11 +1,11 @@
 # Website detects a dead live stream (29/10/26)
 
 ## Goal
-The website treats a live stream that has been silent for 45 s as dead and reconnects, and restarts streams when the page becomes visible again or the device comes back online.
+The website treats a live stream that has been silent for 45 s as dead and reconnects, and restarts streams when the page becomes visible again or the device comes back online; panels that failed to load are retried every 5 s.
 
 ## Read first
 - `plans/261029-1720-hub8-stream-watchdog/plan.md` section **T1**: **the full spec** (work items, tests). Follow it exactly.
-- `hub/web/src/api/http/HttpHubClient.ts` (`streamLoop`, `startPoll`, `refreshWorkspaceAll`, `replaceWorkspace`), `hub/web/src/api/http/HttpHubClient.test.ts` (fake fetch pattern).
+- `hub/web/src/api/http/HttpHubClient.ts` (`streamLoop`, `startPoll`, `refreshWorkspaceAll`, `setConnection`, `dispose`), `hub/web/src/api/http/HttpHubClient.test.ts` (fake fetch pattern).
 
 ## Steps
 1. Implement the spec's work items in order.
