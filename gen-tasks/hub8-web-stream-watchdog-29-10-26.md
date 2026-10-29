@@ -329,3 +329,7 @@ Waiting for the user's answer in chat.
 
 - Choice: **A**: Add it to hub8 now (before merge)
 - User's words (hub): "Add it to hub8 now (before merge)"
+
+## Finished (30/10/26 00:28)
+
+- merged into hub/plan (decision D6)
