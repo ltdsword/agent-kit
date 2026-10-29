@@ -54,6 +54,25 @@ export function mountUserApi(app: Hono, deps: UserApiDependencies): void {
   const requireAuth = requireAssertion(verifier, clock);
   const publish = (type: "workspace" | "command" | "decision" | "history", ws: string, ref: string | null) => events.publish({ type, workspace_id: ws, at: new Date(clock()).toISOString(), ref });
 
+  // Live updates for the proxy's `GET /computers/:c/stream`: named SSE events, one per published change.
+  app.get(`${API_PREFIX}/stream`, requireAuth, (c) => {
+    const encoder = new TextEncoder();
+    let cleanup = () => {};
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        const send = (text: string) => { try { controller.enqueue(encoder.encode(text)); } catch { cleanup(); } };
+        const unsubscribe = events.subscribe((event) => send(`event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`));
+        // Comment lines keep idle relays and proxies from closing the stream.
+        const keepalive = setInterval(() => send(": keepalive\n\n"), 20_000);
+        cleanup = () => { unsubscribe(); clearInterval(keepalive); };
+        send(": connected\n\n");
+        c.req.raw.signal.addEventListener("abort", () => { cleanup(); try { controller.close(); } catch {} }, { once: true });
+      },
+      cancel() { cleanup(); },
+    });
+    return new Response(body, { headers: { "Content-Type": "text/event-stream; charset=utf-8", "Cache-Control": "no-cache" } });
+  });
+
   app.get(route(USER_ROUTES.workspaces.path), requireAuth, (c) => {
     const archived = c.req.query("archived") === "true";
     const cursor = c.req.query("cursor");

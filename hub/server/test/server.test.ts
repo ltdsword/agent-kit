@@ -83,9 +83,11 @@ it("requires protocol 2 and assertion auth, and has no pairing, device, or URL-t
   expect((await req("/agent/ping")).status).toBe(401);
   expect((await req("/workspaces", { assertion: null })).status).toBe(401);
   expect((await req("/workspaces", { token: connector, assertion: null })).status).toBe(401);
-  for (const path of ["/pair", "/devices", `/stream?token=${encodeURIComponent(testAssertion)}`]) {
+  for (const path of ["/pair", "/devices"]) {
     expect((await req(path, { assertion: null })).status).toBe(404);
   }
+  // The live stream needs the assertion; a URL token is not accepted.
+  expect((await req(`/stream?token=${encodeURIComponent(testAssertion)}`, { assertion: null })).status).toBe(401);
   expect((await req("/agent/ping", { token: connector, origin: "http://127.0.0.1:7420" })).headers.get("Access-Control-Allow-Origin")).toBe("http://127.0.0.1:7420");
 });
 
@@ -432,4 +434,21 @@ describe("relay client", () => {
       await client.stop();
     } finally { await proxy.close(); }
   }, 15000);
+});
+
+it("streams published changes as named server-sent events", async () => {
+  const controller = new AbortController();
+  const response = await app.request(`http://127.0.0.1${API_PREFIX}/stream`, {
+    headers: { "X-Hub-Assertion": testAssertion, [PROTOCOL_HEADER]: "2" }, signal: controller.signal,
+  });
+  expect(response.status).toBe(200);
+  expect(response.headers.get("Content-Type")).toContain("text/event-stream");
+  const reader = response.body!.getReader();
+  const decoder = new TextDecoder();
+  let text = decoder.decode((await reader.read()).value);
+  events.publish({ type: "decision", workspace_id: ws, at: "2026-10-28T08:00:00Z", ref: "r4/D3" });
+  while (!text.includes("event: decision")) text += decoder.decode((await reader.read()).value);
+  expect(text).toContain(`"ref":"r4/D3"`);
+  controller.abort();
+  await reader.cancel().catch(() => undefined);
 });
