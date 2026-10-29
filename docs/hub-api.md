@@ -78,12 +78,19 @@ Connector routes are local to the backend and are never exposed through the prox
   screens and task file details are not uploaded; an orchestrator screen is `null` when its upload
   setting is off. Older runs can have null title/goal and older tasks can have a null summary.
 - `PUT .../decisions` upserts by `(workspace, run_id, decision_id)` and emits decision events when
-  content changes. Each option may include its consequence; decisions include evidence, Opus's
-  rationale in `note`, and optional worker approval.
+  content changes. The reserved `inbox` run contains ordinary `question` decisions; it is not an
+  active or listed run, and its questions appear in the Questions panel. History labels its items
+  as questions. For each workspace, the backend retains the newest 100 inbox decisions by their
+  `opened_at` timestamp and keeps older pending decisions until they are closed; pruning also
+  removes their decision documents. Each option may include its consequence; decisions include
+  evidence, Opus's rationale in `note`, and optional worker approval.
 - `POST .../events` inserts events by `(run_id, n)`, ignoring duplicates; event number gaps are
   allowed when old state logs have trimmed events.
 - `PUT .../documents` upserts by path. The backend recomputes SHA-256 and rejects mismatches.
-  Document kinds are `final_report`, `final_diff`, `decision` and `research`.
+  Document kinds are `final_report`, `final_diff`, `decision`, `research`, `plan`, `review` and
+  `other`. A plan is a `plans/*/plan.md` file, a review is a `plans/reports/review-*.md` file, and
+  `other` covers any other published file. Documents carry the run ID that recorded the path, or
+  `null` for workspace-level documents.
 - `DELETE .../documents?path=` marks a document deleted while retaining its content.
 
 ### 3.3 Commands (hub → system)
@@ -98,7 +105,7 @@ Connector routes are local to the backend and are never exposed through the prox
   `reason` is shown to the user. `REJECTED` is final when the scheduler refuses an answer, with its
   exact reason. `FAILED` is final for other delivery errors.
 - If the scheduler records an answer but typing its notice fails, the connector still acknowledges
-  the answer as delivered and retries the notice locally.
+  the answer as delivered and retries the notice locally for up to 10 minutes.
 
 ## 4. Connector behavior per command
 
@@ -108,8 +115,13 @@ Connector routes are local to the backend and are never exposed through the prox
 | `reply` | Records no scheduler answer | `[hub] reply to D3 from alice: "<text>"` |
 | `prompt` | Records no scheduler answer | `[hub] <text>` |
 
-Delivery uses `herdr agent prompt <orchestrator> <text>` and waits until the orchestrator is working
-or blocked. A blocked agent is acknowledged as `HELD`. Delivered commands are appended to local
+Delivery uses `herdr agent prompt <orchestrator> <text>` only when the orchestrator is idle. A busy
+or blocked agent is acknowledged as `HELD` while the connector retries after delays of 1, 2, 4, 8,
+16, 16, 16 and 16 seconds; after those eight retries it retries every 32 seconds until 10 minutes
+from the first attempt. An undelivered `prompt` or `reply` is then acknowledged as `FAILED` with
+reason `Opus stayed busy for 10 minutes; not delivered`; `HELD` is non-final and `FAILED` is final.
+Answer notices use the same retry schedule, but the answer itself remains delivered; an untyped
+notice is logged and dropped after 10 minutes. Delivered commands are appended to local
 `.orchestrator/hub-log.jsonl` with their username and body for recovery.
 
 ## 5. Decision status in the hub (`HubDecision.hub_status`)

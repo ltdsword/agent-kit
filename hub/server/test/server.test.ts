@@ -76,6 +76,20 @@ async function seed(): Promise<void> {
   expect((await req(`/agent/workspaces/${ws}/decisions`, { method: "PUT", token: connector, body: await fixture("DecisionsBatch.json") })).status).toBe(204);
 }
 
+function inboxDecision(base: any, id: number, localStatus: "PENDING" | "CANCELLED"): any {
+  return { ...base, run_id: "inbox", decision_id: `D${id}`, kind: "question", task_id: null,
+    agent: "orchestrator", local_status: localStatus, answer: null, consumed_by: null,
+    opened_at: new Date(Date.parse("2026-10-28T08:00:00Z") - (106 - id) * 1000).toISOString(),
+    cancel_reason: localStatus === "CANCELLED" ? "closed" : null };
+}
+
+function inboxDecisionDocument(decision: any): any {
+  const path = `.orchestrator/runs/inbox/decisions/${decision.decision_id}.md`;
+  const content = `# ${decision.decision_id}\n`;
+  return { path, run_id: "inbox", kind: "decision", title: decision.title, format: "markdown",
+    sha256: sha256(content), bytes: Buffer.byteLength(content), truncated: false, content };
+}
+
 it("requires protocol 2 and assertion auth, and has no pairing, device, or URL-token routes", async () => {
   expect((await req("/agent/ping", { token: connector, protocol: null })).status).toBe(426);
   const ping = await req("/agent/ping", { token: connector });
@@ -172,6 +186,53 @@ it("derives REPLY_SENT only after a delivered reply while the local decision is 
   expect((await req(`/agent/workspaces/${ws}/commands/${command.id}/ack`, { method: "POST", token: connector, body: { status: "DELIVERED", reason: null } })).status).toBe(204);
   const decision = await (await req(`/workspaces/${ws}/decisions/r4/D3`)).json();
   expect(decision.hub_status).toBe("REPLY_SENT"); valid("HubDecision", decision);
+});
+
+it("prunes inbox decisions and their documents, leaves other runs intact, and publishes removal events", async () => {
+  await doHello();
+  const base = await fixture<any>("Decision.repair-open.json");
+  const firstHundred = Array.from({ length: 100 }, (_, index) => inboxDecision(base, index + 1, "CANCELLED"));
+  const otherRun = { ...base, run_id: "r4", decision_id: "D3" };
+  expect((await req(`/agent/workspaces/${ws}/decisions`, { method: "PUT", token: connector,
+    body: { decisions: [...firstHundred, otherRun] } })).status).toBe(204);
+
+  const documents = firstHundred.map(inboxDecisionDocument);
+  for (let index = 0; index < documents.length; index += 50) {
+    expect((await req(`/agent/workspaces/${ws}/documents`, { method: "PUT", token: connector,
+      body: { documents: documents.slice(index, index + 50) } })).status).toBe(204);
+  }
+
+  const published: Array<{ type: string; ref: string | null }> = [];
+  const unsubscribe = events.subscribe(({ type, ref }) => published.push({ type, ref }));
+  const newest = Array.from({ length: 5 }, (_, index) => inboxDecision(base, index + 101, "CANCELLED"));
+  expect((await req(`/agent/workspaces/${ws}/decisions`, { method: "PUT", token: connector,
+    body: { decisions: newest } })).status).toBe(204);
+  unsubscribe();
+
+  expect(Number(db.sql.prepare("SELECT COUNT(*) AS n FROM decisions WHERE workspace_id=? AND run_id='inbox'").get(ws)?.n)).toBe(100);
+  expect(db.getDecisionBody(ws, "r4", "D3")).toBeDefined();
+  const removedPaths = Array.from({ length: 5 }, (_, index) => `.orchestrator/runs/inbox/decisions/D${index + 1}.md`);
+  for (const path of removedPaths) expect(db.getDocument(ws, path)).toBeUndefined();
+  expect(db.listDocuments(ws).map((document) => document.path)).not.toEqual(expect.arrayContaining(removedPaths));
+  for (let id = 1; id <= 5; id++) expect(published).toContainEqual({ type: "decision", ref: `inbox/D${id}` });
+  expect(published.filter((event) => event.type === "document").map((event) => event.ref).sort()).toEqual([...removedPaths].sort());
+});
+
+it("keeps an older pending inbox decision outside the newest 100", async () => {
+  await doHello();
+  const base = await fixture<any>("Decision.repair-open.json");
+  const first = Array.from({ length: 104 }, (_, index) => inboxDecision(base, index + 2, "CANCELLED"));
+  expect((await req(`/agent/workspaces/${ws}/decisions`, { method: "PUT", token: connector,
+    body: { decisions: first } })).status).toBe(204);
+  const oldOpen = inboxDecision(base, 1, "PENDING");
+  expect((await req(`/agent/workspaces/${ws}/decisions`, { method: "PUT", token: connector,
+    body: { decisions: [oldOpen] } })).status).toBe(204);
+
+  expect(Number(db.sql.prepare("SELECT COUNT(*) AS n FROM decisions WHERE workspace_id=? AND run_id='inbox'").get(ws)?.n)).toBe(101);
+  expect(db.getDecisionBody(ws, "inbox", "D1")?.local_status).toBe("PENDING");
+  for (let id = 2; id <= 5; id++) expect(db.getDecisionBody(ws, "inbox", `D${id}`)).toBeUndefined();
+  expect(db.getDecisionBody(ws, "inbox", "D6")).toBeDefined();
+  expect(db.getDecisionBody(ws, "inbox", "D105")).toBeDefined();
 });
 
 it("upserts runs across snapshots and sweeps old finished-run data with the injected clock", async () => {

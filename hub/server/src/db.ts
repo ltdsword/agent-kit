@@ -202,8 +202,10 @@ export class HubDatabase {
     return (row?.hash as string | undefined) ?? null;
   }
 
-  upsertDecisions(workspaceId: string, decisions: Decision[], now: number): string[] {
+  upsertDecisions(workspaceId: string, decisions: Decision[], now: number): { changed: string[]; pruned: string[]; deletedDocuments: string[] } {
     const changed: string[] = [];
+    const pruned: string[] = [];
+    const deletedDocuments: string[] = [];
     const statement = this.sql.prepare(`INSERT INTO decisions (workspace_id,run_id,decision_id,kind,task_id,agent,title,question,options,followup,recommend,local_status,answer,consumed_by,opened_at,updated_at,content_hash,body)
       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
       ON CONFLICT(workspace_id,run_id,decision_id) DO UPDATE SET kind=excluded.kind,task_id=excluded.task_id,agent=excluded.agent,title=excluded.title,question=excluded.question,options=excluded.options,followup=excluded.followup,recommend=excluded.recommend,local_status=excluded.local_status,answer=excluded.answer,consumed_by=excluded.consumed_by,opened_at=excluded.opened_at,updated_at=excluded.updated_at,content_hash=excluded.content_hash,body=excluded.body`);
@@ -217,8 +219,20 @@ export class HubDatabase {
         decision.question, JSON.stringify(decision.options), decision.followup ? JSON.stringify(decision.followup) : null, decision.recommend,
         decision.local_status, decision.answer ? JSON.stringify(decision.answer) : null, decision.consumed_by, decision.opened_at, iso(now), digest, JSON.stringify(decision));
     }
+    if (decisions.some((decision) => decision.run_id === "inbox")) {
+      const inbox = this.sql.prepare("SELECT decision_id,local_status FROM decisions WHERE workspace_id=? AND run_id='inbox' ORDER BY opened_at DESC,decision_id DESC")
+        .all(workspaceId) as Row[];
+      for (const row of inbox.slice(100)) {
+        if (row.local_status === "PENDING") continue;
+        const decisionId = String(row.decision_id);
+        this.sql.prepare("DELETE FROM decisions WHERE workspace_id=? AND run_id='inbox' AND decision_id=?").run(workspaceId, decisionId);
+        pruned.push(`inbox/${decisionId}`);
+        const path = `.orchestrator/runs/inbox/decisions/${decisionId}.md`;
+        if (this.deleteDocument(workspaceId, path, now)) deletedDocuments.push(path);
+      }
+    }
     if (decisions.length) this.audit(workspaceId, "connector", "decisions.synced", null, { count: decisions.length }, now);
-    return changed;
+    return { changed, pruned, deletedDocuments };
   }
 
   listDecisionBodies(workspaceId: string): Decision[] {

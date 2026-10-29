@@ -83,10 +83,14 @@ export function mountConnectorApi(app: Hono, deps: ApiDependencies): void {
     const body = await readBody<DecisionsBatch>(c, "DecisionsBatch", 1024 * 1024);
     if ("response" in body) return body.response;
     touch(ws);
-    const changed = db.upsertDecisions(ws, body.value.decisions, clock());
-    for (const ref of changed) {
+    const sync = db.upsertDecisions(ws, body.value.decisions, clock());
+    for (const ref of new Set([...sync.changed, ...sync.pruned])) {
       publish("decision", ws, ref);
       publish("history", ws, ref);
+    }
+    for (const path of sync.deletedDocuments) {
+      publish("document", ws, path);
+      publish("history", ws, path);
     }
     return c.body(null, 204);
   });
