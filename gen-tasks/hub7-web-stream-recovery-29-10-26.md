@@ -173,3 +173,7 @@ index f6a4ea2..e8e2277 100644
 
 - `.agent-system/scripts/verify.sh` exit 0 on agent/integration-hub7 at 77bcdb6b6632 (log `.orchestrator/runs/hub7/logs/verify-1793270990.log`)
 - Task MERGED; run DONE
+
+## Finished (29/10/26 18:00)
+
+- merged into hub/plan (decision D6)
