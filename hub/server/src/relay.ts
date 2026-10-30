@@ -14,7 +14,7 @@ type OutgoingDef = "RelayHello" | "RelayWorkspaces" | "RelayResponse" | "RelaySt
 
 const frameBytes = (frame: unknown) => Buffer.byteLength(JSON.stringify(frame), "utf8");
 
-function endpoint(computer: ComputerConfig, action: string, websocket = false): URL {
+export function computerEndpoint(computer: ComputerConfig, action: string, websocket = false): URL {
   const url = new URL(computer.proxy_url);
   url.pathname = `${url.pathname.replace(/\/$/, "")}/api/v1/computers/${encodeURIComponent(computer.computer_id)}/${action}`;
   if (websocket) url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
@@ -168,7 +168,7 @@ export class RelayClient {
   }
 
   private async runWebSocket(): Promise<void> {
-    const socket = new WebSocket(endpoint(this.computer, "connect", true), {
+    const socket = new WebSocket(computerEndpoint(this.computer, "connect", true), {
       headers: { Authorization: `Bearer ${this.computer.computer_key}` },
     });
     this.currentSocket = socket;
@@ -225,8 +225,8 @@ export class RelayClient {
   }
 
   private async runLongPoll(useProxy: boolean): Promise<void> {
-    const base = endpoint(this.computer, "poll");
-    const framesUrl = endpoint(this.computer, "frames");
+    const base = computerEndpoint(this.computer, "poll");
+    const framesUrl = computerEndpoint(this.computer, "frames");
     const dispatcher = useProxy ? new EnvHttpProxyAgent() : new Agent();
     const outgoing: RelayFrame[] = [this.hello() as unknown as RelayFrame];
     let flushing = false;

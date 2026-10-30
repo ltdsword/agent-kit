@@ -3,6 +3,7 @@ import { API_PREFIX, CONNECTOR_ROUTES, LIMITS, MIN_PROTOCOL, PROTOCOL, type AckR
 import type { Context, Hono } from "hono";
 import type { HubDatabase } from "./db.ts";
 import type { ServerConfig } from "./config.ts";
+import type { NotificationOutbox } from "./notifier.ts";
 import { EventHub } from "./stream.ts";
 import { apiError, readBody, routePath } from "./http.ts";
 
@@ -11,13 +12,14 @@ export interface ApiDependencies {
   clock: () => number;
   config: ServerConfig;
   events: EventHub;
+  notifier?: NotificationOutbox;
 }
 
 const jsonHash = (value: string) => createHash("sha256").update(value).digest("hex");
 const iso = (clock: () => number) => new Date(clock()).toISOString();
 
 export function mountConnectorApi(app: Hono, deps: ApiDependencies): void {
-  const { db, clock, events } = deps;
+  const { db, clock, events, notifier } = deps;
   const route = (path: string) => `${API_PREFIX}${routePath(path)}`;
   const workspace = (id: string) => db.getWorkspace(id);
   const requireWorkspace = (c: Context, id: string) => {
@@ -84,6 +86,7 @@ export function mountConnectorApi(app: Hono, deps: ApiDependencies): void {
     if ("response" in body) return body.response;
     touch(ws);
     const sync = db.upsertDecisions(ws, body.value.decisions, clock());
+    if (sync.notificationsEnqueued) notifier?.notifyQueued();
     for (const ref of new Set([...sync.changed, ...sync.pruned])) {
       publish("decision", ws, ref);
       publish("history", ws, ref);
@@ -167,6 +170,7 @@ export function mountConnectorApi(app: Hono, deps: ApiDependencies): void {
     touch(ws);
     const command = db.ackCommand(ws, id, body.value, clock());
     if (!command) return apiError(c, "not_found", "command not found");
+    if (body.value.status === "FAILED" && db.enqueuePromptFailedNotification(ws, command, clock())) notifier?.notifyQueued();
     publish("command", ws, id);
     publish("history", ws, id);
     if (command.type === "answer" && command.run_id && command.decision_id) publish("decision", ws, `${command.run_id}/${command.decision_id}`);

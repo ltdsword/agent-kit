@@ -4,7 +4,7 @@ import type { Duplex } from "node:stream";
 import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Hono } from "hono";
 import { API_PREFIX, PROTOCOL_HEADER, validate, type RelayRequest } from "@agent-hub/protocol";
 import { createApp } from "../src/app.ts";
@@ -12,6 +12,7 @@ import { verifyAssertion } from "../src/auth.ts";
 import { HubDatabase } from "../src/db.ts";
 import type { ComputerConfig, ServerConfig } from "../src/config.ts";
 import { RelayClient } from "../src/relay.ts";
+import { NotificationOutbox } from "../src/notifier.ts";
 import { decisionStatus } from "../src/status.ts";
 import { EventHub } from "../src/stream.ts";
 
@@ -32,6 +33,7 @@ let app: ReturnType<typeof createApp>;
 let events: EventHub;
 let config: ServerConfig;
 let relayClients: RelayClient[];
+let notificationOutboxes: NotificationOutbox[];
 
 beforeEach(async () => {
   temp = await mkdtemp(join(tmpdir(), "hub-server-test-"));
@@ -45,11 +47,14 @@ beforeEach(async () => {
     ? { v: 1, sub: "alice", cid: computerId, rid: relayFrameId ?? "direct-test", exp: Math.floor(at / 1000) + 60 }
     : null });
   relayClients = [];
+  notificationOutboxes = [];
 });
 afterEach(async () => {
   for (const relay of relayClients) await relay.stop();
+  for (const notifier of notificationOutboxes) await notifier.stop();
   db?.close();
   await rm(temp, { recursive: true, force: true });
+  vi.useRealTimers();
 });
 
 async function req(path: string, options: { method?: string; token?: string; assertion?: string | null; body?: unknown; protocol?: string | null; origin?: string } = {}): Promise<Response> {
@@ -67,6 +72,20 @@ async function doHello(body?: unknown): Promise<{ response: Response; value?: an
   return { response, value: response.status === 200 ? await response.json() : undefined };
 }
 
+function attachNotifier(fetcher: any): NotificationOutbox {
+  const notifier = new NotificationOutbox(db, config, () => now, fetcher);
+  notificationOutboxes.push(notifier);
+  app = createApp({ db, config, clock: () => now, events, notifier, assertionVerifier: (token, relayFrameId, at) => token === testAssertion
+    ? { v: 1, sub: "alice", cid: computerId, rid: relayFrameId ?? "direct-test", exp: Math.floor(at / 1000) + 60 }
+    : null });
+  notifier.start();
+  return notifier;
+}
+
+async function putDecision(decision: any): Promise<Response> {
+  return req(`/agent/workspaces/${ws}/decisions`, { method: "PUT", token: connector, body: { decisions: [decision] } });
+}
+
 async function seed(): Promise<void> {
   const hello = await doHello();
   expect(hello.response.status).toBe(200);
@@ -81,6 +100,11 @@ function inboxDecision(base: any, id: number, localStatus: "PENDING" | "CANCELLE
     agent: "orchestrator", local_status: localStatus, answer: null, consumed_by: null,
     opened_at: new Date(Date.parse("2026-10-28T08:00:00Z") - (106 - id) * 1000).toISOString(),
     cancel_reason: localStatus === "CANCELLED" ? "closed" : null };
+}
+
+async function notificationDecision(overrides: Record<string, unknown> = {}): Promise<any> {
+  return { ...(await fixture<any>("Decision.repair-open.json")), run_id: "inbox", decision_id: "D7", kind: "question",
+    title: "A new question", opened_at: new Date(now).toISOString(), ...overrides };
 }
 
 function inboxDecisionDocument(decision: any): any {
@@ -661,4 +685,115 @@ it("treats an answered question as applied, since nothing consumes it", () => {
   const base = { local_status: "ANSWERED", consumed_by: null, answer: { channel: "hub" } } as never as Parameters<typeof decisionStatus>[0];
   expect(decisionStatus({ ...base, kind: "question" }, undefined).status).toBe("APPLIED");
   expect(decisionStatus({ ...base, kind: "blocker" }, undefined).status).toBe("DELIVERED");
+});
+
+it("sends a new pending inbox decision once after the 20 second outbox delay", async () => {
+  vi.useFakeTimers();
+  expect((await doHello()).response.status).toBe(200);
+  const send = vi.fn(async (_input: unknown, _init: any) => new Response(null, { status: 204 }));
+  attachNotifier(send);
+  expect((await putDecision(await notificationDecision())).status).toBe(204);
+  expect(send).not.toHaveBeenCalled();
+
+  now += 20_000;
+  await vi.advanceTimersByTimeAsync(20_000);
+
+  expect(send).toHaveBeenCalledOnce();
+  const request = JSON.parse(String(send.mock.calls[0][1]?.body));
+  expect(new URL(String(send.mock.calls[0][0])).pathname).toBe(`/api/v1/computers/${computerId}/notify`);
+  expect(request).toEqual({ items: [{ workspace_id: ws, workspace_name: "thrift-demo", kind: "question", run_id: "inbox", ref_id: "D7", title: "A new question" }] });
+});
+
+it("deduplicates a resynced decision and records answered or old decisions without sending", async () => {
+  vi.useFakeTimers();
+  expect((await doHello()).response.status).toBe(200);
+  const send = vi.fn(async (_input: unknown, _init: any) => new Response(null, { status: 204 }));
+  attachNotifier(send);
+  const pending = await notificationDecision();
+  expect((await putDecision(pending)).status).toBe(204);
+  now += 20_000;
+  await vi.advanceTimersByTimeAsync(20_000);
+  expect((await putDecision(pending)).status).toBe(204);
+
+  const answered = await notificationDecision({ decision_id: "D8", local_status: "ANSWERED", answer: {
+    choice: "A", label: "A", note: "", channel: "hub", by: "alice", at: new Date(now).toISOString(), quote: null, followup: null,
+  } });
+  const old = await notificationDecision({ decision_id: "D9", opened_at: new Date(now - 60 * 60_000 - 1).toISOString() });
+  expect((await req(`/agent/workspaces/${ws}/decisions`, { method: "PUT", token: connector, body: { decisions: [answered, old] } })).status).toBe(204);
+  now += 60_000;
+  await vi.advanceTimersByTimeAsync(60_000);
+
+  expect(send).toHaveBeenCalledOnce();
+  expect(Number(db.sql.prepare("SELECT COUNT(*) AS n FROM notifications WHERE workspace_id=?").get(ws)?.n)).toBe(2);
+  expect(Number(db.sql.prepare("SELECT COUNT(*) AS n FROM notifications WHERE workspace_id=? AND sent_at IS NULL").get(ws)?.n)).toBe(0);
+});
+
+it("batches a burst of three pending decisions into one request", async () => {
+  vi.useFakeTimers();
+  expect((await doHello()).response.status).toBe(200);
+  const send = vi.fn(async (_input: unknown, _init: any) => new Response(null, { status: 204 }));
+  attachNotifier(send);
+  const decisions = await Promise.all([1, 2, 3].map((id) => notificationDecision({
+    decision_id: `D${id}`, title: `Question ${id}`, ...(id === 3 ? { run_id: "r4", kind: "repair" } : {}),
+  })));
+  expect((await req(`/agent/workspaces/${ws}/decisions`, { method: "PUT", token: connector, body: { decisions } })).status).toBe(204);
+  now += 20_000;
+  await vi.advanceTimersByTimeAsync(20_000);
+
+  expect(send).toHaveBeenCalledOnce();
+  const items = JSON.parse(String(send.mock.calls[0][1]?.body)).items;
+  expect(items).toHaveLength(3);
+  expect(items).toContainEqual({ workspace_id: ws, workspace_name: "thrift-demo", kind: "decision", run_id: "r4", ref_id: "D3", title: "Question 3" });
+});
+
+it("enqueues a prompt_failed notification for a failed prompt ack", async () => {
+  vi.useFakeTimers();
+  expect((await doHello()).response.status).toBe(200);
+  const send = vi.fn(async (_input: unknown, _init: any) => new Response(null, { status: 204 }));
+  attachNotifier(send);
+  const prompt = await req(`/workspaces/${ws}/prompts`, { method: "POST", body: { text: "Check this" } });
+  expect(prompt.status).toBe(201);
+  const command = await prompt.json();
+  expect((await req(`/agent/workspaces/${ws}/commands/${command.id}/ack`, { method: "POST", token: connector,
+    body: { status: "FAILED", reason: "delivery failed" } })).status).toBe(204);
+  now += 20_000;
+  await vi.advanceTimersByTimeAsync(20_000);
+
+  expect(send).toHaveBeenCalledOnce();
+  expect(JSON.parse(String(send.mock.calls[0][1]?.body)).items).toEqual([
+    { workspace_id: ws, workspace_name: "thrift-demo", kind: "prompt_failed", run_id: null, ref_id: command.id, title: "" },
+  ]);
+});
+
+it("retries proxy failures every 60 seconds and drops an unsent item after one hour", async () => {
+  vi.useFakeTimers();
+  expect((await doHello()).response.status).toBe(200);
+  const send = vi.fn(async (_input: unknown, _init: any) => { throw new Error("proxy unreachable"); });
+  attachNotifier(send);
+  expect((await putDecision(await notificationDecision())).status).toBe(204);
+  now += 20_000;
+  await vi.advanceTimersByTimeAsync(20_000);
+  expect(send).toHaveBeenCalledOnce();
+
+  now += 60_000;
+  await vi.advanceTimersByTimeAsync(60_000);
+  expect(send).toHaveBeenCalledTimes(2);
+
+  now += 60 * 60_000;
+  await vi.advanceTimersByTimeAsync(60_000);
+  expect(send).toHaveBeenCalledTimes(2);
+  expect(Number(db.sql.prepare("SELECT sent_at FROM notifications WHERE workspace_id=? AND ref='decision:inbox/D7'").get(ws)?.sent_at)).toBeGreaterThan(0);
+});
+
+it("marks a notification sent when the proxy reports Zalo is not configured", async () => {
+  vi.useFakeTimers();
+  expect((await doHello()).response.status).toBe(200);
+  const send = vi.fn(async (_input: unknown, _init: any) => new Response(JSON.stringify({ error: { code: "zalo_not_configured" } }), { status: 503 }));
+  attachNotifier(send);
+  expect((await putDecision(await notificationDecision())).status).toBe(204);
+  now += 20_000;
+  await vi.advanceTimersByTimeAsync(20_000);
+
+  expect(send).toHaveBeenCalledOnce();
+  expect(Number(db.sql.prepare("SELECT COUNT(*) AS n FROM notifications WHERE workspace_id=? AND sent_at IS NULL").get(ws)?.n)).toBe(0);
 });

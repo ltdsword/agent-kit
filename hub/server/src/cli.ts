@@ -9,6 +9,7 @@ import { createApp } from "./app.ts";
 import { loadConfig } from "./config.ts";
 import { HubDatabase } from "./db.ts";
 import { createRelayClient, readRelayStatus } from "./relay.ts";
+import { NotificationOutbox } from "./notifier.ts";
 import { EventHub } from "./stream.ts";
 
 async function openDatabase() {
@@ -20,9 +21,11 @@ async function openDatabase() {
 async function serveHub(): Promise<void> {
   const { config, db } = await openDatabase();
   const events = new EventHub();
-  const app = createApp({ db, config, events });
+  const notifier = new NotificationOutbox(db, config, Date.now);
+  const app = createApp({ db, config, events, notifier });
   const relay = createRelayClient(app, db, config, events, Date.now);
   db.sweepFinishedRuns(Date.now(), config.runRetentionDays ?? 60);
+  notifier.start();
   if (relay) {
     relay.start();
     process.stdout.write("For a TLS-inspecting company proxy, enable system CAs with NODE_USE_SYSTEM_CA=1 or --use-system-ca.\n");
@@ -48,7 +51,7 @@ async function serveHub(): Promise<void> {
     clearInterval(offlineTimer);
     clearInterval(retentionTimer);
     const finish = () => {
-      server.close(() => db.close());
+      void notifier.stop().finally(() => server.close(() => db.close()));
       // Open streams and keep-alive sockets would otherwise hold shutdown for many seconds.
       (server as { closeAllConnections?: () => void }).closeAllConnections?.();
     };

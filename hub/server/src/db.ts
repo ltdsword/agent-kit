@@ -54,6 +54,14 @@ export class HubDatabase {
         throw error;
       }
     }
+    this.sql.exec(`CREATE TABLE IF NOT EXISTS notifications (
+      workspace_id TEXT NOT NULL REFERENCES workspaces(id),
+      ref TEXT NOT NULL,
+      created_at INTEGER NOT NULL,
+      sent_at INTEGER,
+      PRIMARY KEY (workspace_id, ref)
+    );
+    CREATE INDEX IF NOT EXISTS notifications_unsent ON notifications(sent_at, created_at);`);
     this.sql.prepare("INSERT INTO connector_keys (id, token_hash) VALUES (1, ?) ON CONFLICT(id) DO UPDATE SET token_hash = excluded.token_hash").run(connectorKeyHash);
   }
 
@@ -202,10 +210,11 @@ export class HubDatabase {
     return (row?.hash as string | undefined) ?? null;
   }
 
-  upsertDecisions(workspaceId: string, decisions: Decision[], now: number): { changed: string[]; pruned: string[]; deletedDocuments: string[] } {
+  upsertDecisions(workspaceId: string, decisions: Decision[], now: number): { changed: string[]; pruned: string[]; deletedDocuments: string[]; notificationsEnqueued: number } {
     const changed: string[] = [];
     const pruned: string[] = [];
     const deletedDocuments: string[] = [];
+    let notificationsEnqueued = 0;
     const statement = this.sql.prepare(`INSERT INTO decisions (workspace_id,run_id,decision_id,kind,task_id,agent,title,question,options,followup,recommend,local_status,answer,consumed_by,opened_at,updated_at,content_hash,body)
       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
       ON CONFLICT(workspace_id,run_id,decision_id) DO UPDATE SET kind=excluded.kind,task_id=excluded.task_id,agent=excluded.agent,title=excluded.title,question=excluded.question,options=excluded.options,followup=excluded.followup,recommend=excluded.recommend,local_status=excluded.local_status,answer=excluded.answer,consumed_by=excluded.consumed_by,opened_at=excluded.opened_at,updated_at=excluded.updated_at,content_hash=excluded.content_hash,body=excluded.body`);
@@ -218,6 +227,12 @@ export class HubDatabase {
       statement.run(workspaceId, decision.run_id, decision.decision_id, decision.kind, decision.task_id, decision.agent, decision.title,
         decision.question, JSON.stringify(decision.options), decision.followup ? JSON.stringify(decision.followup) : null, decision.recommend,
         decision.local_status, decision.answer ? JSON.stringify(decision.answer) : null, decision.consumed_by, decision.opened_at, iso(now), digest, JSON.stringify(decision));
+      if (decision.local_status === "PENDING") {
+        const openedAt = Date.parse(decision.opened_at);
+        const recent = Number.isFinite(openedAt) && openedAt >= now - 60 * 60_000 && openedAt <= now;
+        notificationsEnqueued += Number(this.sql.prepare(`INSERT OR IGNORE INTO notifications (workspace_id,ref,created_at,sent_at)
+          VALUES (?,?,?,?)`).run(workspaceId, `decision:${decision.run_id}/${decision.decision_id}`, now, recent ? null : now).changes);
+      }
     }
     if (decisions.some((decision) => decision.run_id === "inbox")) {
       const inbox = this.sql.prepare("SELECT decision_id,local_status FROM decisions WHERE workspace_id=? AND run_id='inbox' ORDER BY opened_at DESC,decision_id DESC")
@@ -232,7 +247,27 @@ export class HubDatabase {
       }
     }
     if (decisions.length) this.audit(workspaceId, "connector", "decisions.synced", null, { count: decisions.length }, now);
-    return { changed, pruned, deletedDocuments };
+    return { changed, pruned, deletedDocuments, notificationsEnqueued };
+  }
+
+  enqueuePromptFailedNotification(workspaceId: string, command: UserCommand, now: number): boolean {
+    if (command.status !== "FAILED" || (command.type !== "prompt" && command.type !== "reply")) return false;
+    return Number(this.sql.prepare(`INSERT OR IGNORE INTO notifications (workspace_id,ref,created_at,sent_at)
+      VALUES (?,?,?,NULL)`).run(workspaceId, `command:${command.id}`, now).changes) > 0;
+  }
+
+  listUnsentNotifications(limit = 50): Row[] {
+    return this.sql.prepare(`SELECT workspace_id,ref,created_at FROM notifications WHERE sent_at IS NULL
+      ORDER BY created_at,workspace_id,ref LIMIT ?`).all(limit) as Row[];
+  }
+
+  markNotificationSent(workspaceId: string, ref: string, now: number): void {
+    this.sql.prepare("UPDATE notifications SET sent_at=? WHERE workspace_id=? AND ref=? AND sent_at IS NULL").run(now, workspaceId, ref);
+  }
+
+  dropExpiredNotifications(cutoff: number, now: number): number {
+    const result = this.sql.prepare("UPDATE notifications SET sent_at=? WHERE sent_at IS NULL AND created_at <= ?").run(now, cutoff);
+    return Number(result.changes);
   }
 
   listDecisionBodies(workspaceId: string): Decision[] {

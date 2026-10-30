@@ -12,6 +12,7 @@ import { EventHub } from "./stream.ts";
 import { mountConnectorApi } from "./connector-api.ts";
 import { mountUserApi } from "./user-api.ts";
 import type { AssertionVerifier } from "./auth.ts";
+import type { NotificationOutbox } from "./notifier.ts";
 
 export interface AppDependencies {
   db: HubDatabase;
@@ -19,6 +20,7 @@ export interface AppDependencies {
   config: ServerConfig;
   events?: EventHub;
   assertionVerifier?: AssertionVerifier;
+  notifier?: NotificationOutbox;
 }
 
 const mimeTypes: Record<string, string> = {
@@ -63,7 +65,7 @@ export function createApp(deps: AppDependencies): Hono {
   });
   app.use(`${API_PREFIX}/agent/*`, connectorAuth);
 
-  const apiDeps = { db: deps.db, clock, config: deps.config, events, assertionVerifier: deps.assertionVerifier };
+  const apiDeps = { db: deps.db, clock, config: deps.config, events, assertionVerifier: deps.assertionVerifier, notifier: deps.notifier };
   mountConnectorApi(app, apiDeps);
   mountUserApi(app, apiDeps);
 
