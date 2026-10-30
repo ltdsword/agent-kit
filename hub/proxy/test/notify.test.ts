@@ -283,14 +283,14 @@ describe("Zalo notification proxy", () => {
     expect(sent.calls).toHaveLength(1);
   });
 
-  it("replies to unknown private text and redacts token and code-like keys from logs", async () => {
+  it("stays silent on unknown private text and redacts token and code-like keys from logs", async () => {
     const db = setupDatabase();
     const env = envFor(db);
     const sent = resultNotifier();
     await handleZaloWebhook(webhookRequest({
       message: { chat: { id: "private-chat", chat_type: "PRIVATE" }, text: "hello" },
     }), env, { notifier: sent.notifier, now: () => FIXED_NOW });
-    expect(sent.calls[0].text).toBe("Send the 6-digit code shown in Agent Hub → Notifications.");
+    expect(sent.calls).toHaveLength(0);
 
     const log = vi.spyOn(console, "warn").mockImplementation(() => {});
     const token = BASE_ENV.ZALO_BOT_TOKEN;

@@ -429,10 +429,7 @@ export async function handleZaloWebhook(
         return new Response(null, { status: 200 });
       }
     }
-
-    if (incoming.chatType === "private") {
-      await sendWebhookReply(env, incoming.chatId, "Send the 6-digit code shown in Agent Hub → Notifications.", dependencies);
-    }
+    // Anything that is not a live code gets no reply: every bot message counts against the monthly quota.
   } catch {
     console.warn(JSON.stringify({ event: "zalo_webhook_processing_failed" }));
   }
