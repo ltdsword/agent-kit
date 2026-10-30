@@ -408,6 +408,10 @@ describe("Zalo notification proxy", () => {
       url: "https://proxy.example/api/v1/zalo/webhook",
       secret_token: BASE_ENV.ZALO_WEBHOOK_SECRET,
     });
+
+    await handleZaloSetup(new Request("https://proxy.example/admin/zalo/setup"),
+      { ...env, ZALO_WEBHOOK_URL: "https://web.example/api/zalo-webhook" }, fetcher as typeof fetch);
+    expect(JSON.parse(String(fetcher.mock.calls[1][1]?.body)).url).toBe("https://web.example/api/zalo-webhook");
   });
 
   it("uses bounded, token-safe Zalo sends and classifies rejection", async () => {

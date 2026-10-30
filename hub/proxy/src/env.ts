@@ -9,4 +9,5 @@ export interface Env {
   ZALO_BOT_LINK?: string;
   HUB_WEB_URL?: string;
   ZALO_MONTHLY_LIMIT?: string;
+  ZALO_WEBHOOK_URL?: string;
 }

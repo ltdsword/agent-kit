@@ -240,7 +240,12 @@ website; `ZALO_MONTHLY_LIMIT` optionally overrides the default 3,000 messages. N
 available when the token, webhook secret and bot link are all configured.
 
 After deployment, call `POST /api/v1/admin/zalo/setup` with the admin key. The proxy registers
-`<proxy origin>/api/v1/zalo/webhook` with Zalo and keeps the bot token on the proxy. Users open
+`<proxy origin>/api/v1/zalo/webhook` with Zalo and keeps the bot token on the proxy. Zalo's
+webhook client sends a `Java/1.8` User-Agent, which Cloudflare's Browser Integrity Check rejects on
+`*.workers.dev` (error 1010). In that case deploy the website with its relay function
+(`hub/web/api/zalo-webhook.js`, deployment env `HUB_PROXY_URL=<proxy origin>`) and set
+`ZALO_WEBHOOK_URL=<website>/api/zalo-webhook` on the proxy; setup then registers the relay, which
+forwards the body and secret header unchanged. The bot replies only to a valid code. Users open
 Notifications in their profile, follow the bot link or scan its QR code, then send the six-digit
 code. A group can be linked by adding the bot and sending that code in the group. Codes expire
 after ten minutes; creating another replaces the user's previous code.

@@ -487,7 +487,8 @@ export async function handleZaloSetup(
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
-        url: `${new URL(request.url).origin}/api/v1/zalo/webhook`,
+        // ZALO_WEBHOOK_URL points Zalo at a relay when the proxy's own host blocks Zalo's User-Agent.
+        url: env.ZALO_WEBHOOK_URL?.trim() || `${new URL(request.url).origin}/api/v1/zalo/webhook`,
         secret_token: env.ZALO_WEBHOOK_SECRET,
       }),
       redirect: "manual",
