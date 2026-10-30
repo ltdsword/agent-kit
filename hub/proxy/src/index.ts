@@ -2,6 +2,15 @@ import { LIMITS } from "../../protocol/src/api.ts";
 import { bearerToken } from "./auth.ts";
 import { ComputerRelay } from "./computer-relay.ts";
 import {
+  handleComputerNotify,
+  handleLinkCode,
+  handleNotificationStatus,
+  handleTestNotification,
+  handleUnlink,
+  handleZaloSetup,
+  handleZaloWebhook,
+} from "./notify.ts";
+import {
   constantTimeEqualText,
   decodeBase64Url,
   derivePublicKey,
@@ -369,12 +378,16 @@ function apiVersionError(request: Request): Response | null {
 }
 
 async function handleComputerRoute(request: Request, env: Env, url: URL): Promise<Response | null> {
-  const match = /^\/api\/v1\/computers\/([^/]+)\/(connect|poll|frames)$/.exec(url.pathname);
+  const match = /^\/api\/v1\/computers\/([^/]+)\/(connect|poll|frames|notify)$/.exec(url.pathname);
   if (!match) return null;
   let computerId: string;
   try { computerId = decodeURIComponent(match[1]); } catch { return error("not_found", "Computer not found.", 404); }
   if (!/^c_[a-z2-7]{16}$/.test(computerId)) return error("not_found", "Computer not found.", 404);
   if (!await computerAuthorized(request, env, computerId)) return error("unauthorized", "A valid computer key is required.", 401);
+  if (match[2] === "notify") {
+    if (request.method !== "POST") return error("bad_request", "Use POST.", 405);
+    return handleComputerNotify(request, env, computerId);
+  }
   return env.RELAY.get(env.RELAY.idFromName(computerId)).fetch(request);
 }
 
@@ -505,8 +518,14 @@ async function handleWorkspaceRoute(request: Request, env: Env, session: Session
 async function handleUserRoutes(request: Request, env: Env, url: URL): Promise<Response | null> {
   const { pathname } = url;
   if (request.method === "POST" && pathname === "/api/v1/auth/login") return handleLogin(request, env);
+  if (request.method === "POST" && pathname === "/api/v1/zalo/webhook") return handleZaloWebhook(request, env);
 
   if (request.method === "POST" && pathname === "/api/v1/admin/users") return handleCreateUser(request, env);
+  if (request.method === "POST" && pathname === "/api/v1/admin/zalo/setup") {
+    const denied = await requireAdmin(request, env);
+    if (denied) return denied;
+    return handleZaloSetup(request, env);
+  }
   const reset = /^\/api\/v1\/admin\/users\/([^/]+)\/reset-password$/.exec(pathname);
   if (request.method === "POST" && reset) {
     let username: string;
@@ -521,6 +540,10 @@ async function handleUserRoutes(request: Request, env: Env, url: URL): Promise<R
   const requiresSession = pathname === "/api/v1/auth/logout"
     || pathname === "/api/v1/auth/password"
     || pathname === "/api/v1/me"
+    || pathname === "/api/v1/notifications"
+    || pathname === "/api/v1/notifications/zalo/code"
+    || pathname === "/api/v1/notifications/test"
+    || /^\/api\/v1\/notifications\/targets\/[^/]+$/.test(pathname)
     || pathname === "/api/v1/workspaces"
     || pathname.startsWith("/api/v1/workspaces/")
     || /^\/api\/v1\/computers\/[^/]+\/stream$/.test(pathname);
@@ -534,6 +557,19 @@ async function handleUserRoutes(request: Request, env: Env, url: URL): Promise<R
   if (request.method === "POST" && pathname === "/api/v1/auth/logout") return handleLogout(request, env);
   if (request.method === "POST" && pathname === "/api/v1/auth/password") return handlePasswordChange(request, env);
   if (request.method === "GET" && pathname === "/api/v1/me") return handleMe(session, env);
+  if (request.method === "GET" && pathname === "/api/v1/notifications") return handleNotificationStatus(env, session.id);
+  if (request.method === "POST" && pathname === "/api/v1/notifications/zalo/code") {
+    return handleLinkCode(env, session.id);
+  }
+  if (request.method === "POST" && pathname === "/api/v1/notifications/test") {
+    return handleTestNotification(env, session.id);
+  }
+  const target = /^\/api\/v1\/notifications\/targets\/([^/]+)$/.exec(pathname);
+  if (request.method === "DELETE" && target) {
+    let targetId: string;
+    try { targetId = decodeURIComponent(target[1]); } catch { return error("not_found", "Notification target not found.", 404); }
+    return handleUnlink(env, session.id, targetId);
+  }
   if (request.method === "GET" && pathname === "/api/v1/workspaces") return handleWorkspaces(request, env, session, url);
 
   const streamResponse = await handleComputerStream(request, env, session, url);
@@ -575,11 +611,14 @@ export { ComputerRelay };
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
-    if (request.method === "OPTIONS") return withCors(noContent(), request, env);
+    const isWebhook = new URL(request.url).pathname === "/api/v1/zalo/webhook";
+    if (request.method === "OPTIONS") return isWebhook ? noContent() : withCors(noContent(), request, env);
     try {
-      return withCors(await route(request, env), request, env);
+      const response = await route(request, env);
+      return isWebhook ? response : withCors(response, request, env);
     } catch {
-      return withCors(error("internal_error", "Internal server error.", 500), request, env);
+      const response = error("internal_error", "Internal server error.", 500);
+      return isWebhook ? response : withCors(response, request, env);
     }
   },
 };

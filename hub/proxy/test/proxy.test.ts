@@ -821,4 +821,26 @@ describe("protocol-v2 proxy", () => {
     expect(spike.status).toBe(404);
     expect((await readJson(spike, "ApiError")).error.code).toBe("not_found");
   });
+
+  it("authenticates notification status and computer notification routes", async () => {
+    const status = await fetch(`${baseUrl}/api/v1/notifications`, { headers: headers() });
+    expect(status.status).toBe(401);
+    expect((await readJson(status, "ApiError")).error.code).toBe("unauthorized");
+
+    const notify = await fetch(`${baseUrl}/api/v1/computers/${computer.id}/notify`, {
+      method: "POST",
+      headers: headers("not-the-computer-key"),
+      body: JSON.stringify({ items: [{ invalid: true }] }),
+    });
+    expect(notify.status).toBe(401);
+    expect((await readJson(notify, "ApiError")).error.code).toBe("unauthorized");
+
+    const webhook = await fetch(`${baseUrl}/api/v1/zalo/webhook`, {
+      method: "POST",
+      headers: { Origin: "http://localhost:5173", "Content-Type": "application/json" },
+      body: "{}",
+    });
+    expect(webhook.status).toBe(401);
+    expect(webhook.headers.get("Access-Control-Allow-Origin")).toBeNull();
+  });
 });

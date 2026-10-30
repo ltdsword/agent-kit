@@ -162,6 +162,13 @@ Workspace routes under `/api/v1/workspaces/:ws/...` are relayed to the selected 
 | `GET /api/v1/computers/:c/poll?wait=:seconds` | → `RelayPollResponse` | Computer key |
 | `POST /api/v1/computers/:c/frames` | `RelayFramesRequest` → `204` | Computer key |
 | `GET /api/v1/computers/:c/stream` | `text/event-stream` of `StreamEvent` | Session token |
+| `POST /api/v1/computers/:c/notify` | `NotifyRequest` → `204` | Computer key |
+| `GET /api/v1/notifications` | → `NotificationStatus` | Session token |
+| `POST /api/v1/notifications/zalo/code` | → `ZaloLinkCode` | Session token |
+| `POST /api/v1/notifications/test` | → `204`; `409 no_targets` if no chats are linked | Session token |
+| `DELETE /api/v1/notifications/targets/:target` | → `204` | Session token |
+| `POST /api/v1/zalo/webhook` | Zalo update → `200` | `X-Bot-Api-Secret-Token` |
+| `POST /api/v1/admin/zalo/setup` | → `{ok, outcome, hint}` from webhook verification | Admin key |
 
 The browser's remaining workspace routes are `GET /workspaces`, `GET /workspaces/:ws`,
 `PATCH /workspaces/:ws`, and the decisions, commands, documents and history routes under
@@ -224,6 +231,28 @@ its owner, and checks `rid` against the relay frame ID.
 
 Runs are stored by the backend and upserted by `(workspace, run_id)`. Finished runs are deleted 60
 days after finishing.
+
+### 6.3 Zalo notifications
+
+Each proxy install uses its own Zalo Bot. Set `ZALO_BOT_TOKEN` and `ZALO_WEBHOOK_SECRET` as
+Worker secrets, and set `ZALO_BOT_LINK` to the bot's share link. `HUB_WEB_URL` points to the
+website; `ZALO_MONTHLY_LIMIT` optionally overrides the default 3,000 messages. Notifications are
+available when the token, webhook secret and bot link are all configured.
+
+After deployment, call `POST /api/v1/admin/zalo/setup` with the admin key. The proxy registers
+`<proxy origin>/api/v1/zalo/webhook` with Zalo and keeps the bot token on the proxy. Users open
+Notifications in their profile, follow the bot link or scan its QR code, then send the six-digit
+code. A group can be linked by adding the bot and sending that code in the group. Codes expire
+after ten minutes; creating another replaces the user's previous code.
+
+`NotifyRequest` batches of up to 50 items become one plain-text message per linked chat. Question
+links open the inbox decision, run decision links open that decision, and failed prompt links open
+the workspace. Titles are limited to 120 characters. Messages stay within Zalo's 2,000-character
+limit by dropping trailing items and adding `+N more in the hub`. Computer notification sends
+retry transient failures twice; rejected chats are marked broken. The proxy reserves 50 messages
+from the monthly limit and records successful sends. The computer route still returns `204` when a
+Zalo delivery fails so the backend does not retry indefinitely. A Durable Object alarm sends one
+offline alert after a computer has stayed offline for ten minutes and is cleared when it reconnects.
 
 ## 7. Live updates
 

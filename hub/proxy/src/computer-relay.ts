@@ -1,5 +1,6 @@
 import { LIMITS } from "../../protocol/src/api.ts";
 import type { Env } from "./env.ts";
+import { notifyComputerOffline } from "./notify.ts";
 
 type Frame = Record<string, unknown> & { type: string };
 type Pending = {
@@ -78,6 +79,7 @@ function validResponseFrame(frame: Frame): boolean {
 export class ComputerRelay {
   private readonly state: DurableObjectState;
   private readonly db: D1Database;
+  private readonly bindings: Env;
   private readonly pending = new Map<string, Pending>();
   private readonly queuedFrames: string[] = [];
   private readonly pollWaiters = new Set<() => void>();
@@ -88,6 +90,7 @@ export class ComputerRelay {
   constructor(ctx: DurableObjectState, bindings: Env, now: () => number = Date.now) {
     this.state = ctx;
     this.db = bindings.DB;
+    this.bindings = bindings;
     this.now = now;
   }
 
@@ -147,7 +150,7 @@ export class ComputerRelay {
     await this.processFrame(frame, socket);
   }
 
-  webSocketClose(socket: WebSocket): void {
+  async webSocketClose(socket: WebSocket): Promise<void> {
     for (const [id, pending] of this.pending) {
       if (pending.socket !== socket) continue;
       clearTimeout(pending.timer);
@@ -158,10 +161,27 @@ export class ComputerRelay {
         pending.resolve(error("computer_offline", "Computer disconnected.", 503));
       }
     }
+    await this.scheduleOfflineAlarm();
   }
 
-  webSocketError(socket: WebSocket): void {
-    this.webSocketClose(socket);
+  async webSocketError(socket: WebSocket): Promise<void> {
+    await this.webSocketClose(socket);
+  }
+
+  async alarm(): Promise<void> {
+    const computerId = await this.knownComputerId();
+    if (!computerId) return;
+    if (await this.isOnline()) {
+      if (!this.liveSocket()) await this.state.storage.setAlarm?.(this.now() + 10 * 60_000 + 40_000);
+      return;
+    }
+    if (await this.state.storage.get<boolean>("offline_notified")) return;
+    await this.state.storage.put("offline_notified", true);
+    try {
+      await notifyComputerOffline(this.bindings, computerId);
+    } catch {
+      console.warn(JSON.stringify({ event: "computer_offline_notification_failed" }));
+    }
   }
 
   private async isOnline(): Promise<boolean> {
@@ -181,16 +201,17 @@ export class ComputerRelay {
       } else {
         try { socket.close(4001, "stale"); } catch {}
         // Closing it ourselves may not fire webSocketClose, so fail what was sent on it now.
-        this.webSocketClose(socket);
+        void this.webSocketClose(socket);
       }
     }
     return undefined;
   }
 
-  private connect(request: Request): Response {
+  private async connect(request: Request): Promise<Response> {
     if (request.method !== "GET" || request.headers.get("Upgrade")?.toLowerCase() !== "websocket") {
       return error("bad_request", "A WebSocket upgrade is required.", 426);
     }
+    await this.clearOfflineAlarm();
     for (const socket of this.state.getWebSockets()) {
       try { socket.close(4000, "replaced"); } catch {}
     }
@@ -262,10 +283,12 @@ export class ComputerRelay {
     const requested = Number(url.searchParams.get("wait") ?? LIMITS.relayPollSeconds);
     if (!Number.isFinite(requested) || requested < 0) return error("bad_request", "wait must be a non-negative number.", 400);
     const waitSeconds = Math.min(Math.floor(requested), LIMITS.relayPollSeconds);
+    await this.clearOfflineAlarm();
     await this.touchComputer(computerId);
     await this.state.storage.put("last_poll_at", this.now());
     if (this.queuedFrames.length === 0 && waitSeconds > 0) await this.waitForPoll(Math.min(waitSeconds * 1000, LIMITS.relayPollSeconds * 1000));
     const frames = this.queuedFrames.splice(0, 50).map((encoded) => JSON.parse(encoded));
+    await this.scheduleOfflineAlarm();
     return json({ frames });
   }
 
@@ -279,6 +302,7 @@ export class ComputerRelay {
     if (body.frames.some((frame) => frameBytes(frame) > LIMITS.relayFrameBytes)) {
       return error("payload_too_large", "Relay frames must be at most 900 KB.", 413);
     }
+    await this.clearOfflineAlarm();
     await this.touchComputer(computerId);
     for (const frame of body.frames) {
       if (!isRecord(frame) || typeof frame.type !== "string" || !validResponseFrame(frame as Frame)) {
@@ -288,11 +312,12 @@ export class ComputerRelay {
       if (frame.type === "hello") {
         for (const socket of this.state.getWebSockets()) {
           try { socket.close(4000, "replaced"); } catch {}
-          this.webSocketClose(socket);
+          await this.webSocketClose(socket);
         }
       }
       await this.processFrame(frame);
     }
+    await this.scheduleOfflineAlarm();
     return new Response(null, { status: 204 });
   }
 
@@ -388,6 +413,16 @@ export class ComputerRelay {
   private async touchComputer(computerId: string): Promise<void> {
     await this.db.prepare("UPDATE computers SET last_seen_at = ? WHERE id = ?")
       .bind(new Date().toISOString(), computerId).run();
+  }
+
+  private async clearOfflineAlarm(): Promise<void> {
+    await this.state.storage.deleteAlarm?.();
+    await this.state.storage.put("offline_notified", false);
+  }
+
+  private async scheduleOfflineAlarm(): Promise<void> {
+    if (this.liveSocket()) return;
+    await this.state.storage.setAlarm?.(this.now() + 10 * 60_000);
   }
 
   private async waitForPoll(timeoutMs: number): Promise<void> {
