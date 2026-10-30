@@ -103,12 +103,15 @@ export function NeedsYouSection({ workspace, compact = false, onMore }: {
         )}
         {visible.map((d) => (
           <Link key={`${d.runId}/${d.id}`} className="row" to={decisionPath(d)} style={{ minHeight: 64 }}>
-            <span className="t-small mono" style={{ whiteSpace: 'nowrap' }}>Run {d.runId}</span>
-            <span className="mono" style={{ fontWeight: 600, width: 28 }}>{d.id}</span>
-            <KindChip kind={d.kind} />
-            <span style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', gap: 2 }}>
+            <span className="mono" style={{ fontWeight: 600, width: 28, flex: 'none' }}>{d.id}</span>
+            {/* Run and kind sit on the wrapping meta line so the row fits a phone width. */}
+            <span style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', gap: 4 }}>
               <span className="trunc" style={{ fontWeight: 600 }}>{d.title}</span>
-              {d.answer && <span className="meta"><span>{d.answer.by ?? d.answer.channel}</span><span className="sep" /><span>{d.answer.choice}: {d.answer.label}</span></span>}
+              <span className="meta">
+                <span className="mono" style={{ whiteSpace: 'nowrap' }}>Run {d.runId}</span>
+                <KindChip kind={d.kind} />
+                {d.answer && <><span>{d.answer.by ?? d.answer.channel}</span><span className="trunc">{d.answer.choice}: {d.answer.label}</span></>}
+              </span>
             </span>
             <StatusChip look={DECISION_STATUS[d.status]} />
             <Icon name="chevron-right" style={{ color: 'var(--text-3)' }} />

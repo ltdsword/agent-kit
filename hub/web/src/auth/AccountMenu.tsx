@@ -69,19 +69,19 @@ export function AccountMenu() {
             </span>
           </div>
           <p className="t-small">Session ends {expires.toLocaleDateString('en-GB', { day: 'numeric', month: 'short' })} at {hhmm(expiresAt)}, or when you sign out.</p>
+          <Link className="btn btn-block" role="menuitem" to="/account/password" onClick={() => setOpen(false)}>
+            Change password
+          </Link>
           {notificationStatus?.zalo_configured && (
-            <button type="button" className="btn btn-block" role="menuitem" onClick={() => {
+            <button type="button" className="btn btn-block" role="menuitem" style={{ position: 'relative' }} onClick={() => {
               setOpen(false);
               setNotificationsOpen(true);
             }}>
               <Icon name="bell" />Notifications
               <span aria-label={notificationStatus.targets.length > 0 ? 'Connected' : 'Not connected'} title={notificationStatus.targets.length > 0 ? 'Connected' : 'Not connected'}
-                style={{ width: 8, height: 8, borderRadius: '50%', background: notificationStatus.targets.length > 0 ? 'var(--success, #2eaa66)' : 'var(--text-muted, #888)', marginLeft: 'auto', flex: 'none' }} />
+                style={{ width: 8, height: 8, borderRadius: '50%', background: notificationStatus.targets.length > 0 ? 'var(--success, #2eaa66)' : 'var(--text-muted, #888)', position: 'absolute', right: 14, top: '50%', transform: 'translateY(-50%)' }} />
             </button>
           )}
-          <Link className="btn btn-block" role="menuitem" to="/account/password" onClick={() => setOpen(false)}>
-            Change password
-          </Link>
           <button type="button" className="btn btn-block" role="menuitem" onClick={() => client.signOut()}>
             <Icon name="power" />Sign out
           </button>
