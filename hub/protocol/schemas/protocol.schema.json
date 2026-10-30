@@ -489,6 +489,48 @@
       "type": "object", "additionalProperties": false, "required": ["username", "password"],
       "properties": {"username": {"$ref": "#/$defs/Username"}, "password": {"type": "string", "minLength": 20, "maxLength": 64}}
     },
+    "NotifyKind": {"enum": ["question", "decision", "prompt_failed"]},
+    "NotifyItem": {
+      "description": "One thing the user should know about; the backend sends batches to the proxy, which tells the user's linked Zalo chats.",
+      "type": "object", "additionalProperties": false, "required": ["workspace_id", "workspace_name", "kind", "run_id", "ref_id", "title"],
+      "properties": {
+        "workspace_id": {"$ref": "#/$defs/WorkspaceId"},
+        "workspace_name": {"type": "string", "minLength": 1, "maxLength": 200},
+        "kind": {"$ref": "#/$defs/NotifyKind"},
+        "run_id": {"type": ["string", "null"], "maxLength": 200, "description": "run of the decision; null for prompt_failed"},
+        "ref_id": {"type": "string", "minLength": 1, "maxLength": 200, "description": "decision id (Dn) or command id"},
+        "title": {"type": "string", "maxLength": 500}
+      }
+    },
+    "NotifyRequest": {
+      "type": "object", "additionalProperties": false, "required": ["items"],
+      "properties": {"items": {"type": "array", "minItems": 1, "maxItems": 50, "items": {"$ref": "#/$defs/NotifyItem"}}}
+    },
+    "NotificationTarget": {
+      "type": "object", "additionalProperties": false, "required": ["id", "channel", "chat_type", "display_name", "linked_at", "broken"],
+      "properties": {
+        "id": {"type": "string", "minLength": 1, "maxLength": 100, "description": "opaque target id (not the Zalo chat id)"},
+        "channel": {"enum": ["zalo"]},
+        "chat_type": {"enum": ["private", "group"]},
+        "display_name": {"type": ["string", "null"], "maxLength": 200},
+        "linked_at": {"$ref": "#/$defs/Timestamp"},
+        "broken": {"type": "boolean", "description": "the last send was refused (bot blocked or chat gone); reconnect to fix"}
+      }
+    },
+    "NotificationStatus": {
+      "type": "object", "additionalProperties": false, "required": ["zalo_configured", "bot_link", "targets", "sent_this_month", "monthly_limit"],
+      "properties": {
+        "zalo_configured": {"type": "boolean"},
+        "bot_link": {"type": ["string", "null"], "maxLength": 500, "description": "link that opens the bot chat in Zalo; the web shows it as a QR code and an Open in Zalo button"},
+        "targets": {"type": "array", "items": {"$ref": "#/$defs/NotificationTarget"}},
+        "sent_this_month": {"type": "integer", "minimum": 0},
+        "monthly_limit": {"type": "integer", "minimum": 0}
+      }
+    },
+    "ZaloLinkCode": {
+      "type": "object", "additionalProperties": false, "required": ["code", "expires_at"],
+      "properties": {"code": {"type": "string", "pattern": "^[0-9]{6}$"}, "expires_at": {"$ref": "#/$defs/Timestamp"}}
+    },
     "ComputerRegisterRequest": {
       "type": "object", "additionalProperties": false, "required": ["username", "password", "name"],
       "properties": {"username": {"$ref": "#/$defs/Username"}, "password": {"type": "string"}, "name": {"type": "string", "minLength": 1, "maxLength": 64}}

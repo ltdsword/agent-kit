@@ -35,6 +35,7 @@ export type CommandStatus = "QUEUED" | "HELD" | "DELIVERED" | "REJECTED" | "FAIL
 export type AckStatus = "DELIVERED" | "HELD" | "REJECTED" | "FAILED";
 export type DocumentKind = "final_report" | "final_diff" | "decision" | "research" | "plan" | "review" | "other";
 export type DocumentFormat = "markdown" | "diff" | "text";
+export type NotifyKind = "question" | "decision" | "prompt_failed";
 
 /**
  * Single source of truth for the connector API (agentctl <-> backend), the browser API (web UI <-> proxy), and the relay frames (proxy <-> backend). Uses only this JSON Schema subset so the stdlib Python validator can check it: type (string or list), enum, const, required, properties, additionalProperties (boolean or schema), items, minItems, maxItems, minLength, maxLength, pattern, minimum, maximum, $ref to #/$defs/*, anyOf (only for nullable refs). No oneOf/allOf/format.
@@ -516,6 +517,58 @@ export interface AdminUserRequest {
 export interface AdminUserResponse {
   username: Username;
   password: string;
+}
+/**
+ * One thing the user should know about; the backend sends batches to the proxy, which tells the user's linked Zalo chats.
+ */
+export interface NotifyItem {
+  workspace_id: WorkspaceId;
+  workspace_name: string;
+  kind: NotifyKind;
+  /**
+   * run of the decision; null for prompt_failed
+   */
+  run_id: string | null;
+  /**
+   * decision id (Dn) or command id
+   */
+  ref_id: string;
+  title: string;
+}
+export interface NotifyRequest {
+  /**
+   * @minItems 1
+   * @maxItems 50
+   */
+  items: [NotifyItem, ...NotifyItem[]];
+}
+export interface NotificationTarget {
+  /**
+   * opaque target id (not the Zalo chat id)
+   */
+  id: string;
+  channel: "zalo";
+  chat_type: "private" | "group";
+  display_name: string | null;
+  linked_at: Timestamp;
+  /**
+   * the last send was refused (bot blocked or chat gone); reconnect to fix
+   */
+  broken: boolean;
+}
+export interface NotificationStatus {
+  zalo_configured: boolean;
+  /**
+   * link that opens the bot chat in Zalo; the web shows it as a QR code and an Open in Zalo button
+   */
+  bot_link: string | null;
+  targets: NotificationTarget[];
+  sent_this_month: number;
+  monthly_limit: number;
+}
+export interface ZaloLinkCode {
+  code: string;
+  expires_at: Timestamp;
 }
 export interface ComputerRegisterRequest {
   username: Username;

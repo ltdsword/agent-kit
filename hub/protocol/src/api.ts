@@ -95,6 +95,7 @@ export const USER_ROUTES = {
 export const ADMIN_ROUTES = {
   createUser:    { method: "POST", path: "/admin/users", body: "AdminUserRequest", res: "AdminUserResponse" },
   resetPassword: { method: "POST", path: "/admin/users/:username/reset-password", res: "AdminUserResponse" },
+  zaloSetup:     { method: "POST", path: "/admin/zalo/setup", res: "{ok:boolean, outcome:string|null, hint:string|null}" },
 } as const satisfies Record<string, Route>;
 
 /** Computer routes: registration is unauthenticated; connect uses a computer key. */
@@ -103,4 +104,14 @@ export const COMPUTER_ROUTES = {
   connect:  { method: "GET", path: "/computers/:c/connect", res: "WebSocket" },
   poll:     { method: "GET", path: "/computers/:c/poll?wait=:seconds", res: "RelayPollResponse" },
   frames:   { method: "POST", path: "/computers/:c/frames", body: "RelayFramesRequest", res: "204" },
+  notify:   { method: "POST", path: "/computers/:c/notify", body: "NotifyRequest", res: "204" },
+} as const satisfies Record<string, Route>;
+
+/** Notification routes on the proxy: session auth, except the Zalo webhook (X-Bot-Api-Secret-Token). */
+export const NOTIFY_ROUTES = {
+  status:   { method: "GET",    path: "/notifications",                 res: "NotificationStatus" },
+  linkCode: { method: "POST",   path: "/notifications/zalo/code",       res: "ZaloLinkCode" },
+  test:     { method: "POST",   path: "/notifications/test",            res: "204" },
+  unlink:   { method: "DELETE", path: "/notifications/targets/:target", res: "204" },
+  webhook:  { method: "POST",   path: "/zalo/webhook",                  body: "Zalo Bot update", res: "200" },
 } as const satisfies Record<string, Route>;
