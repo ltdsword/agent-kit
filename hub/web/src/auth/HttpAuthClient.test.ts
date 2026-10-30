@@ -81,4 +81,42 @@ describe('HttpAuthClient', () => {
       body: JSON.stringify({ current: 'wrong', new: 'a sufficiently long password' }),
     }));
   });
+
+  it('calls notification routes with the session token', async () => {
+    const status = {
+      zalo_configured: true,
+      bot_link: 'https://zalo.me/demo-bot',
+      targets: [],
+      sent_this_month: 3,
+      monthly_limit: 3000,
+    };
+    const code = { code: '123456', expires_at: '2026-10-29T12:10:00.000Z' };
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(response(200, loginResponse))
+      .mockResolvedValueOnce(response(200, status))
+      .mockResolvedValueOnce(response(200, code))
+      .mockResolvedValueOnce(response(204))
+      .mockResolvedValueOnce(response(204));
+    vi.stubGlobal('fetch', fetchMock);
+    const client = new HttpAuthClient('https://hub.example');
+    await client.signIn('alice', 'secret', false);
+
+    await expect(client.notificationStatus()).resolves.toEqual(status);
+    await expect(client.zaloLinkCode()).resolves.toEqual(code);
+    await client.sendTestNotification();
+    await client.removeNotificationTarget('target /1');
+
+    expect(fetchMock).toHaveBeenNthCalledWith(2, 'https://hub.example/api/v1/notifications', expect.objectContaining({
+      method: 'GET', headers: expect.objectContaining({ Authorization: 'Bearer session-token', 'X-Agent-Hub-Protocol': '2' }),
+    }));
+    expect(fetchMock).toHaveBeenNthCalledWith(3, 'https://hub.example/api/v1/notifications/zalo/code', expect.objectContaining({
+      method: 'POST', headers: expect.objectContaining({ Authorization: 'Bearer session-token' }),
+    }));
+    expect(fetchMock).toHaveBeenNthCalledWith(4, 'https://hub.example/api/v1/notifications/test', expect.objectContaining({
+      method: 'POST', headers: expect.objectContaining({ Authorization: 'Bearer session-token' }),
+    }));
+    expect(fetchMock).toHaveBeenNthCalledWith(5, 'https://hub.example/api/v1/notifications/targets/target%20%2F1', expect.objectContaining({
+      method: 'DELETE', headers: expect.objectContaining({ Authorization: 'Bearer session-token' }),
+    }));
+  });
 });

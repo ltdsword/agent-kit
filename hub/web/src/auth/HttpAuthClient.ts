@@ -1,4 +1,4 @@
-import { API_PREFIX, PROTOCOL, PROTOCOL_HEADER, USER_ROUTES, type LoginResponse, type Me } from '@/api/protocol';
+import { API_PREFIX, NOTIFY_ROUTES, PROTOCOL, PROTOCOL_HEADER, USER_ROUTES, type LoginResponse, type Me, type NotificationStatus, type ZaloLinkCode } from '@/api/protocol';
 import { initialsOf, type AuthClient, type AuthState, type Session, type SignedOutReason } from './types';
 
 const STORAGE_KEY = 'agent-hub.session';
@@ -77,6 +77,23 @@ export class HttpAuthClient implements AuthClient {
     }
   }
 
+  notificationStatus(): Promise<NotificationStatus> {
+    return this.notificationRequest<NotificationStatus>(NOTIFY_ROUTES.status.path, 'GET');
+  }
+
+  zaloLinkCode(): Promise<ZaloLinkCode> {
+    return this.notificationRequest<ZaloLinkCode>(NOTIFY_ROUTES.linkCode.path, 'POST');
+  }
+
+  sendTestNotification(): Promise<void> {
+    return this.notificationRequest<void>(NOTIFY_ROUTES.test.path, 'POST');
+  }
+
+  removeNotificationTarget(id: string): Promise<void> {
+    const path = NOTIFY_ROUTES.unlink.path.replace(':target', encodeURIComponent(id));
+    return this.notificationRequest<void>(path, 'DELETE');
+  }
+
   signOut(reason: SignedOutReason = 'signed_out'): void {
     const token = this.token();
     if (token && reason === 'signed_out') {
@@ -113,6 +130,36 @@ export class HttpAuthClient implements AuthClient {
 
   private async fetch(path: string, init: RequestInit): Promise<Response> {
     return fetch(`${this.baseUrl}${API_PREFIX}${path}`, init);
+  }
+
+  private async notificationRequest<T>(path: string, method: string): Promise<T>;
+  private async notificationRequest<T>(path: string, method: string, body: unknown): Promise<T>;
+  private async notificationRequest<T>(path: string, method: string, body?: unknown): Promise<T> {
+    const token = this.token();
+    if (!token) throw new Error('unauthorized');
+
+    let response: Response;
+    try {
+      response = await this.fetch(path, {
+        method,
+        headers: this.headers(body !== undefined, token),
+        ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
+      });
+    } catch {
+      throw new Error('hub_unreachable');
+    }
+    if (response.status === 401) {
+      const result = await response.json().catch(() => ({}));
+      const code = errorCode(result, 'unauthorized');
+      if (code === 'unauthorized') this.signOut('expired');
+      throw new Error(code);
+    }
+    if (!response.ok) {
+      const result = await response.json().catch(() => ({}));
+      throw new Error(errorCode(result, `http_${response.status}`));
+    }
+    if (response.status === 204) return undefined as T;
+    return await response.json() as T;
   }
 
   private headers(json: boolean, token?: string): HeadersInit {

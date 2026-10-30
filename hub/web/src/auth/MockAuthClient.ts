@@ -1,5 +1,5 @@
 import { initialsOf, type AuthClient, type AuthState, type SignedOutReason } from './types';
-import { LIMITS } from '@/api/protocol';
+import { LIMITS, type NotificationStatus, type ZaloLinkCode } from '@/api/protocol';
 
 const DAY = 24 * 60 * 60 * 1000;
 
@@ -14,6 +14,15 @@ export class MockAuthClient implements AuthClient {
   private failures = 0;
   private password = MockAuthClient.DEMO_PASSWORD;
   private readonly delay: number;
+  private notificationState: NotificationStatus = {
+    zalo_configured: true,
+    bot_link: 'https://zalo.me',
+    targets: [],
+    sent_this_month: 0,
+    monthly_limit: 3000,
+  };
+  private linkCodeCounter = 0;
+  private pendingConnection: { at: number; displayName: string } | null = null;
 
   constructor(opts: { signedIn?: boolean; delay?: number } = {}) {
     this.delay = opts.delay ?? 600;
@@ -39,6 +48,43 @@ export class MockAuthClient implements AuthClient {
     if (current !== this.password) throw new Error('invalid_credentials');
     if (next.length < LIMITS.passwordMinChars) throw new Error('weak_password');
     this.password = next;
+  }
+
+  async notificationStatus(): Promise<NotificationStatus> {
+    if (this.pendingConnection && Date.now() >= this.pendingConnection.at) {
+      const { displayName } = this.pendingConnection;
+      this.notificationState.targets = [...this.notificationState.targets, {
+        id: `mock-target-${this.notificationState.targets.length + 1}`,
+        channel: 'zalo',
+        chat_type: 'private',
+        display_name: displayName,
+        linked_at: new Date().toISOString(),
+        broken: false,
+      }];
+      this.pendingConnection = null;
+    }
+    return { ...this.notificationState, targets: this.notificationState.targets.map((target) => ({ ...target })) };
+  }
+
+  async zaloLinkCode(): Promise<ZaloLinkCode> {
+    this.linkCodeCounter += 1;
+    const username = this.state.status === 'signed_in' ? this.state.session.user.username : 'owner';
+    this.pendingConnection = { at: Date.now() + 5000, displayName: username };
+    return {
+      code: String(100000 + this.linkCodeCounter).slice(-6),
+      expires_at: new Date(Date.now() + 10 * 60 * 1000).toISOString(),
+    };
+  }
+
+  async sendTestNotification(): Promise<void> {
+    if (this.notificationState.targets.length === 0) throw new Error('no_targets');
+    this.notificationState.sent_this_month += this.notificationState.targets.length;
+  }
+
+  async removeNotificationTarget(id: string): Promise<void> {
+    const targets = this.notificationState.targets.filter((target) => target.id !== id);
+    if (targets.length === this.notificationState.targets.length) throw new Error('target_not_found');
+    this.notificationState.targets = targets;
   }
 
   signOut(reason: SignedOutReason = 'signed_out'): void {

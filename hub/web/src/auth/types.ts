@@ -1,3 +1,5 @@
+import type { NotificationStatus, ZaloLinkCode } from '@/api/protocol';
+
 /**
  * Sign-in for the hosted UI (e.g. on Vercel): any computer or phone can open it and sign in with a
  * username and password.
@@ -32,6 +34,10 @@ export interface AuthClient {
   signIn(username: string, password: string, remember: boolean): Promise<void>;
   /** Throws `invalid_credentials`, `weak_password`, or `hub_unreachable`. */
   changePassword(current: string, next: string): Promise<void>;
+  notificationStatus(): Promise<NotificationStatus>;
+  zaloLinkCode(): Promise<ZaloLinkCode>;
+  sendTestNotification(): Promise<void>;
+  removeNotificationTarget(id: string): Promise<void>;
   signOut(reason?: SignedOutReason): void;
 }
 
