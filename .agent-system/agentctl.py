@@ -39,6 +39,9 @@ HUB_RETRY_DELAYS = (1, 2, 4, 8, 16, 16, 16, 16)
 HUB_RETRY_INTERVAL = 32
 HUB_DELIVERY_TIMEOUT = 10 * 60
 HUB_HELD_REASON = "waiting for Opus to finish its current step"
+# Herdr states that mean the agent waits for input: "done" is a finished turn nobody has looked at yet
+# (the usual state while the user is away on the phone), so it is as ready as "idle".
+READY_STATES = ("idle", "done")
 HUB_FAILED_REASON = "Opus stayed busy for 10 minutes; not delivered"
 SECRET_RE = re.compile(
     r"sk-[A-Za-z0-9_-]{16,}|AKIA[0-9A-Z]{16}|Bearer [A-Za-z0-9._~+/-]{16,}=*|"
@@ -1174,7 +1177,7 @@ def _short_reason(error) -> str:
 
 def _type_hub_notice(name: str, text: str, cfg: dict, runner=subprocess.run) -> tuple[bool, str | None]:
     _, state = _herdr_record(name, runner)
-    if state != "idle":
+    if state not in READY_STATES:
         return False, HUB_HELD_REASON
     S.Herdr(runner=runner).agent_prompt(name, scrub(text), cfg["herdr"]["prompt_ack_timeout_ms"])
     return True, None
@@ -1312,7 +1315,8 @@ def _deliver_command(ws: Path, cfg: dict, name: str, runner, client: HubClient,
     except Exception as error:
         _ack_command(client, command_id, "FAILED", _short_reason(error))
         return
-    if state != "idle":
+    if state not in READY_STATES:
+        log_action(ws, f"hub command {command_id} held: orchestrator {name} is {state}")
         command_retries[command_id] = _new_delivery_schedule(command_id, notice, clock(), command=command)
         _ack_command(client, command_id, "HELD", HUB_HELD_REASON)
         return
@@ -1376,7 +1380,8 @@ def _retry_hub_commands(ws: Path, name: str, cfg: dict, runner, client: HubClien
             continue
         try:
             _, state = _herdr_record(name, runner)
-            if state != "idle":
+            if state not in READY_STATES:
+                log_action(ws, f"hub command {command_id} still held: orchestrator {name} is {state}")
                 _advance_delivery_schedule(item)
                 continue
             command = item["command"]

@@ -709,6 +709,33 @@ class AgentCtlTests(Base):
         self.assertEqual(client.acks[-1], ("DELIVERED", None))
         self.assertNotIn(command["id"], commands)
 
+    def test_done_state_counts_as_ready_for_a_hub_prompt(self):
+        # Herdr reports "done" for a finished turn nobody has looked at (the user is on the phone).
+        class Client:
+            def __init__(self):
+                self.acks = []
+
+            def ack_command(self, command_id, status, reason=None):
+                self.acks.append((status, reason))
+
+        prompts = []
+
+        def runner(args, **kwargs):
+            if args[1:3] == ["agent", "get"]:
+                return subprocess.CompletedProcess(args, 0, json.dumps({"result": {"agent": {"agent_status": "done"}}}), "")
+            if args[1:3] == ["agent", "prompt"]:
+                prompts.append(args[4])
+                return subprocess.CompletedProcess(args, 0, "{}", "")
+            return subprocess.CompletedProcess(args, 1, "", "agent not found")
+
+        client, commands = Client(), {}
+        command = self.command("cmd_dddddddddddddddd", "prompt", {"text": "Gimme a question"},
+                               run_id=None, decision_id=None)
+        AC._deliver_command(self.ws, self.cfg, "orch-repo", runner, client, command, {}, [], commands, lambda: 0)
+        self.assertEqual(prompts, ["[hub] Gimme a question"])
+        self.assertEqual(client.acks, [("DELIVERED", None)])
+        self.assertEqual(commands, {})
+
     def test_held_command_fails_after_ten_minutes_and_answer_notice_retries(self):
         class Client:
             def __init__(self):
