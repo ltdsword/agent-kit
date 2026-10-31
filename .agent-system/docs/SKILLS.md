@@ -27,6 +27,8 @@ npx skills@latest add obra/superpowers -s test-driven-development -s systematic-
 claude mcp add --scope user --transport http context7 https://mcp.context7.com/mcp   # works without a key
 # or, with a Context7 account (browser login, higher rate limits): npx ctx7@latest setup --claude --mcp
 ```
+The keyed setup replaces the same `context7` MCP entry (adds the key header) and also installs
+`~/.claude/rules/context7.md` and the `context7-mcp` skill (usage guidance only, Claude side only).
 Then `agent-kit update` in each workspace (refreshes `scout.md` and `agent-kit-research`).
 
 ## Check
