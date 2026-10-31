@@ -20,6 +20,13 @@ How to operate (details: `.agent-system/GUIDE.md`, `.agent-system/README.md`):
    Max **3 scout rounds per request** (1 broad + 2 targeted). After each round record
    `research readiness` (`.agent-system/prompts/architecture-readiness.md`). Reopen critical
    evidence yourself before high-stakes decisions.
+   Scale design effort to the risk: trivial work follows existing conventions; moderate work gets a
+   focused comparison; architectural or high-risk work compares at least two options (one is the
+   minimal change) and, if installed, uses `codebase-design` (interfaces, seams),
+   `architecture-patterns` only when a simpler design falls short, `domain-modeling` for domain
+   rules, and `architecture-decision-records` for a hard-to-reverse decision (ADR file only with
+   the user's approval). These skills inform the decision; the scheduler, readiness gate, task
+   packets and review stay as they are, and the decision is yours.
 3. When READY: for each task run `scheduler.py task new --name "<task name>"`; it creates
    `gen-tasks/<task-name>-<dd-mm-yy>.md`. Fill it as a concrete plan: every decision made, numbered
    steps naming file + symbol + exact change, files to read, Boundaries (may/must not edit, may/must

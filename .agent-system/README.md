@@ -40,6 +40,7 @@ User request -> orchestrator: configured program + model (default Claude Code, O
 | `scripts/verify.sh` | Stack-detecting quality gate (`--quick` for post-merge smoke) |
 | `scripts/install.sh` | `agent-kit create/update/config/start [--folder=<repo>]`: create `<repo>.workspace` next to the repo with the kit, or refresh it (`docs/WORKSPACE-SETUP.md` section 4). `agent-kit <repo>`: legacy in-repo install. `agent-kit --version`: kit version (and the workspace's, in `.agent-system/VERSION`) |
 | `docs/WORKSPACE-SETUP.md` | Rule for work projects: tooling in `<repo>.workspace/`, repo via symlink (workspace mode) |
+| `docs/SKILLS.md` | Optional engineering skills per role (scout research, Opus architecture, Codex worker discipline): inventory, install, update, removal |
 | `docs/DECISION-HUB-PLAN.md` | Agent Hub plan (planned, not built): web dashboard, decisions, prompts and reports per workspace, local backend |
 | `templates/claude-settings.json` | Deny rules: Claude can't edit run state or decision files directly |
 | `tests/test_scheduler.py` | Offline tests (real git in temp dirs, fake Herdr, no model calls) |

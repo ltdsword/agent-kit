@@ -119,13 +119,27 @@ kitconfig() {  # kitconfig <workspace> [args]: choose / apply models (agent-kit 
   PYTHONDONTWRITEBYTECODE=1 python3 "$SRC/.agent-system/kitconfig.py" --workspace "$ws" "$@"
 }
 
-install_agent() {  # install_agent <dest>
-  local agent="$1/.claude/agents/scout.md"
-  if [ -f "$agent" ] && ! same_but_model "$agent" "$SRC/.claude/agents/scout.md" && [ $FORCE_AGENT -eq 0 ]; then
+scout_hash() {  # scout_hash <scout.md>: hash without the model:/effort: lines (set by agent-kit config)
+  grep -vE '^(model|effort):' "$1" | sha256sum | cut -d' ' -f1
+}
+
+install_agent() {  # install_agent <dest>: scout.md, its stamp, and the kit's scout skill
+  local agent="$1/.claude/agents/scout.md" stamp="$1/.claude/agents/.scout.kit-hash"
+  # Untouched when it equals the kit's copy, or still matches the hash stamped at the last install
+  # (the kit's scout changed since); anything else is a user customization and is kept.
+  # Untouched also covers a copy matching any scout the kit shipped before (templates/scout-history.sha256).
+  if [ -f "$agent" ] && ! same_but_model "$agent" "$SRC/.claude/agents/scout.md" && [ $FORCE_AGENT -eq 0 ] \
+     && ! { [ -f "$stamp" ] && [ "$(scout_hash "$agent")" = "$(cat "$stamp")" ]; } \
+     && ! grep -qx "$(scout_hash "$agent")" "$SRC/.agent-system/templates/scout-history.sha256" 2>/dev/null; then
     echo "kept existing .claude/agents/scout.md (differs; use --force-agent to replace)"
   else
     do_ cp "$SRC/.claude/agents/scout.md" "$agent"
+    [ $DRY -eq 1 ] || scout_hash "$agent" > "$stamp"
   fi
+  # Kit-owned read-only research skill the scout preloads (skills: in scout.md); always refreshed.
+  do_ mkdir -p "$1/.claude/skills"
+  do_ rm -rf "$1/.claude/skills/agent-kit-research"
+  do_ cp -r "$SRC/.claude/skills/agent-kit-research" "$1/.claude/skills/agent-kit-research"
 }
 
 merge_settings() {  # merge_settings <settings.json> [<real repo path>]: deny rules, chat-id hooks (+ additionalDirectories)

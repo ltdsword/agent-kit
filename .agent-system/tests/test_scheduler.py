@@ -3,6 +3,7 @@
 Run: python3 -m unittest discover -s .agent-system/tests -v
 """
 import copy
+import hashlib
 import json
 import os
 import subprocess
@@ -2047,6 +2048,22 @@ class TestInstall(Base):
         self.assertIn("effort: medium", scout)  # changing only the model keeps a supported effort
         self.assertNotIn("kept existing", self.kit("update", cwd=self.ws).stdout)
         self.assertIn("worker        grok", self.kit("config", "--show", cwd=self.ws).stdout)
+        self.assertEqual(self.repo_status(), "")
+
+    def test_update_refreshes_an_untouched_older_scout_but_keeps_a_customized_one(self):
+        self.kit("create", "--folder=repo")
+        agents = self.ws / ".claude" / "agents"
+        self.assertTrue((self.ws / ".claude" / "skills" / "agent-kit-research" / "SKILL.md").is_file())
+        # An older kit's scout, installed untouched: its stamp matches, so update replaces it.
+        old = "---\nname: scout\nmodel: claude-sonnet-5-5\neffort: medium\n---\nolder kit body\n"
+        (agents / "scout.md").write_text(old)
+        (agents / ".scout.kit-hash").write_text(hashlib.sha256(b"---\nname: scout\n---\nolder kit body\n").hexdigest() + "\n")
+        self.assertNotIn("kept existing", self.kit("update", cwd=self.ws).stdout)
+        self.assertIn("agent-kit-research", (agents / "scout.md").read_text())
+        # A user's own edit no longer matches the stamp: kept.
+        (agents / "scout.md").write_text(old + "my own rule\n")
+        self.assertIn("kept existing", self.kit("update", cwd=self.ws).stdout)
+        self.assertIn("my own rule", (agents / "scout.md").read_text())
         self.assertEqual(self.repo_status(), "")
 
     def test_dry_run_writes_nothing(self):
