@@ -181,3 +181,7 @@ Opus applied the fix before commit-task; it is in commit 7d1ee3e. Final verdict 
 
 - `.agent-system/scripts/verify.sh` exit 0 on agent/integration-winwsl at 971c66119002 (log `.orchestrator/runs/winwsl/logs/verify-1793446249.log`)
 - Task MERGED; run DONE
+
+## Finished (31/10/26 18:50)
+
+- merged into hub/plan (decision D1)

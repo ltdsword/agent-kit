@@ -273,3 +273,7 @@ Notes: keepalive is advisory only (the .wslconfig lives on the Windows side), as
 
 - `.agent-system/scripts/verify.sh` exit 0 on agent/integration-winwsl at 971c66119002 (log `.orchestrator/runs/winwsl/logs/verify-1793446249.log`)
 - Task MERGED; run DONE
+
+## Finished (31/10/26 18:50)
+
+- merged into hub/plan (decision D1)
