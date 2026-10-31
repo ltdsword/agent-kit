@@ -2436,6 +2436,27 @@ class Scheduler:
 
 # --------------------------------------------------------------------------- doctor
 
+def wsl_kind(osrelease_text: str) -> str | None:
+    text = osrelease_text.lower()
+    if "microsoft" not in text:
+        return None
+    return "wsl2" if "wsl2" in text else "wsl1"
+
+
+def windows_drive_paths(paths) -> list[str]:
+    resolved = [str(Path(path).expanduser().resolve()) for path in paths]
+    return [path for path in resolved if re.match(r"^/mnt/[a-zA-Z]/", path)]
+
+
+def _read_osrelease() -> str:
+    for path in ("/proc/sys/kernel/osrelease", "/proc/version"):
+        try:
+            return Path(path).read_text()
+        except OSError:
+            continue
+    return ""
+
+
 def _frontmatter(path: Path) -> dict:
     text = path.read_text()
     if not text.startswith("---"):
@@ -2539,6 +2560,32 @@ def doctor(workspace_root: Path) -> list[dict]:
                            *((t, True) for t in programs), ("jq", False)):
         add(f"tool:{tool}", shutil.which(tool) is not None, shutil.which(tool) or "not on PATH",
             "fail" if required else "warn")
+    major, minor = sys.version_info[:2]
+    python_ok = (major, minor) >= (3, 11)
+    add("python-version", python_ok,
+        f"Python {major}.{minor}" if python_ok else f"Python 3.11+ required (found {major}.{minor})")
+    kind = wsl_kind(_read_osrelease())
+    if kind:
+        add("wsl-version", kind == "wsl2", "WSL 2" if kind == "wsl2" else
+            "WSL 1 is not supported; in PowerShell: `wsl --set-version <distro> 2`")
+        windows_paths = windows_drive_paths((workspace_root, project))
+        if windows_paths:
+            distro = os.environ.get("WSL_DISTRO_NAME") or "Ubuntu"
+            user = Path.home().name
+            windows_home = f"\\\\wsl.localhost\\{distro}\\home\\{user}"
+            add("wsl-location", False,
+                f"{', '.join(windows_paths)} is on a Windows drive; git, builds and workers are much slower there "
+                f"and the workspace symlink is less reliable. Keep repos in the WSL home (e.g. `~/code`) and "
+                f"open them from Windows via `{windows_home}` or VS Code's WSL extension", "warn")
+        else:
+            add("wsl-location", True, "workspace and repo are in the Linux filesystem")
+        systemd = Path("/run/systemd/system").exists()
+        add("wsl-systemd", systemd, "systemd is available" if systemd else
+            "`agent-kit hub autostart` needs systemd: add `[boot]` `systemd=true` to `/etc/wsl.conf`, "
+            "then run `wsl --shutdown` in PowerShell", "warn")
+        add("wsl-keepalive", True,
+            "WSL stops when idle and the hub with it; to keep it running set `instanceIdleTimeout=-1` under "
+            "`[general]` in `%UserProfile%\\.wslconfig` (then `wsl --shutdown`)")
     add("herdr-env", os.environ.get("HERDR_ENV") == "1",
         "HERDR_ENV=1" if os.environ.get("HERDR_ENV") == "1" else
         "HERDR_ENV unset: live dispatch unavailable; start with `agent-kit start`", "warn")

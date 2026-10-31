@@ -285,7 +285,7 @@ ensure_git_repo() {  # ensure_git_repo <folder>: a Git repo with a commit, or of
 
 resolve_folder() {  # sets dest (the workspace) and repo_name from --folder or the current folder
   local f
-  f="$(realpath -m -- "${FOLDER:-$PWD}")"
+  f="$(python3 -c 'import os, sys; print(os.path.realpath(sys.argv[1]))' "${FOLDER:-$PWD}")"
   case "$(basename "$f")" in
     ?*.workspace) dest="$f"; repo_name="$(basename "$f" .workspace)" ;;  # given the workspace itself
     *) repo_name="$(basename "$f")"; dest="$f.workspace" ;;              # given the repo

@@ -1193,6 +1193,69 @@ class TestCli(Base):
             self.assertEqual(cm.exception.code, 0)
 
 
+class TestWslDoctor(Base):
+    def doctor_checks(self, osrelease, project=None):
+        (self.repo / ".agent-system").mkdir(exist_ok=True)
+        if project:
+            self.cfg["project"] = {"path": str(project)}
+        (self.repo / ".agent-system" / "config.json").write_text(json.dumps(self.cfg))
+        systemd = Path("/run/systemd/system")
+        project = project or self.repo
+        path_exists = Path.exists
+        path_is_dir = Path.is_dir
+        with mock.patch.object(S, "_read_osrelease", return_value=osrelease, create=True), \
+                mock.patch.object(S, "project_root_for", return_value=project), \
+                mock.patch.object(S, "git", return_value=mock.Mock(returncode=128, stdout="")), \
+                mock.patch.object(S.shutil, "which", return_value=None), \
+                mock.patch.object(Path, "exists", autospec=True,
+                                  side_effect=lambda path: False if path == systemd else path_exists(path)), \
+                mock.patch.object(Path, "is_dir", autospec=True,
+                                  side_effect=lambda path: True if path == project and str(project).startswith("/mnt/")
+                                  else path_is_dir(path)):
+            return {item["check"]: item for item in S.doctor(self.repo)}
+
+    def test_wsl_kind_classifies_wsl1_wsl2_and_linux(self):
+        self.assertEqual(S.wsl_kind("Linux 5.15.90.1-microsoft-standard"), "wsl1")
+        self.assertEqual(S.wsl_kind("Linux 5.15.90.1-MICROSOFT-standard-WSL2"), "wsl2")
+        self.assertIsNone(S.wsl_kind("Linux 6.8.0-generic"))
+
+    def test_windows_drive_paths_returns_resolved_windows_drive_paths(self):
+        self.assertEqual(S.windows_drive_paths(("/mnt/c/Users/alex/project", "/home/alex/project",
+                                                "/mnt/cc/not-a-drive")),
+                         ["/mnt/c/Users/alex/project"])
+
+    def test_doctor_reports_wsl_checks_and_python_version(self):
+        wsl2 = self.doctor_checks("Linux 5.15.90.1-microsoft-standard-WSL2", Path("/mnt/c/project"))
+        self.assertEqual(wsl2["python-version"]["status"], "ok")
+        self.assertEqual(wsl2["wsl-version"]["status"], "ok")
+        self.assertEqual(wsl2["wsl-location"]["status"], "warn")
+        self.assertIn("/mnt/c/project", wsl2["wsl-location"]["detail"])
+        self.assertIn("git, builds and workers are much slower", wsl2["wsl-location"]["detail"])
+        self.assertIn("workspace symlink is less reliable", wsl2["wsl-location"]["detail"])
+        self.assertIn(r"\\wsl.localhost\Ubuntu\home", wsl2["wsl-location"]["detail"])
+        self.assertEqual(wsl2["wsl-systemd"]["status"], "warn")
+        self.assertIn("[boot]", wsl2["wsl-systemd"]["detail"])
+        self.assertEqual(wsl2["wsl-keepalive"]["status"], "ok")
+        self.assertIn("instanceIdleTimeout=-1", wsl2["wsl-keepalive"]["detail"])
+
+        wsl1 = self.doctor_checks("Linux 4.4.0-Microsoft", Path("/mnt/c/project"))
+        self.assertEqual(wsl1["wsl-version"]["status"], "fail")
+        self.assertEqual(wsl1["wsl-location"]["status"], "warn")
+        self.assertEqual(wsl1["wsl-systemd"]["status"], "warn")
+        self.assertEqual(wsl1["wsl-keepalive"]["status"], "ok")
+        self.assertIn("WSL 1 is not supported", wsl1["wsl-version"]["detail"])
+
+        linux = self.doctor_checks("Linux 6.8.0-generic")
+        self.assertEqual(linux["python-version"]["status"], "ok")
+        self.assertFalse(any(name.startswith("wsl-") for name in linux))
+
+    def test_doctor_fails_when_python_is_older_than_311(self):
+        with mock.patch.object(S.sys, "version_info", (3, 10, 14)):
+            checks = self.doctor_checks("Linux 6.8.0-generic")
+        self.assertEqual(checks["python-version"]["status"], "fail")
+        self.assertEqual(checks["python-version"]["detail"], "Python 3.11+ required (found 3.10)")
+
+
 class WorkspaceBase(Base):
     """repo/ is the only git repo; repo.workspace/ holds the kit, state, task files and worktrees
     and reaches the repo through the relative symlink repo.workspace/repo -> ../repo."""
@@ -1827,6 +1890,17 @@ class TestInstall(Base):
         self.kit("create", "--folder=repo")  # names the repo; repo.workspace does not exist yet
         self.assert_workspace()
         self.assertIn("Project notes: see the top of CLAUDE.md", (self.ws / "AGENTS.md").read_text())
+
+    def test_create_folder_does_not_require_gnu_realpath_m(self):
+        bin_dir = Path(self.tmp.name) / "fake-bin"
+        bin_dir.mkdir()
+        realpath = bin_dir / "realpath"
+        realpath.write_text('#!/bin/sh\n[ "$1" != "-m" ] || exit 1\nexit 0\n')
+        realpath.chmod(0o755)
+        path = f"{bin_dir}{os.pathsep}{os.environ['PATH']}"
+        with mock.patch.dict(os.environ, {"PATH": path}):
+            self.kit("create", "--folder=repo")
+        self.assert_workspace()
 
     def test_settings_merge_registers_every_template_hook_idempotently(self):
         self.kit("create", "--folder=repo")
