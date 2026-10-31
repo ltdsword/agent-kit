@@ -153,6 +153,7 @@ steps have not yet been tested on a real Mac; please report problems.
 
 agent-kit runs on Windows inside WSL2 (Ubuntu on Windows), where everything works as on Linux.
 Native Windows (PowerShell, cmd) is not supported.
+Native Windows support is planned, pending tests of Herdr and the Codex sandbox on Windows.
 
 1. In **PowerShell as administrator**: `wsl --install` (installs WSL2 and Ubuntu), then restart.
 2. Open **Ubuntu** from the Start menu and create your Linux user when asked.
@@ -163,6 +164,12 @@ Native Windows (PowerShell, cmd) is not supported.
 
 `wsl --install` installs a current Ubuntu LTS. If `python3 --version` shows less than 3.11, install a
 newer Ubuntu with `wsl --install -d Ubuntu-24.04`.
+
+**Where to keep repos and work with Windows files.** Windows drives appear in WSL under `/mnt/`,
+such as `/mnt/c/`. Repos there work, but Git, builds and workers are much slower and workspace
+symlinks are less reliable; `doctor` warns when the repo or workspace is there. Keep repos in the WSL
+home, e.g. `~/code`, and open them from Explorer at
+`\\wsl.localhost\Ubuntu\home\<you>\code`, or use the VS Code WSL extension with `code .` in Ubuntu.
 
 **Using it from Windows.** agent-kit, Herdr, the agent programs and your workspaces all live in WSL, and
 you run them there: copying the kit or a workspace out to Windows does not work (`agent-kit` is a bash
@@ -180,6 +187,40 @@ Don't point Windows Git tools (Git for Windows, GitHub Desktop, Visual Studio) a
 agent-kit uses in WSL: they disagree with WSL's Git about line endings and file permissions, so files
 show as changed when nobody edited them, and agent-kit refuses to merge into a folder with
 uncommitted changes. If you want a Windows copy, keep it as a separate clone and sync it with push/pull.
+
+**Keep the hub running.** Ubuntu installed by `wsl --install` enables systemd by default. If systemd is
+off, add this to `/etc/wsl.conf`:
+
+```ini
+[boot]
+systemd=true
+```
+
+Then run `wsl --shutdown` in PowerShell. WSL stops when idle, along with the hub. To keep it running,
+add this to `%UserProfile%\.wslconfig`:
+
+```ini
+[general]
+instanceIdleTimeout=-1
+```
+
+Then run `wsl --shutdown` in PowerShell. The hub website works from any browser; its local backend
+listens on `127.0.0.1` and is reachable from Windows via `localhost`.
+
+**Start from Windows.** In Windows Terminal or PowerShell, run
+`wsl -d Ubuntu --cd ~ -- bash -lc "agent-kit start --folder=code/<repo>"`. The login shell (`bash -lc`)
+loads your profile, so `agent-kit` from a Git install in `~/.local/bin` is found. You can also put that
+command line in a Windows Terminal profile.
+
+**Doctor checks.** On WSL, `doctor.sh` reports these checks with `[OK  ]`, `[WARN]` or `[FAIL]`:
+
+| Check | OK | If not OK |
+|---|---|---|
+| `python-version` (always) | Python >= 3.11 | `[FAIL]` Python 3.11+ required (found X.Y) |
+| `wsl-version` (WSL only) | WSL 2 | `[FAIL]` WSL 1 is not supported; in PowerShell: `wsl --set-version <distro> 2` |
+| `wsl-location` (WSL only) | Workspace and repo are in the Linux filesystem | `[WARN]` Names the `/mnt/<drive>` path; Git, builds and workers are slower, and the workspace symlink is less reliable. Keep repos in the WSL home (e.g. `~/code`) and open them from Windows via `\\wsl.localhost\<distro>\home\<user>` or VS Code's WSL extension. |
+| `wsl-systemd` (WSL only) | `/run/systemd/system` exists | `[WARN]` `agent-kit hub autostart` needs systemd: add `[boot] systemd=true` to `/etc/wsl.conf`, then run `wsl --shutdown` in PowerShell. |
+| `wsl-keepalive` (WSL only) | Always OK (advice) | WSL stops when idle and the hub with it; to keep it running set `instanceIdleTimeout=-1` under `[general]` in `%UserProfile%\.wslconfig` (then run `wsl --shutdown` in PowerShell). |
 
 #### From Git (any system; also for working on the kit)
 
