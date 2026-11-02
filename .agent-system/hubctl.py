@@ -249,20 +249,69 @@ def hub_login(name: str, url: str | None, computer_name: str | None, workspace: 
     print(f"registered {name} on {computer_name}; saved computer config")
     if (workspace / ".agent-system" / "config.json").is_file():
         try:
-            hub_start(Path(__file__).resolve().parent.parent, workspace, start_connector=False)
-        except (HubCtlError, OSError, ValueError) as error:
-            raise HubCtlError(f"registration was saved, but Agent Hub backend could not be started: {error}") from error
-        if not _wait_for_connector_key():
-            raise HubCtlError("registration was saved, but connector.key did not appear within 20 seconds")
-        code = agentctl.main(["--workspace-root", str(workspace), "enable"], workspace_root=workspace)
-        if code:
-            raise HubCtlError("registration was saved, but agentctl enable failed")
-        cfg = agentctl.load_config(workspace)
-        project = agentctl.S.project_root_for(workspace, cfg)
-        if agentctl._orchestrator_alive(agentctl.kitstart.agent_name(project.name), workspace=workspace,
-                                        kind=cfg.get("orchestrator", {}).get("kind", "claude")):
-            agentctl.kitstart.start_connector(workspace, cfg)
+            _enable_live(Path(__file__).resolve().parent.parent, workspace)
+        except HubCtlError as error:
+            raise HubCtlError(f"registration was saved, but {error}") from error
     return 0
+
+
+def resolve_workspace(folder: str | None) -> Path:
+    """The workspace for --folder (default: the current folder), resolved like the other agent-kit commands:
+    a folder holding .agent-system/config.json is the workspace itself (also the in-repo kit), a *.workspace
+    folder is the workspace, and any other folder is a repo whose workspace is <repo>.workspace next to it."""
+    path = Path(os.path.realpath(os.path.expanduser(folder or os.getcwd())))
+    if not (path / ".agent-system" / "config.json").is_file() and not path.name.endswith(".workspace"):
+        path = path.with_name(path.name + ".workspace")
+    if not (path / ".agent-system" / "config.json").is_file():
+        raise HubCtlError(f"{path} has no kit (.agent-system/config.json): use 'agent-kit create'")
+    return path
+
+
+def _enable_live(source: Path, workspace: Path) -> None:
+    """Start the local backend if needed, enable the workspace, and connect it now if its orchestrator runs."""
+    try:
+        hub_start(source, workspace, start_connector=False)
+    except (HubCtlError, OSError, ValueError) as error:
+        raise HubCtlError(f"Agent Hub backend could not be started: {error}") from error
+    if not _wait_for_connector_key():
+        raise HubCtlError("connector.key did not appear within 20 seconds")
+    if agentctl.main(["--workspace-root", str(workspace), "enable"], workspace_root=workspace):
+        raise HubCtlError("enabling the workspace failed")
+    cfg = agentctl.load_config(workspace)
+    project = agentctl.S.project_root_for(workspace, cfg)
+    if agentctl._orchestrator_alive(agentctl.kitstart.agent_name(project.name), workspace=workspace,
+                                    kind=cfg.get("orchestrator", {}).get("kind", "claude")):
+        agentctl.kitstart.start_connector(workspace, cfg)
+
+
+def hub_enable(source: Path, folder: str | None, if_logged_in=False) -> int:
+    """`agent-kit hub enable`: show this workspace on the website.
+
+    With if_logged_in (used by `agent-kit create/update`): only when this computer ran hub-login and the
+    workspace has never been enabled (no hub.workspace_id: `disable` keeps the id, so a disable sticks); it only writes the config (no backend, no network), and
+    the workspace connects at the next `agent-kit start` or `hub start`."""
+    workspace = resolve_workspace(folder)
+    logged_in = computer_path().is_file()
+    if if_logged_in:
+        if not logged_in or agentctl.config_hub(agentctl.load_config(workspace)).get("workspace_id"):
+            return 0
+        agentctl.enable_config(workspace)
+        print("hub: enabled this workspace; it shows on the website after 'agent-kit start' "
+              "(turn off: agent-kit hub disable)")
+        return 0
+    if not logged_in:
+        raise HubCtlError("this computer is not logged in to Agent Hub: run 'agent-kit hub-login --name=<user>' first")
+    _enable_live(source, workspace)
+    return 0
+
+
+def hub_disable(folder: str | None) -> int:
+    """`agent-kit hub disable`: stop this workspace's connector and keep it off the website."""
+    workspace = resolve_workspace(folder)
+    pidfile = workspace / ".orchestrator" / "hub-connector.pid"
+    if pidfile.is_file():
+        agentctl.main(["--workspace-root", str(workspace), "stop"], workspace_root=workspace)
+    return agentctl.main(["--workspace-root", str(workspace), "disable"], workspace_root=workspace)
 
 
 def node24(source: Path) -> Path:
@@ -498,6 +547,10 @@ def build_parser() -> argparse.ArgumentParser:
         hub_actions.add_parser(action)
     autostart = hub_actions.add_parser("autostart")
     autostart.add_argument("action", choices=("on", "off", "status"))
+    for action in ("enable", "disable"):
+        item = hub_actions.add_parser(action)
+        item.add_argument("--folder")
+    hub_actions.choices["enable"].add_argument("--if-logged-in", action="store_true", help=argparse.SUPPRESS)
     setup = sub.add_parser("proxy-setup")
     setup.add_argument("--rotate-admin-key", action="store_true")
     setup.add_argument("--origins")
@@ -516,6 +569,10 @@ def main(argv=None, runner=subprocess.run) -> int:
         if args.command == "hub":
             if args.hub_action == "autostart":
                 return hub_autostart(args.action, runner=runner)
+            if args.hub_action == "enable":
+                return hub_enable(args.source, args.folder, args.if_logged_in)
+            if args.hub_action == "disable":
+                return hub_disable(args.folder)
             return {"start": lambda: hub_start(args.source, Path.cwd()), "stop": hub_stop,
                     "status": hub_status}[args.hub_action]()
         if args.command == "proxy-setup":

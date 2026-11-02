@@ -1184,6 +1184,30 @@ class TestHubScheduler(Base):
         by_name = {item["check"]: item for item in checks}
         self.assertEqual(by_name["hub-backend"]["status"], "warn")
 
+    def test_doctor_warns_when_logged_in_but_the_workspace_was_never_enabled(self):
+        (self.repo / ".agent-system").mkdir(exist_ok=True)
+        hub_dir = Path(self.tmp.name) / "hub-config"
+        hub_dir.mkdir()
+
+        def hub_enabled_check(hub):
+            cfg = {**self.cfg}
+            cfg.pop("hub", None)
+            if hub is not None:
+                cfg["hub"] = hub
+            (self.repo / ".agent-system" / "config.json").write_text(json.dumps(cfg))
+            with mock.patch.dict(os.environ, {"AGENT_HUB_CONFIG": str(hub_dir)}), \
+                    mock.patch.object(S.shutil, "which", return_value=None):
+                os.environ.pop("AGENT_HUB_COMPUTER", None)
+                return {c["check"]: c for c in S.doctor(self.repo)}.get("hub-enabled")
+
+        self.assertIsNone(hub_enabled_check(None))                     # not logged in: quiet
+        (hub_dir / "computer.json").write_text("{}")
+        check = hub_enabled_check(None)
+        self.assertEqual(check["status"], "warn")
+        self.assertIn("agent-kit hub enable", check["detail"])
+        self.assertEqual(hub_enabled_check({"enabled": False, "workspace_id": None})["status"], "warn")
+        self.assertIsNone(hub_enabled_check({"enabled": False, "workspace_id": "ws_abcdefghijklmnop"}))  # disabled on purpose
+
 
 class TestCli(Base):
     def test_help_and_status(self):
@@ -1843,6 +1867,64 @@ class TestInstall(Base):
         sh(self.repo, "git", "rm", "-qr", "packets")
         sh(self.repo, "git", "commit", "-q", "-m", "remove task fixture packets")
         self.ws = Path(self.tmp.name) / "repo.workspace"
+        # create/update read the hub login (computer.json) and the workspace registry: never the real ones
+        self.hub_config = Path(self.tmp.name) / "hub-config"
+        patcher = mock.patch.dict(os.environ, {"AGENT_HUB_CONFIG": str(self.hub_config)})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        os.environ.pop("AGENT_HUB_COMPUTER", None)
+
+    def hub_logged_in(self):
+        self.hub_config.mkdir(parents=True, exist_ok=True)
+        (self.hub_config / "computer.json").write_text("{}")
+
+    def hub_cfg(self):
+        return json.loads((self.ws / ".agent-system" / "config.json").read_text()).get("hub") or {}
+
+    def registry(self):
+        try:
+            return json.loads((self.hub_config / "workspaces.json").read_text())["workspaces"]
+        except FileNotFoundError:
+            return []
+
+    def test_create_leaves_the_hub_off_when_this_computer_is_not_logged_in(self):
+        self.kit("create", "--folder=repo", "--no-input")
+        self.assertFalse(self.hub_cfg().get("enabled"))
+        self.assertIsNone(self.hub_cfg().get("workspace_id"))
+        self.assertEqual(self.registry(), [])
+
+    def test_create_and_update_enable_the_hub_when_logged_in_unless_no_hub_or_disabled(self):
+        self.hub_logged_in()
+        p = self.kit("create", "--folder=repo", "--no-hub", "--no-input")
+        self.assertNotIn("hub: enabled", p.stdout)
+        self.assertFalse(self.hub_cfg().get("enabled"))
+        p = self.kit("update", "--folder=repo")
+        self.assertIn("hub: enabled this workspace", p.stdout)
+        hub = self.hub_cfg()
+        self.assertIs(hub["enabled"], True)
+        self.assertRegex(hub["workspace_id"], r"^ws_")
+        self.assertEqual(self.registry(), [str(self.ws.resolve())])
+        p = self.kit("update", "--folder=repo")              # already enabled: quiet, same id
+        self.assertNotIn("hub: enabled", p.stdout)
+        self.assertEqual(self.hub_cfg()["workspace_id"], hub["workspace_id"])
+        self.kit("hub", "disable", f"--folder={self.ws}")
+        self.assertIs(self.hub_cfg()["enabled"], False)
+        self.assertEqual(self.registry(), [])
+        p = self.kit("update", "--folder=repo")              # an explicit disable is kept
+        self.assertNotIn("hub: enabled", p.stdout)
+        self.assertIs(self.hub_cfg()["enabled"], False)
+
+    def test_hub_enable_needs_a_hub_login_and_finds_the_workspace_from_the_repo(self):
+        self.kit("create", "--folder=repo", "--no-input")
+        p = self.kit("hub", "enable", cwd=self.repo, ok=False)
+        self.assertIn("not logged in to Agent Hub", p.stderr)
+        self.assertFalse(self.hub_cfg().get("enabled"))
+        p = self.kit("hub", "enable", "--folder=nowhere", ok=False)
+        self.assertIn("has no kit", p.stderr)
+
+    def test_no_hub_only_applies_to_create_and_update(self):
+        p = self.kit("config", "--no-hub", ok=False)
+        self.assertIn("--no-hub only applies to create and update", p.stderr)
 
     def kit(self, *args, cwd=None, ok=True, input=None):
         p = subprocess.run(["bash", str(self.INSTALL), *args], cwd=cwd or self.tmp.name,

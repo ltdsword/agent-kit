@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
 # agent-kit: copy the orchestration kit into a project workspace, or update one.
-#   agent-kit create [--folder=<repo>] [--dry-run] [--init-git] [model options]
-#   agent-kit update [--folder=<repo>] [--dry-run] [--force-agent]
+#   agent-kit create [--folder=<repo>] [--dry-run] [--init-git] [--no-hub] [model options]
+#   agent-kit update [--folder=<repo>] [--dry-run] [--force-agent] [--no-hub]
 #   agent-kit config [--folder=<repo>] [model options] [--show] [--list]
 #   agent-kit start  [--folder=<repo>] [--dry-run] [--no-attach]   open Herdr + launch the orchestrator
 #   agent-kit continue [--folder=<repo>] [--session=ID] [--force] [--dry-run] [--no-attach]
 #   agent-kit create-user|reset-password --name=<u> | hub-login --name=<u> [--url=<proxy>] [--computer-name=<n>]
 #   agent-kit hub start|stop|status | hub autostart on|off|status | proxy-setup [--rotate-admin-key] [--origins ...]
+#   agent-kit hub enable|disable [--folder=<repo>]   show / hide a workspace on the hub website
 #                     restart the orchestrator with the current config, in its last chat
 #   model options: --model-orchestrator=M --effort-orchestrator=E --model-scout=M --effort-scout=E
 #                  --model-worker=M --effort-worker=E  (M: model or alias, or <program>/<model>)
@@ -18,6 +19,8 @@
 # is taken as the workspace itself, so `agent-kit update` also works from inside a workspace.
 # create: make the workspace (kit, config with project.path, CLAUDE.md/AGENTS.md, .claude/, folders).
 # update: refresh the kit files; keeps config.json, project notes and customized scout.md.
+# create/update also enable the hub for the workspace when this computer ran hub-login and the
+# workspace was never enabled (a `hub disable` sticks; --no-hub skips it).
 # The kit is copied from this script's kit home (~/Code/agent-kit via ~/.local/bin/agent-kit, or
 # /usr/share/agent-kit from apt). Nothing is written into the repo, except `git init` + a first commit
 # when create finds no repo and you agree (--init-git: yes); create/update fail if its git status changes.
@@ -25,10 +28,10 @@ set -euo pipefail
 
 SELF="$(readlink -f "${BASH_SOURCE[0]}")"
 SRC="$(cd "$(dirname "$SELF")/../.." && pwd -P)"   # kit home: holds .agent-system/
-usage() { sed -n '2,21p' "$SELF" | sed 's/^# \{0,1\}//'; }
+usage() { awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' "$SELF"; }  # the header comment
 die() { echo "error: $*" >&2; exit 1; }
 
-CMD=""; DRY=0; FORCE_AGENT=0; FOLDER=""; TARGET=""; MODEL_ARGS=(); NEW_ARGS=(); NO_ATTACH=0; FORCE=0; SESSION=""; INIT_GIT=0; SHOW_VERSION=0
+CMD=""; DRY=0; FORCE_AGENT=0; FOLDER=""; TARGET=""; MODEL_ARGS=(); NEW_ARGS=(); NO_ATTACH=0; FORCE=0; SESSION=""; INIT_GIT=0; SHOW_VERSION=0; NO_HUB=0
 is_hub_command() {
   case "$1" in
     create-user|reset-password|hub-login|hub|proxy-setup) return 0 ;;
@@ -51,6 +54,7 @@ while [ $# -gt 0 ]; do
     --dry-run) DRY=1 ;;
     --force-agent) FORCE_AGENT=1 ;;
     --init-git) INIT_GIT=1 ;;
+    --no-hub) NO_HUB=1 ;;
     -h|--help) usage; exit 0 ;;
     --version|-V) SHOW_VERSION=1 ;;
     -*) echo "unknown option: $1" >&2; usage >&2; exit 2 ;;
@@ -67,9 +71,15 @@ done
 [ ${#MODEL_ARGS[@]} -eq 0 ] || [ "$CMD" = create ] || [ "$CMD" = config ] \
   || die "model options only apply to create and config"
 [ $INIT_GIT -eq 0 ] || [ "$CMD" = create ] || [ -n "$TARGET" ] || die "--init-git only applies to create"
+[ $NO_HUB -eq 0 ] || [ "$CMD" = create ] || [ "$CMD" = update ] || die "--no-hub only applies to create and update"
 
 do_() { if [ $DRY -eq 1 ]; then echo "[dry-run] $*"; else "$@"; fi; }
 repo_status() { git -C "$1" status --porcelain --untracked-files=all; }
+auto_hub() {  # auto_hub <workspace>: enable the hub if this computer is logged in (never fails the command)
+  [ $NO_HUB -eq 0 ] && [ $DRY -eq 0 ] || return 0
+  PYTHONDONTWRITEBYTECODE=1 python3 "$SRC/.agent-system/hubctl.py" --source "$SRC" hub enable --if-logged-in --folder "$1" \
+    || echo "warning: could not enable the hub for $1 (later: agent-kit hub enable)" >&2
+}
 
 kit_version() {  # the kit home's version: VERSION (written into the apt package), else git describe
   if [ "$(git -C "$SRC" rev-parse --show-toplevel 2>/dev/null)" = "$SRC" ]; then
@@ -322,6 +332,10 @@ cmd_create() {
 import json, os, sys
 tpl, dest, name, repo = sys.argv[1:]
 cfg = json.load(open(tpl))
+# A new workspace is never on the hub yet: the kit home may be a live, enabled workspace itself, and a
+# copied workspace_id would make two workspaces fight over one hub identity (409 duplicate_workspace).
+if isinstance(cfg.get("hub"), dict):
+    cfg["hub"].update(enabled=False, workspace_id=None)
 import glob, subprocess
 has = lambda *pats: any(glob.glob(os.path.join(repo, p)) for p in pats)
 c_sources = subprocess.run(["git", "-C", repo, "ls-files", "*.c", "*.cc", "*.cpp", "*.cxx", "*.h", "*.hh", "*.hpp"],
@@ -383,6 +397,7 @@ PY
     kitconfig "$dest" ${MODEL_ARGS[@]+"${MODEL_ARGS[@]}"} || die "model choice failed; fix it with: agent-kit config --folder=$dest"
   fi
   check_repo_unchanged "$repo" "$before"
+  auto_hub "$dest"
   [ $DRY -eq 1 ] || PYTHONDONTWRITEBYTECODE=1 python3 "$dest/.agent-system/scheduler.py" --workspace-root "$dest" pool show >/dev/null \
     || die "the new workspace does not load: check $dest/.agent-system/config.json"
 
@@ -423,6 +438,7 @@ print("kept .agent-system/config.json" + (f"; the kit template has new keys: {mi
 PY
   [ $DRY -eq 1 ] || kitconfig "$dest" --no-input >/dev/null  # re-apply chosen models to Claude files
   [ -z "$repo" ] || check_repo_unchanged "$repo" "$before"
+  auto_hub "$dest"
   echo "done. Run .agent-system/scripts/doctor.sh in $dest"
 }
 

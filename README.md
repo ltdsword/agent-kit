@@ -358,8 +358,9 @@ the same). Use that only for repos you own.
 ## 4. agent-kit commands
 
 ```bash
-agent-kit create [--folder=<repo>] [--dry-run] [--init-git]
-agent-kit update [--folder=<repo>] [--dry-run] [--force-agent]
+agent-kit create [--folder=<repo>] [--dry-run] [--init-git] [--no-hub]
+agent-kit update [--folder=<repo>] [--dry-run] [--force-agent] [--no-hub]
+agent-kit hub enable|disable [--folder=<repo>]
 agent-kit [--dry-run] [--force-agent] [--init-git] <target-repo>      # legacy in-repo mode
 agent-kit --version [--folder=<repo>]
 agent-kit --help
@@ -377,6 +378,7 @@ agent-kit --help
 | `agent-kit config --show` / `--list` | Show the workspace's current roles / every known model |
 | `agent-kit start` | Open the workspace in Herdr and launch the orchestrator with its program, model and effort (from a normal terminal: starts Herdr if needed, then attaches) |
 | `agent-kit continue [--session=ID] [--force]` | Restart the orchestrator with the current config in the workspace's last active chat (inside or outside Herdr) |
+| `agent-kit hub enable` / `hub disable` | Show / hide the workspace on the Agent Hub website (needs `agent-kit hub-login` on this computer once). `create` and `update` already enable a never-enabled workspace when the computer is logged in; a `disable` is kept |
 | `agent-kit <target-repo>` | Legacy: install the kit **inside** a repo you own (also edits its `.gitignore`) |
 | `agent-kit --version` (or `-V`) | Show the kit's version and where it comes from; inside a workspace (or with `--folder=<repo>`) also the version that workspace was last created/updated with, and whether it needs `agent-kit update` |
 
@@ -391,6 +393,7 @@ agent-kit --help
 | `--show`, `--list` | (`config`) Show the workspace's roles / every known model with its efforts |
 | `--no-input` | (`create`, `config`) Never prompt; fail on an unknown model instead of asking |
 | `--no-attach` | (`start`) Don't attach to Herdr afterwards |
+| `--no-hub` | (`create`, `update`) Don't enable the Agent Hub for this workspace, even if this computer is logged in |
 
 **`create`** makes `<repo>.workspace/` with:
 

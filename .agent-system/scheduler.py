@@ -2504,6 +2504,14 @@ def doctor(workspace_root: Path) -> list[dict]:
             add("hub-backend", True, "GET /api/v1/agent/ping succeeded")
         except Exception as e:
             add("hub-backend", False, f"GET /api/v1/agent/ping failed: {e}", "warn")
+    elif not hub.get("workspace_id"):
+        # Never enabled (enable assigns the id, disable keeps it): if this computer is logged in to the hub,
+        # the user most likely expects the workspace on the website. An explicit `hub disable` stays quiet.
+        computer = os.environ.get("AGENT_HUB_COMPUTER") or str(
+            Path(os.environ.get("AGENT_HUB_CONFIG", "~/.config/agent-hub")) / "computer.json")
+        if Path(computer).expanduser().is_file():
+            add("hub-enabled", False, "this computer is logged in to Agent Hub but this workspace is not "
+                "enabled, so it is not on the website: run `agent-kit hub enable`", "warn")
     for role, r in (("orchestrator", {**{"kind": "claude"}, **cfg.get("orchestrator", {})}),
                     ("worker", {"kind": cfg["worker"].get("kind", "codex"), "model": cfg["worker"]["model"],
                                 "effort": cfg["worker"].get("reasoning_effort")})):

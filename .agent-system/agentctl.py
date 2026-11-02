@@ -1620,7 +1620,8 @@ def watch(ws: Path, interval=5, no_orchestrator=False, runner=subprocess.run, sl
                 pass
 
 
-def command_enable(ws: Path, url: str | None) -> int:
+def enable_config(ws: Path, url: str | None = None) -> dict:
+    """Turn the hub on in the workspace config and list the workspace for `hub start` (no network)."""
     cfg = load_config(ws)
     hub = config_hub(cfg)
     hub["enabled"] = True
@@ -1632,6 +1633,11 @@ def command_enable(ws: Path, url: str | None) -> int:
     cfg["hub"] = hub
     save_config(ws, cfg)
     update_workspace_registry(ws, True)
+    return hub
+
+
+def command_enable(ws: Path, url: str | None) -> int:
+    hub = enable_config(ws, url)
     try:
         key = read_key()
     except RuntimeError as e:

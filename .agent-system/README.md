@@ -66,6 +66,7 @@ Prefix every command with `python3 .agent-system/scheduler.py`. Add `--json` bef
 | `agent-kit create-user --name=<u>` / `reset-password --name=<u>` | Admin-only account setup; prints the generated password once |
 | `agent-kit hub-login --name=<u> [--url=<proxy>] [--computer-name=<n>]` | Register this computer; in a kit workspace, start the backend, wait for its connector key, enable the connector, and start its watcher when the orchestrator is live |
 | `agent-kit hub start\|stop\|status` | Start the local backend and connectors for enabled registered workspaces, stop them and the backend with a 10-second wait, or inspect status |
+| `agent-kit hub enable\|disable [--folder=<repo>]` | Show or hide a workspace on the hub website. `enable` needs `hub-login` on this computer; it starts the backend if needed, enables the connector and connects now if the orchestrator is live. `disable` stops the connector; the choice survives `agent-kit update`. `create`/`update` enable a never-enabled workspace on a logged-in computer by themselves (`--no-hub` skips it), and doctor warns when one is missing |
 | `agent-kit hub autostart on\|off\|status` | Install, remove, or inspect the systemd user service for Agent Hub |
 | `agent-kit proxy-setup [--rotate-admin-key] [--origins ...]` | Provision the shared Agent Hub proxy |
 | `pool init` / `pool show` | Create the worktree root, show slot paths/state; show per-slot model resolution |
