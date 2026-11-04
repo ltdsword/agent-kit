@@ -141,3 +141,7 @@ Verdict: PASS (with one orchestrator fix applied before commit)
 
 - `.agent-system/scripts/verify.sh` exit 0 on agent/integration-hcport at 924a5efe4623 (log `.orchestrator/runs/hcport/logs/verify-1793804198.log`)
 - Task MERGED; run DONE
+
+## Finished (04/11/26 22:39)
+
+- merged into hub/plan (decision D1)
