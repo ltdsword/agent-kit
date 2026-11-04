@@ -18,18 +18,16 @@ you mostly use part 4. Command reference: [README.md](README.md).
 
 ## Part 1 - Herdr in 5 minutes
 
-Herdr is a terminal multiplexer built for coding agents (like tmux, but it understands agent state).
+The Herdr app is a terminal workspace manager for coding agents (like tmux, but it understands agent state).
 
-**Structure:** *session* -> *workspaces* (left sidebar, one per project or worker) -> *tabs* -> *panes*.
-Herdr recognizes agents in panes and shows their state: `working`, `idle`, `blocked` (waiting for
+**Structure:** *session* -> *spaces* (left sidebar, one per project or worker) -> *tabs* -> *panes*.
+The app recognizes agents in panes and shows their state: `working`, `idle`, `blocked` (waiting for
 approval), `done`.
 
 **Start it**
 
-```bash
-cd ~/Code/thrift-demo.workspace   # the workspace, not the repo (docs/WORKSPACE-SETUP.md)
-herdr                 # launch or re-attach the persistent session
-```
+Launch the Herdr app, then open `~/Code/thrift-demo.workspace` (the workspace, not the repo; see
+`docs/WORKSPACE-SETUP.md`).
 
 **Keys** (prefix is `ctrl+b`: press it, release, then press the key)
 
@@ -45,19 +43,17 @@ herdr                 # launch or re-attach the persistent session
 | `ctrl+b b` | Toggle sidebar |
 | `ctrl+b q` | **Detach**: agents keep running in the background |
 
-Re-attach any time with `herdr`. Change keys in `~/.config/herdr/config.toml` (`herdr --default-config`
-prints every option).
+The old Herdr CLI remains available for workspaces configured with `herdr.backend: legacy`.
 
-**Useful CLI commands** (run inside a Herdr pane)
+**Useful CLI commands** (run in a terminal; `<name>` is an agent terminal)
 
 ```bash
-herdr agent list                                            # all agents and states
-herdr agent read worker-1-r1 --source recent-unwrapped --lines 120   # see what a worker is doing
-herdr agent wait worker-1-r1 --timeout 600000               # block until it settles
-herdr status                                                # client/server versions
+hc ls --json                         # live terminals
+hc read --lines 80 <name>            # look at a worker's terminal
 ```
 
-Worker agents are named `<slot>-<run>`, e.g. `worker-1-r1`. Their workspaces are labeled `<run>-<slot>`.
+Worker agents are named `<slot>-<run>`, e.g. `worker-1-r1`. They appear as spaces named
+`<run>-worker-N`, e.g. `r1-worker-1`.
 
 ---
 
@@ -110,8 +106,8 @@ Steps 1-2 below apply to Codex.
 
 ## Part 3 - Start a session the right way
 
-The workflow only dispatches live workers when the orchestrator runs **inside** Herdr (it checks
-`HERDR_ENV=1`). `agent-kit start` takes care of that:
+The workflow dispatches live workers when the orchestrator runs inside the Herdr app or old Herdr.
+`agent-kit start` takes care of that:
 
 ```bash
 cd ~/Code/thrift-demo.workspace    # workspace: kit + state; the repo is the symlink thrift-demo/
@@ -119,10 +115,10 @@ agent-kit start                    # opens Herdr (starts it if needed) and launc
 ```
 
 **What `agent-kit start` does:**
-- It launches the program, model and effort you chose (`agent-kit config --show`) in a new Herdr
-  workspace named after the project, as agent `orch-<repo>`.
-- From a normal terminal it attaches you to Herdr afterwards; inside Herdr it just switches to the
-  new workspace.
+- It launches the program, model and effort you chose (`agent-kit config --show`) in a new app space
+  named after the project, as agent `orch-<repo>`.
+- From a normal terminal the space appears in the Herdr app; from inside the app it focuses the new
+  space. With the legacy backend it attaches to old Herdr as before.
 - Running it again switches to the running orchestrator instead of starting a second one.
 - Programs other than Claude Code get a first prompt telling them to read `AGENTS.md` (their rules)
   and the notes in `CLAUDE.md`.
@@ -133,9 +129,9 @@ agent-kit start                    # opens Herdr (starts it if needed) and launc
 or outside Herdr. The chat id lives in `.orchestrator/orchestrator.json`; a Claude Code hook updates it
 whenever a chat in the workspace starts or gets a prompt. See README, "Continuing the last chat".
 
-**Doing it by hand instead:** run `herdr`, then start the program in a pane, e.g. plain `claude`
-(it uses the model from `.claude/settings.json`). If Claude was already running before the scout
-agent existed, restart it once so `.claude/agents/scout.md` loads.
+**Doing it by hand instead:** open a space and start the program in a pane, e.g. plain `claude` (it
+uses the model from `.claude/settings.json`). If Claude was already running before the scout agent
+existed, restart it once so `.claude/agents/scout.md` loads.
 
 ---
 

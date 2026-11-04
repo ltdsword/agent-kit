@@ -9,7 +9,7 @@ User request -> orchestrator: configured program + model (default Claude Code, O
                  |  (default Sonnet 5.5, effort medium) only for very large or parallel research
                  v
             1..N task DAG -> scheduler.py (leases, states, durable JSON) -> workers
-                 worker-1 / worker-2 / worker-3: the configured program + model (default Codex gpt-6-luna @ xhigh), one Herdr workspace + git worktree each
+                 worker-1 / worker-2 / worker-3: the configured program + model (default Codex gpt-6-luna @ xhigh), one Herdr app space + git worktree each
                  task plan per worker: gen-tasks/<task-name>-<dd-mm-yy>.md (written by Opus)
                  -> wait -> collect (diff captured + appended to the task file) -> Opus review
                  (verdict + report appended) -> sequential cherry-pick onto agent/integration-<run>
@@ -56,13 +56,19 @@ every git command runs there, never in the workspace. Without `project.path` the
 roots the same). Worktrees live in `pool.worktree_root`, outside the repo: `worktrees/` in the workspace
 (`worker-1..N`, `integration-<run>`).
 
+## Configuration
+
+| Key | Meaning |
+|---|---|
+| `herdr.backend` | `auto` (default): `hc` inside the Herdr app, `legacy` inside old Herdr, otherwise `hc` when its core runs; set `hc` or `legacy` to force one |
+
 ## Commands (all implemented; `python3 .agent-system/scheduler.py <cmd> --help`)
 
 Prefix every command with `python3 .agent-system/scheduler.py`. Add `--json` before the command for JSON output.
 
 | Command | What it does |
 |---|---|
-| `doctor` | Validate config, tools, scout agent, Codex profile, cached model catalog |
+| `doctor` | Validate config, tools (`hc`, `herdr-app`, `herdr-session`), scout agent, Codex profile, cached model catalog |
 | `agentctl enable [--url URL]` / `disable` / `sync --dry-run [--json]` / `watch [--interval 5] [--no-orchestrator]` / `status` / `stop` / `reset-id` | Configure and inspect the optional Agent Hub connector (`python3 .agent-system/agentctl.py <command>`); enable/disable also registers or removes the workspace for autostart |
 | `agent-kit create-user --name=<u>` / `reset-password --name=<u>` | Admin-only account setup; prints the generated password once |
 | `agent-kit hub-login --name=<u> [--url=<proxy>] [--computer-name=<n>]` | Register this computer; in a kit workspace, start the backend, wait for its connector key, enable the connector, and start its watcher when the orchestrator is live |
@@ -77,7 +83,7 @@ Prefix every command with `python3 .agent-system/scheduler.py`. Add `--json` bef
 | `task new --name "<name>" [--date dd-mm-yy]` | Create `gen-tasks/<name>-<dd-mm-yy>.md` from the template (`-2`, `-3` on collision) |
 | `task new --repair-of gen-tasks/<file>.md` | Create `<file>-repairN.md` from the repair template |
 | `research readiness --run ID --status READY\|NOT_READY --preserve .. --contracts .. --interactions .. --testing .. --assumptions .. [--missing ..]` | Record the gate after each round |
-| `dispatch-ready --run ID [--launch herdr\|none] [--dry-run]` | Lease READY tasks to IDLE slots, create branches, start Codex in Herdr |
+| `dispatch-ready --run ID [--launch herdr\|none] [--dry-run]` | Lease READY tasks to IDLE slots, create branches, start Codex in the selected Herdr backend |
 | `relaunch --run ID --task T` | Restart a lost session for a RUNNING task (same worktree) |
 | `decision ask --run ID --kind K [--task T] --title .. --question .. --option 'A=label :: consequence' --option 'B=label :: consequence' [--evidence 'code :: note'] [--note ..]` | Opus asks the user with evidence and consequences; worker approvals also accept `--approval-command`, `--approval-cwd`, `--approval-why` |
 | `decision wait --run ID --id D1` / `decision list [--all]` / `decision cancel` | Wait for / list / withdraw decisions |
@@ -96,7 +102,7 @@ Prefix every command with `python3 .agent-system/scheduler.py`. Add `--json` bef
 | `resume --run ID` | Reconcile after interruption; prints next actions; never relaunches by itself |
 | `worker-release --run ID --worker W` | Return an inspected, clean BLOCKED/BROKEN slot to IDLE |
 | `task-unblock --run ID --task T [--reset-repairs]` | BLOCKED -> PENDING after Opus re-scopes |
-| `cleanup --run ID [--remove-worktrees]` | Close Herdr workspaces this run created; remove clean worktrees |
+| `cleanup --run ID [--remove-worktrees]` | Close Herdr spaces this run created; remove clean worktrees |
 
 ### tasks.json
 
@@ -160,14 +166,14 @@ small requests to one trivial task. Research rounds are capped at 3 per request.
 
 | Symptom | Fix |
 |---|---|
-| `not running inside Herdr (HERDR_ENV != 1)` | Start Claude from a Herdr pane, or use `--launch none` and run the printed `codex` command yourself |
+| `not running inside Herdr` | Start from a Herdr app or old Herdr pane, or use `--launch none` and run the printed `codex` command yourself |
 | `'<model>' model is not supported when using Codex with a ChatGPT account` | Client too old: `codex update` (0.163.0 works), check `codex login status`, then `scripts/doctor.sh --probe-codex`; or choose another model with `agent-kit config` |
 | worker reports `bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted` | Ubuntu's `apparmor_restrict_unprivileged_userns=1` blocks Codex's sandbox. Add the bwrap AppArmor profile from GUIDE.md Part 2 step 2, test with `codex sandbox -- sh -c 'echo ok'`; never weaken the worker sandbox |
 | report has `committed: false`, `index.lock: Read-only file system` | Expected: Codex's `workspace-write` keeps `.git` read-only. Review the diff, then `commit-task` (audited `Orchestrator-Commit` trailer) |
 | worker's `./gradlew` fails: lock file / read-only `~/.gradle` | Add the cache dir to `worker.writable_dirs` (default has `~/.gradle`) |
-| `collect` says `pending` | No report yet; `herdr agent read <name> --source recent-unwrapped --lines 120` to see progress |
+| `collect` says `pending` | No report yet; `hc read --lines 80 <name>` to see progress |
 | `collect` says `ambiguous` | Report disagrees with git (wrong HEAD/commits, stray changes); inspect the worktree, ask the worker to fix the report |
 | worker `BLOCKED` with dirty worktree | Inspect `worktrees/worker-N` (in the workspace), keep or commit what matters, then `worker-release` |
-| Codex shows an approval prompt | Herdr marks it `blocked`; read it with `herdr agent read`, decide, answer with `herdr agent send-keys` |
+| Codex shows an approval prompt | Herdr marks it `blocked`; read it with `hc read --lines 80 <name>`, decide, and answer in its app space |
 | `run(s) [...] still RUNNING` | Finish it (`verify`) or `run close --status BLOCKED --reason ...` |
 | scout agent not found in an old session | First agent in a new `.claude/agents/` dir needs a Claude restart |

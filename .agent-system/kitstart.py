@@ -4,11 +4,8 @@
     kitstart.py --workspace DIR [--dry-run] [--no-attach]
     kitstart.py --workspace DIR --continue [--session ID] [--force] [--dry-run] [--no-attach]
 
-- Inside Herdr (HERDR_ENV=1): create a Herdr workspace for the project, start the orchestrator in it
-  and focus it.
-- Outside Herdr with its server running: the same, then attach to Herdr (unless --no-attach).
-- Herdr not running: start a small background helper that waits for Herdr's server, then does the
-  above, and start Herdr in this terminal.
+- With the hc backend, start the orchestrator in a Herdr app space, from inside the app or a normal
+  terminal. With the legacy backend, start or attach to old Herdr as before.
 If the orchestrator is already running (agent named orch-<repo>), it is focused instead of started
 again. Programs other than Claude Code get a first prompt telling them to read their rules
 (AGENTS.md and the notes in CLAUDE.md).
@@ -77,36 +74,70 @@ def saved_session(ws: Path) -> dict:
         return {}
 
 
-def save_session(ws: Path, kind: str, session_id: str, name: str) -> None:
+def save_session(ws: Path, kind: str, session_id: str, name: str, backend: str | None = None) -> None:
     f = session_file(ws)
     f.parent.mkdir(parents=True, exist_ok=True)
-    f.write_text(json.dumps({"kind": kind, "session_id": session_id, "agent": name,
-                             "saved_at": time.strftime("%Y-%m-%dT%H:%M:%S")}, indent=2) + "\n")
+    data = {"kind": kind, "session_id": session_id, "agent": name,
+            "saved_at": time.strftime("%Y-%m-%dT%H:%M:%S")}
+    if backend:
+        data["backend"] = backend
+    f.write_text(json.dumps(data, indent=2) + "\n")
 
 
-def live_agent(herdr: S.Herdr, name: str) -> dict | None:
+def live_agent(herdr: S.Herdr | S.Hc, name: str) -> dict | None:
     """Herdr's record of the running orchestrator, or None when it is not running."""
     try:
-        res = herdr.agent_get(name).get("result") or {}
+        rec, state = herdr.agent_record(name)
     except S.SchedulerError:
         return None
-    return res.get("agent") or res
+    return rec if rec and state != "absent" else None
+
+
+def find_orchestrator(ws: Path, cfg: dict, p: dict, env, runner) -> tuple[dict, str] | None:
+    """Find a live orchestrator by its name or by its workspace in either backend."""
+    current = S.make_herdr(cfg, env, runner).backend
+    backends = {"hc": S.Hc(runner=runner), "legacy": S.Herdr(runner=runner)}
+    order = [current, *(backend for backend in backends if backend != current)]
+    for backend_name in order:
+        backend = backends[backend_name]
+        try:
+            rec, state = backend.agent_record(p["name"])
+        except (S.SchedulerError, OSError, subprocess.TimeoutExpired):
+            rec, state = None, "unknown"
+        if rec and state != "absent":
+            return rec, backend_name
+        try:
+            records = backend.agent_list()
+        except (S.SchedulerError, OSError, subprocess.TimeoutExpired):
+            records = None
+        for rec in records or []:
+            cwd = rec.get("cwd")
+            if rec.get("agent_status") == "absent" or rec.get("kind") != p["kind"] or not cwd:
+                continue
+            try:
+                if Path(cwd).resolve() == ws.resolve():
+                    return rec, backend_name
+            except (OSError, RuntimeError):
+                continue
+    return None
 
 
 def live_session_id(agent: dict | None) -> str | None:
     return ((agent or {}).get("agent_session") or {}).get("value") or None
 
 
-def remember_session(ws: Path, cfg: dict, herdr: S.Herdr | None = None) -> str | None:
+def remember_session(ws: Path, cfg: dict, herdr: S.Herdr | S.Hc | None = None) -> str | None:
     """Save the running orchestrator's chat id (best effort; used by `agent-kit config`)."""
     try:
         p = plan(ws, cfg)
-        herdr = herdr or S.Herdr()
+        herdr = herdr or S.make_herdr(cfg)
+        if herdr.backend == "hc":
+            return saved_session(ws).get("session_id")
         if not herdr.available():
             return None
         sid = live_session_id(live_agent(herdr, p["name"]))
         if sid:
-            save_session(ws, p["kind"], sid, p["name"])
+            save_session(ws, p["kind"], sid, p["name"], herdr.backend)
         return sid
     except Exception:  # never fail a config change over this
         return None
@@ -131,25 +162,25 @@ def server_running(runner=subprocess.run) -> bool:
     return p.returncode == 0 and re.search(r"status:\s*running", p.stdout) is not None
 
 
-def launch(p: dict, herdr: S.Herdr, timeout_ms: int, log=print) -> str:
-    """Start (or focus) the orchestrator inside a running Herdr. Returns what happened."""
+def launch(p: dict, herdr: S.Herdr | S.Hc, timeout_ms: int, log=print) -> str:
+    """Start (or focus) the orchestrator in the selected Herdr backend."""
     if live_agent(herdr, p["name"]) is not None:
-        herdr._call("agent", "focus", p["name"])
+        herdr.focus(p["name"])
         return f"orchestrator {p['name']} is already running: focused it"
     ws = Path(p["ws"])
     if p.get("resume"):
         p["args"] = resume_args(p["kind"], p["resume"]) + p["args"]
-        save_session(ws, p["kind"], p["resume"], p["name"])
+        save_session(ws, p["kind"], p["resume"], p["name"], herdr.backend)
     elif p["kind"] == "claude":  # choose the chat id up front so `agent-kit continue` can find it
         sid = str(uuid.uuid4())
         p["args"] = ["--session-id", sid] + p["args"]
-        save_session(ws, p["kind"], sid, p["name"])
+        save_session(ws, p["kind"], sid, p["name"], herdr.backend)
     ws_id, pane = herdr.workspace_create(p["ws"], p["label"])
     try:
         herdr.agent_start(p["name"], pane, p["args"], timeout_ms, kind=p["kind"])
     except S.SchedulerError as e:
         if "agent_not_ready" in str(e):
-            herdr._call("workspace", "focus", ws_id)
+            herdr.focus(p["name"])
             return (f"started {p['kind']}, but it is waiting at a startup prompt (e.g. 'trust this folder'): "
                     "answer it in the Herdr pane")
         raise
@@ -158,13 +189,13 @@ def launch(p: dict, herdr: S.Herdr, timeout_ms: int, log=print) -> str:
     if not p.get("resume") and p["kind"] != "claude":  # e.g. Codex: Herdr learns the chat id once it runs
         sid = live_session_id(live_agent(herdr, p["name"]))
         if sid:
-            save_session(ws, p["kind"], sid, p["name"])
-    herdr._call("workspace", "focus", ws_id)
+            save_session(ws, p["kind"], sid, p["name"], herdr.backend)
+    herdr.focus(p["name"])
     how = f"resumed chat {p['resume']}" if p.get("resume") else "started"
     return f"{how} in orchestrator {p['name']}: {p['kind']} {p['model']}" + (f" ({p['effort']})" if p["effort"] else "")
 
 
-def stop_for_continue(p: dict, herdr: S.Herdr, session: str | None, force: bool,
+def stop_for_continue(p: dict, herdr: S.Herdr | S.Hc, session: str | None, force: bool,
                       sleep=time.sleep) -> tuple[str | None, str]:
     """Close the running orchestrator (if any) and choose the chat to resume. Returns (chat id, note)."""
     ws = Path(p["ws"])
@@ -177,7 +208,7 @@ def stop_for_continue(p: dict, herdr: S.Herdr, session: str | None, force: bool,
                                    "its prompt), or pass --force to interrupt it")
         sid = live_session_id(agent)
         if sid:
-            save_session(ws, p["kind"], sid, p["name"])
+            save_session(ws, p["kind"], sid, p["name"], herdr.backend)
         if not agent.get("workspace_id"):
             raise S.SchedulerError(f"cannot tell which Herdr workspace holds {p['name']}: exit it yourself, "
                                    "then run agent-kit continue again")
@@ -255,7 +286,8 @@ def start_connector(ws: Path, cfg: dict, popen=None, log=None, no_orchestrator=F
         log(f"hub connector could not be started: {e}; orchestrator continues")
 
 
-def main(argv=None, herdr: S.Herdr | None = None, env=None, execvp=os.execvp, runner=subprocess.run) -> int:
+def main(argv=None, herdr: S.Herdr | S.Hc | None = None, env=None, execvp=os.execvp,
+         runner=subprocess.run) -> int:
     ap = argparse.ArgumentParser(prog="agent-kit start", description=__doc__.split("\n\n")[0])
     ap.add_argument("--workspace", type=Path, required=True)
     ap.add_argument("--dry-run", action="store_true")
@@ -275,12 +307,12 @@ def main(argv=None, herdr: S.Herdr | None = None, env=None, execvp=os.execvp, ru
         print(f"error: {e}", file=sys.stderr)
         return 1
     timeout_ms = cfg["herdr"]["agent_start_timeout_ms"]
-    herdr = herdr or S.Herdr()
+    herdr = herdr or S.make_herdr(cfg, env)
 
     if a.resume and not resume_args(p["kind"], "x"):
         print(f"note: {p['kind']} cannot resume a chat with this kit: continue starts a new chat")
 
-    if a.when_ready:  # detached helper: wait for Herdr's server, then launch
+    if a.when_ready and herdr.backend == "legacy":  # detached helper: wait for Herdr's server, then launch
         for _ in range(60):
             if server_running(runner):
                 break
@@ -293,6 +325,18 @@ def main(argv=None, herdr: S.Herdr | None = None, env=None, execvp=os.execvp, ru
                                         if saved_session(ws).get("kind") == p["kind"] else None)
             if p["resume"] and not resume_args(p["kind"], p["resume"]):
                 p["resume"] = None
+        if not a.resume:
+            found = find_orchestrator(ws, cfg, p, env, runner)
+            if found:
+                rec, backend = found
+                if backend != herdr.backend:
+                    print(f"error: orchestrator is already running in {backend}; run `agent-kit continue` "
+                          "to restart it", file=sys.stderr)
+                    return 1
+                herdr.focus(rec.get("name") or p["name"])
+                print(f"orchestrator {rec.get('name') or p['name']} is already running: focused it")
+                start_connector(ws, cfg)
+                return 0
         print(launch(p, herdr, timeout_ms))
         start_connector(ws, cfg)
         return 0
@@ -302,21 +346,38 @@ def main(argv=None, herdr: S.Herdr | None = None, env=None, execvp=os.execvp, ru
         print(f"error: {p['binary']} is not installed (orchestrator program {p['kind']}); install it or "
               "choose another model: agent-kit config --model-orchestrator=...", file=sys.stderr)
         return 1
-    if not a.dry_run and shutil.which("herdr") is None:
+    if not a.dry_run and herdr.backend == "legacy" and shutil.which("herdr") is None:
         print("error: herdr is not installed", file=sys.stderr)
         return 1
-    inside = env.get("HERDR_ENV") == "1"
-    running = inside or (not a.dry_run and server_running(runner))
+    inside = bool(env.get("HC_TERMINAL_ID")) if herdr.backend == "hc" else env.get("HERDR_ENV") == "1"
+    running = herdr.backend == "hc" or inside or (not a.dry_run and server_running(runner))
     if a.dry_run:
         mode = ("inside Herdr: create the workspace and start the orchestrator here" if inside else
+                "outside the Herdr app: start it there" if herdr.backend == "hc" else
                 "outside Herdr: start it there (or start Herdr first), then attach")
         if a.resume:
-            live = live_session_id(live_agent(herdr, p["name"])) if shutil.which("herdr") else None
+            live = live_session_id(live_agent(herdr, p["name"])) if herdr.backend == "legacy" and shutil.which("herdr") else None
             saved = a.session or live or saved_session(ws).get("session_id")
             mode = (f"close the running orchestrator if idle, then resume chat {saved}" if saved else
                     "close the running orchestrator if idle, then start a new chat (no saved chat id)") + "; " + mode
         print(f"[dry-run] {mode}; nothing started")
         return 0
+    if not a.resume:
+        found = find_orchestrator(ws, cfg, p, env, runner)
+        if found:
+            rec, backend = found
+            if backend != herdr.backend:
+                print(f"error: orchestrator is already running in {backend}; run `agent-kit continue` "
+                      "to restart it", file=sys.stderr)
+                return 1
+            herdr.focus(rec.get("name") or p["name"])
+            print(f"orchestrator {rec.get('name') or p['name']} is already running: focused it")
+            start_connector(ws, cfg)
+            if herdr.backend == "legacy" and not inside and not a.no_attach:
+                execvp("herdr", ["herdr"])
+            elif herdr.backend == "hc" and not inside:
+                print("find it in the Herdr app")
+            return 0
     if running:
         if a.resume:
             try:
@@ -328,8 +389,10 @@ def main(argv=None, herdr: S.Herdr | None = None, env=None, execvp=os.execvp, ru
             if note:
                 print(note.rstrip("; "))
         print(launch(p, herdr, timeout_ms))
+        if herdr.backend == "hc" and not inside:
+            print("find it in the Herdr app")
         start_connector(ws, cfg)
-        if not inside and not a.no_attach:
+        if herdr.backend == "legacy" and not inside and not a.no_attach:
             execvp("herdr", ["herdr"])
         return 0
     # Herdr is not running: a detached helper launches the orchestrator once the server is up.

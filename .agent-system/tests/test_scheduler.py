@@ -1696,11 +1696,75 @@ class StartHerdr(FakeHerdr):
                                      "workspace_id": self.ws_of.get(name, "wX"),
                                      **({"agent_session": {"kind": "id", "value": sid}} if sid else {})}}}
 
+    def agent_record(self, name):
+        try:
+            agent = self.agent_get(name)["result"]["agent"]
+        except S.SchedulerError:
+            return None, "absent"
+        return {**agent, "backend": self.backend, "kind": "claude", "cwd": getattr(self, "cwd", None),
+                "pane_id": None}, agent.get("agent_status", "unknown")
+
     def workspace_close(self, ws):
         super().workspace_close(ws)
         for name, w in list(self.ws_of.items()) + [(n, "wX") for n in self.live if n not in self.ws_of]:
             if w == ws:
                 self.live.pop(name, None)
+
+    def focus(self, name):
+        self.calls.append(("focus", name))
+
+
+class StartHc(S.Hc):
+    """In-memory hc adapter used by the start/continue tests."""
+
+    backend = "hc"
+
+    def __init__(self, **kwargs):
+        self.calls, self.live, self.ws_of, self.cwd_of, self.kind_of = [], {}, {}, {}, {}
+        self.workspaces = {}
+
+    def available(self):
+        return True
+
+    def server_running(self):
+        return False
+
+    def workspace_create(self, cwd, label):
+        workspace_id = f"hc-space-{len(self.ws_of) + 1}"
+        self.calls.append(("workspace_create", cwd, label))
+        self.workspaces[workspace_id] = cwd
+        return workspace_id, workspace_id
+
+    def workspace_close(self, workspace_id):
+        self.calls.append(("workspace_close", workspace_id))
+        for name, current in list(self.ws_of.items()):
+            if current == workspace_id:
+                self.live.pop(name, None)
+
+    def agent_start(self, name, pane, agent_args, timeout_ms, kind="codex"):
+        self.calls.append(("agent_start", name, pane, list(agent_args)))
+        self.live[name] = "idle"
+        self.ws_of[name] = pane
+        self.cwd_of[name] = self.workspaces.get(pane)
+        self.kind_of[name] = kind
+
+    def agent_prompt(self, name, text, timeout_ms):
+        self.calls.append(("agent_prompt", name, text))
+        self.live[name] = "working"
+
+    def agent_record(self, name):
+        if name not in self.live:
+            return None, "absent"
+        rec = {"name": name, "agent_status": self.live[name], "workspace_id": self.ws_of.get(name),
+               "cwd": self.cwd_of.get(name), "kind": self.kind_of.get(name, "claude"),
+               "backend": self.backend}
+        return rec, self.live[name]
+
+    def agent_list(self):
+        return [self.agent_record(name)[0] for name in self.live]
+
+    def focus(self, name):
+        self.calls.append(("focus", name))
 
 
 class TestStart(WorkspaceBase):
@@ -1708,18 +1772,25 @@ class TestStart(WorkspaceBase):
         super().setUp()
         (self.ws / ".agent-system" / "config.json").write_text(json.dumps(self.cfg))
         self.h = StartHerdr()
+        self.h.cwd = str(self.ws)
+        self.printed = []
 
     def set_orch(self, **role):
         self.cfg["orchestrator"] = role
         (self.ws / ".agent-system" / "config.json").write_text(json.dumps(self.cfg))
 
-    def start(self, *extra, env=None, running=True):
+    def start(self, *extra, env=None, running=True, legacy=None, hc=None):
         execs, popens = [], []
+        legacy = legacy or (self.h if self.h.backend == "legacy" else StartHerdr())
+        hc = hc or (self.h if self.h.backend == "hc" else StartHc())
         runner = lambda *a, **k: subprocess.CompletedProcess(a, 0, "server:\n  status: running\n" if running else
                                                              "server:\n  status: stopped\n", "")
-        with mock.patch.object(KS.shutil, "which", return_value="/usr/bin/x"), \
+        self.printed = []
+        with mock.patch.object(KS.S, "Herdr", side_effect=lambda **kwargs: legacy), \
+                mock.patch.object(KS.S, "Hc", side_effect=lambda **kwargs: hc), \
+                mock.patch.object(KS.shutil, "which", return_value="/usr/bin/x"), \
                 mock.patch.object(KS.subprocess, "Popen", side_effect=lambda *a, **k: popens.append(a)), \
-                mock.patch("builtins.print"):
+                mock.patch("builtins.print", side_effect=lambda *a, **k: self.printed.append(" ".join(map(str, a)))):
             rc = KS.main(["--workspace", str(self.ws), *extra], herdr=self.h, env=env or {},
                          execvp=lambda *a: execs.append(a), runner=runner)
         return rc, execs, popens
@@ -1746,7 +1817,7 @@ class TestStart(WorkspaceBase):
         self.assertEqual(create[1:], (str(self.ws), "repo"))
         self.assertEqual(self.h.kinds, ["codex"])
         self.assertTrue(any(c[0] == "agent_prompt" and "read AGENTS.md" in c[2] for c in self.h.calls))
-        self.assertTrue(any(c[:3] == ("call", "workspace", "focus") for c in self.h.calls))
+        self.assertIn(("focus", "orch-repo"), self.h.calls)
         self.assertEqual(execs, [])  # already inside Herdr: no attach
 
     def test_claude_gets_no_bootstrap_prompt_and_outside_attaches(self):
@@ -1763,7 +1834,56 @@ class TestStart(WorkspaceBase):
         self.h.live["orch-repo"] = "idle"
         self.start(env={"HERDR_ENV": "1"})
         self.assertFalse([c for c in self.h.calls if c[0] in ("workspace_create", "agent_start")])
-        self.assertIn(("call", "agent", "focus", "orch-repo"), self.h.calls)
+        self.assertIn(("focus", "orch-repo"), self.h.calls)
+
+    def test_hc_start_inside_app_saves_backend_without_attach(self):
+        self.set_orch(kind="claude", model="claude-opus-5-5")
+        self.h = StartHc()
+        rc, execs, _ = self.start(env={"HC_TERMINAL_ID": "terminal-1"})
+        self.assertEqual(rc, 0)
+        self.assertEqual(execs, [])
+        self.assertTrue(any(c[0] == "workspace_create" for c in self.h.calls))
+        self.assertTrue(any(c[0] == "agent_start" for c in self.h.calls))
+        self.assertIn(("focus", "orch-repo"), self.h.calls)
+        self.assertEqual(KS.saved_session(self.ws)["backend"], "hc")
+
+    def test_hc_already_running_is_focused_without_launch(self):
+        self.set_orch(kind="claude", model="claude-opus-5-5")
+        self.h = StartHc()
+        self.h.live["orch-repo"] = "idle"
+        self.h.ws_of["orch-repo"] = "hc-space-1"
+        self.h.cwd_of["orch-repo"] = str(self.ws)
+        rc, execs, _ = self.start(env={"HC_TERMINAL_ID": "terminal-1"})
+        self.assertEqual((rc, execs), (0, []))
+        self.assertFalse([c for c in self.h.calls if c[0] in ("workspace_create", "agent_start")])
+        self.assertIn(("focus", "orch-repo"), self.h.calls)
+
+    def test_hc_start_refuses_orchestrator_running_in_legacy(self):
+        self.set_orch(kind="claude", model="claude-opus-5-5")
+        self.h = StartHc()
+        legacy = StartHerdr()
+        legacy.live["orch-repo"] = "idle"
+        legacy.ws_of["orch-repo"] = "w-old"
+        rc, execs, _ = self.start(env={"HC_TERMINAL_ID": "terminal-1"}, legacy=legacy)
+        self.assertEqual((rc, execs), (1, []))
+        self.assertIn("legacy", "\n".join(self.printed))
+        self.assertIn("agent-kit continue", "\n".join(self.printed))
+        self.assertFalse([c for c in self.h.calls if c[0] in ("workspace_create", "agent_start")])
+
+    def test_hc_continue_closes_space_and_resumes_saved_chat(self):
+        self.set_orch(kind="claude", model="claude-fable-5-1", effort="max")
+        self.h = StartHc()
+        self.h.live["orch-repo"] = "idle"
+        self.h.ws_of["orch-repo"] = "hc-space-1"
+        self.h.cwd_of["orch-repo"] = str(self.ws)
+        self.h.kind_of["orch-repo"] = "claude"
+        KS.save_session(self.ws, "claude", "chat-hc", "orch-repo", "hc")
+        rc, execs, _ = self.start("--continue", env={"HC_TERMINAL_ID": "terminal-1"})
+        self.assertEqual((rc, execs), (0, []))
+        self.assertIn(("workspace_close", "hc-space-1"), self.h.calls)
+        args = [c for c in self.h.calls if c[0] == "agent_start"][-1][3]
+        self.assertEqual(args[:2], ["--resume", "chat-hc"])
+        self.assertEqual(KS.saved_session(self.ws)["backend"], "hc")
 
     def test_herdr_not_running_spawns_helper_then_starts_herdr(self):
         self.set_orch(kind="claude", model="claude-opus-5-5")

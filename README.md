@@ -63,8 +63,13 @@ The orchestrator asks with clickable choices (you get notified via Herdr / Remot
 |---|---|---|
 | Linux, macOS 12.3+ or Windows (WSL2), `bash`, `git`, `python3` 3.11+ (macOS: from Homebrew) | scheduler and scripts (Python stdlib only, no pip installs) | `python3 --version` |
 | The agent programs you choose, installed and logged in. Defaults: Claude Code (orchestrator and scout) and Codex CLI 0.163.0+ (workers) | run the roles; any program Herdr supports can be chosen (section 4) | `claude --version`, `codex --version`, `codex login status` |
-| Herdr 0.9+ (terminal workspace manager for AI coding agents), with its Claude and Codex integrations | runs and shows the agents; live dispatch needs `HERDR_ENV=1` | `herdr status` |
+| Herdr app (new default, powered by herdr-core `hc`); old Herdr 0.9+ is also supported | runs and shows the agents | `.agent-system/scripts/doctor.sh` |
 | `jq` (optional) | nicer error messages in `doctor.sh --probe-codex` | |
+
+**Herdr app (default).** Install the new app from [herdr.dev](https://herdr.dev). The older `herdr`
+CLI still works when `herdr.backend` is set to `legacy`. The setting accepts `auto`, `hc` or `legacy`:
+`auto` selects `hc` inside the app, `legacy` inside old Herdr, and otherwise `hc` when its core is
+running. The doctor checks `hc`, `herdr-app` and `herdr-session`.
 
 **Models.** You choose the program, model and effort for each role with `agent-kit config` (section 4):
 Claude Code and Codex are verified; every other program Herdr can launch is listed as **unverified**.
@@ -87,8 +92,8 @@ Test with `codex sandbox -- sh -c 'echo ok'`.
 ### Install
 
 Pick your system. Each guide installs the same things: `git` and Python 3.11+, the agent programs
-(defaults: Claude Code for the orchestrator and scout, Codex CLI for workers), Herdr with its Claude
-and Codex integrations, and `agent-kit`. Then finish with [After installing](#after-installing-all-systems).
+(defaults: Claude Code for the orchestrator and scout, Codex CLI for workers), the Herdr app, and
+`agent-kit`. Then finish with [After installing](#after-installing-all-systems).
 
 #### Ubuntu / Debian
 
@@ -102,9 +107,7 @@ sudo apt update && sudo apt install -y git python3 curl nodejs npm
 curl -fsSL https://claude.ai/install.sh | bash       # Claude Code; then run `claude` once to log in
 sudo npm install -g @openai/codex                    # Codex CLI; then `codex login`
 
-# 3. Herdr 0.9+: install it with its own instructions, then its integrations
-herdr integration install claude
-herdr integration install codex
+# 3. Herdr app (default): install from https://herdr.dev
 
 # 4. agent-kit
 curl -fsSL https://ltdsword.github.io/agent-kit/setup.sh | sudo sh   # once: adds the signed agent-kit repository
@@ -133,9 +136,7 @@ python3 --version                                    # must be 3.11+; if not, pu
 curl -fsSL https://claude.ai/install.sh | bash       # Claude Code; then run `claude` once to log in
 npm install -g @openai/codex                         # Codex CLI; then `codex login`
 
-# 3. Herdr 0.9+: install it with its own instructions, then its integrations
-herdr integration install claude
-herdr integration install codex
+# 3. Herdr app (default): install from https://herdr.dev
 
 # 4. agent-kit, from Git
 git clone https://github.com/ltdsword/agent-kit.git ~/Code/agent-kit
@@ -238,7 +239,7 @@ it from apt and from Git at the same time: whichever comes first in `PATH` wins 
 #### After installing (all systems)
 
 1. Create the Codex worker profile `~/.codex/worker.config.toml` (see "Codex worker profile" above).
-2. Check: `claude --version`, `codex --version`, `codex login status`, `herdr status`,
+2. Check: `claude --version`, `codex --version`, `codex login status`,
    `codex sandbox -- sh -c 'echo ok'`.
 3. Continue with [Quick start](#2-quick-start); after `agent-kit create`, run
    `.agent-system/scripts/doctor.sh` in the workspace.
@@ -259,21 +260,22 @@ $EDITOR CLAUDE.md                            # fill in the remaining TODOs at th
 .agent-system/scripts/doctor.sh              # every line should be OK
 
 # 3. Start working.
-agent-kit start                              # opens Herdr and launches the orchestrator with its model
+agent-kit start                              # launches the orchestrator in the Herdr app
 ```
 
-`agent-kit start` works from a normal terminal (it starts Herdr if needed and attaches you) or inside
-Herdr (it opens the project in a new Herdr workspace). Running it again switches to the running
-orchestrator instead of starting a second one.
+`agent-kit start` works from a normal terminal or inside the Herdr app. It opens a project space in
+the app; from old Herdr it attaches as before. Running it again focuses the running orchestrator
+instead of starting a second one.
 
 **Continuing the last chat:** `agent-kit continue` restarts the orchestrator with the current config
 (after `agent-kit config`) in the **last active chat** of this workspace, so the conversation carries on
-with the new model and effort. It works from anywhere: inside Herdr, or from a plain terminal when Herdr
-isn't running (it starts Herdr, then resumes the chat there).
+with the new model and effort. It works from anywhere: inside the Herdr app, or from a plain terminal
+when the selected backend is available.
 - **Where the chat id is kept:** `.orchestrator/orchestrator.json` in the workspace. It is updated every
   time a chat in the workspace is active: a Claude Code hook (`.agent-system/scripts/record-session.py`,
   installed in `.claude/settings.json`) records the chat id whenever a session starts, resumes, is
-  cleared, or gets a prompt. `agent-kit start`, `config` and `continue` record it too (for Codex they ask Herdr).
+  cleared, or gets a prompt. `agent-kit start`, `config` and `continue` record it too; legacy Herdr can
+  supply Codex chat ids.
 - **A running orchestrator** is closed first, but only while it is idle (`--force` interrupts a busy
   one). `--session=<id>` resumes a different chat.
 - **Resuming** works for Claude Code (`claude --resume <id>`) and Codex (`codex resume <id>`); other
@@ -376,8 +378,8 @@ agent-kit --help
 | `agent-kit config --model-worker=gpt-6-sol --effort-worker=high` | Change a workspace's models (orchestrator, scout, worker); see "Choosing models" below |
 | `agent-kit config` | On a terminal: asks for each role (program → model → effort), picking from a numbered table |
 | `agent-kit config --show` / `--list` | Show the workspace's current roles / every known model |
-| `agent-kit start` | Open the workspace in Herdr and launch the orchestrator with its program, model and effort (from a normal terminal: starts Herdr if needed, then attaches) |
-| `agent-kit continue [--session=ID] [--force]` | Restart the orchestrator with the current config in the workspace's last active chat (inside or outside Herdr) |
+| `agent-kit start` | Open the workspace in the Herdr app and launch the orchestrator with its program, model and effort; legacy Herdr attaches as before |
+| `agent-kit continue [--session=ID] [--force]` | Restart the orchestrator with the current config in the workspace's last active chat |
 | `agent-kit hub enable` / `hub disable` | Show / hide the workspace on the Agent Hub website (needs `agent-kit hub-login` on this computer once). `create` and `update` already enable a never-enabled workspace when the computer is logged in; a `disable` is kept |
 | `agent-kit <target-repo>` | Legacy: install the kit **inside** a repo you own (also edits its `.gitignore`) |
 | `agent-kit --version` (or `-V`) | Show the kit's version and where it comes from; inside a workspace (or with `--folder=<repo>`) also the version that workspace was last created/updated with, and whether it needs `agent-kit update` |
@@ -392,7 +394,7 @@ agent-kit --help
 | `--num-worker=N` | (`create`, `config`) Number of parallel workers, 1..10 (default 3); a request may then have up to N tasks |
 | `--show`, `--list` | (`config`) Show the workspace's roles / every known model with its efforts |
 | `--no-input` | (`create`, `config`) Never prompt; fail on an unknown model instead of asking |
-| `--no-attach` | (`start`) Don't attach to Herdr afterwards |
+| `--no-attach` | (`start`) Don't attach to legacy Herdr afterwards |
 | `--no-hub` | (`create`, `update`) Don't enable the Agent Hub for this workspace, even if this computer is logged in |
 
 **`create`** makes `<repo>.workspace/` with:
@@ -435,7 +437,7 @@ files and state, and a customized `scout.md`. It reports keys in the kit's confi
 `config.json` lacks. Older workspaces are migrated: the worker section in `AGENTS.md` is replaced by
 the orchestrator rules.
 
-**`start`** creates a Herdr workspace for the project, launches the orchestrator in it (agent name
+**`start`** creates a Herdr app space for the project, launches the orchestrator in it (agent name
 `orch-<repo>`), and focuses it. Programs other than Claude Code first get a short prompt telling them
 to read `AGENTS.md` and the notes in `CLAUDE.md` (Claude Code reads `CLAUDE.md` by itself). If the
 program waits at a startup prompt (e.g. "trust this folder"), answer it in the Herdr pane.
@@ -529,11 +531,11 @@ Notes:
 
 ## 6. Daily workflow
 
-1. **Start**: `cd ~/Code/myrepo.workspace && agent-kit start`. It opens Herdr and launches the
+1. **Start**: `cd ~/Code/myrepo.workspace && agent-kit start`. It opens the project in the Herdr app and launches the
    orchestrator with the program, model and effort you chose (`agent-kit config --show`).
 2. **Ask**: describe the outcome you want. Small changes become one trivial task; larger ones get up to
    3 research rounds (Opus reads the code itself), then 1-3 tasks.
-3. **Watch** (optional): `ctrl+b w` jumps to a worker's Herdr workspace (`<run>-worker-N`).
+3. **Watch** (optional): `ctrl+b w` jumps to a worker's Herdr app space (`<run>-worker-N`).
    `ctrl+b q` detaches; agents keep running. Claude acts only while its turn is active: when you come
    back, ask it to "resume run r1".
 4. **Decide**: only important decisions reach you (section 8). Claude asks with clickable choices and
@@ -615,7 +617,7 @@ Most of these are run by Claude as orchestrator. The ones marked **you** are mea
 | `S dispatch-ready --run R [--launch herdr\|none] [--dry-run]` | Lease READY tasks to idle slots, create branches, start Codex in Herdr |
 | `S wait --run R [--task T] [--timeout SEC] [--interval SEC]` | Block until a task reports, or its agent needs an approval |
 | `S relaunch --run R --task T [--launch herdr\|none]` | Restart a lost worker session (same worktree) |
-| `herdr agent list` / `herdr agent read <name> --source recent-unwrapped --lines 120` | See agents and what a worker is doing (worker names: `worker-N-<run>`) |
+| `hc ls --json` / `hc read --lines 80 <name>` | See live agents and a worker's output (worker names: `worker-N-<run>`, spaces: `<run>-worker-N`); with `herdr.backend: legacy`, use `herdr agent list` / `herdr agent read <name> --source recent-unwrapped --lines 120` |
 
 ### Review and repair
 
@@ -644,7 +646,7 @@ as a known issue in the final report before you answer the merge question.
 | `S finish ask --run R [--recommend A\|B\|C]` | Open your merge decision: A merge and push / B merge locally / C don't merge, then the branch (this branch or one you type) |
 | `S finish apply --run R --decision D<n>` | Carry out your answer: fast-forward (merging a moved branch in and re-gating first), push for A, then clean up worktrees and `agent/*` branches |
 | `S resume --run R` | After an interruption: reconcile state and print the next actions (never relaunches by itself) |
-| `S cleanup --run R [--remove-worktrees]` | Close the Herdr workspaces this run created; remove clean worktrees |
+| `S cleanup --run R [--remove-worktrees]` | Close the Herdr spaces this run created; remove clean worktrees |
 
 ### Decisions
 
@@ -716,6 +718,7 @@ needs in `worker.writable_dirs` (section 5).
 | `decisions.require_user_for` | Decision kinds that need you: `blocker`, `repair`, `scope_exception`, `abandon` |
 | `decisions.routine_repairs` | How many fix rounds per task Claude may send on its own (default 2, i.e. all of them) |
 | `tasks.dir`, `tasks.inline_diff_max_lines` | Task file folder (`gen-tasks`) and how much diff is inlined into it |
+| `herdr.backend` | `auto` (default): `hc` inside the app, `legacy` inside old Herdr, otherwise `hc` when its core runs; set `hc` or `legacy` to force one |
 | `herdr.*_timeout_ms` | Agent start and prompt acknowledgement timeouts |
 | `gate.post_merge_check`, `gate.verify_cmd`, `gate.timeout_seconds` | Commands for the post-merge check and the final gate |
 
@@ -798,7 +801,7 @@ Free GitHub Pages needs a public repository.
 | Symptom | Fix |
 |---|---|
 | `ls` in the workspace shows no `.agent-system` | It is hidden (starts with a dot): use `ls -A` |
-| `not running inside Herdr (HERDR_ENV != 1)` | Start with `agent-kit start`, or use `--launch none` and run the printed worker command |
+| `not running inside Herdr` | Start workers from the Herdr app or old Herdr, or use `--launch none` and run the printed worker command |
 | `agent-kit start`: "waiting at a startup prompt" | The program asks something first (e.g. trust this folder): answer it in the Herdr pane |
 | An unverified program fails to start, or ignores the model | Its flags differ from the guess (`--model`): set `launch_args` for that role in `config.json` |
 | `dispatch-ready`: "worker program ... is not installed" | Install that program, or choose another worker model with `agent-kit config` |
