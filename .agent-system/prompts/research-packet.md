@@ -1,11 +1,13 @@
-# Research packet - Sonnet scout request and dossier format
+# Research packet - research request and dossier format
 
-Opus fills in the REQUEST part and delegates to the `scout` subagent. The scout returns a
-DOSSIER in the format below. The scout is read-only: **Opus** saves the reply to a file and registers it:
+By default Opus researches inline (read-only, method: the `agent-kit-research` skill) and writes the
+DOSSIER below itself. Only for research that would flood its context, or for independent questions
+worth running in parallel, Opus fills in the REQUEST part and delegates to the read-only `scout`
+subagent, which returns the DOSSIER. Either way **Opus** saves the dossier to a file and registers it:
 `scheduler.py research round --run <id> --evidence <file> --question "..." [--question ...]`
 (the scheduler copies it to `research/scout-round-<n>.md` and enforces max 3 rounds per request).
 
-## REQUEST (Opus -> scout)
+## REQUEST (what this round must decide; sent to the scout when delegating)
 - Run / round: `<RUN_ID>` / round `<n>` of 3 (round 1 broad; rounds 2-3 targeted at unresolved gaps only)
 - User request (verbatim): <...>
 - Decisions this research must support:
@@ -14,7 +16,7 @@ DOSSIER in the format below. The scout is read-only: **Opus** saves the reply to
 - Known evidence to build on (rounds 2-3): `<path:line>` ...
 - Out of scope for this round: <...>
 
-## DOSSIER (scout -> Opus)
+## DOSSIER (written by Opus, or returned by the scout)
 ```text
 RESEARCH_ID / RUN_ID / REPO_HEAD
 REQUESTED_ARCHITECTURAL_DECISIONS

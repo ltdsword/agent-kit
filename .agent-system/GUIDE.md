@@ -9,7 +9,7 @@ you mostly use part 4. Command reference: [README.md](README.md).
 |---|---|---|
 | You | - | Ask for a feature, answer decisions, approve the merge and push |
 | Orchestrator | Any agent program and model you choose (default Claude Code, Opus 5.5) | Plans, writes task specs, reviews, integrates |
-| Scout | Claude Code subagent, the model you choose (default Sonnet 5.5), read-only | Reads the codebase and reports evidence to Opus |
+| Scout (optional) | Claude Code subagent, the model you choose (default Sonnet 5.5), read-only | Only for research that would flood Opus's context, or independent questions in parallel; by default Opus researches itself |
 | Workers 1-3 | Any agent program and model you choose (default Codex `gpt-6-luna` at `xhigh`) | Write the code, each in its own git worktree |
 | Herdr | - | Runs and shows all of these terminals; keeps them alive if you detach |
 | `scheduler.py` | - | Tracks who works on what, enforces the rules |
@@ -150,8 +150,8 @@ What happens next, and where you come in:
 
 | Step | Who | What you see |
 |---|---|---|
-| 1. Size the request | Opus | Small change: one trivial task, no scouting. Bigger: continues below |
-| 2. Scout round 1 | Sonnet | Opus says what it is asking; the dossier is saved to `.orchestrator/runs/<run>/research/` |
+| 1. Size the request | Opus | Small change: one trivial task, no research round. Bigger: continues below |
+| 2. Research round 1 | Opus (scout only if needed) | Opus says what it is asking, researches read-only and writes the dossier, saved to `.orchestrator/runs/<run>/research/` |
 | 3. Readiness gate | Opus | READY, or a targeted round 2/3 (max 3 total). If still not ready, Opus inspects directly, narrows scope, or tells you what is missing |
 | 4. Plan | Opus | 1-3 tasks with dependencies; one plan file per task in `gen-tasks/<task-name>-<dd-mm-yy>.md` (open them to see exactly what each worker is told) |
 | 5. Dispatch | scheduler | New Herdr workspaces `<run>-worker-N` appear with the worker program running. Each worker gets a short prompt: read your task file, `WORKER-RULES.md`, key facts, cautions |
@@ -169,7 +169,7 @@ Under the hood Opus runs commands like these (you can run them too):
 S="python3 .agent-system/scheduler.py"
 $S task new --name "email validation"        # -> gen-tasks/email-validation-16-10-26.md, Opus fills it
 $S run create --run r1 --tasks .orchestrator/runs-input/r1-tasks.json
-$S research round --run r1 --evidence /tmp/scout-1.md --question "Where is RegisterUserReq validated?"
+$S research round --run r1 --evidence /tmp/research-1.md --question "Where is RegisterUserReq validated?"
 $S research readiness --run r1 --status READY --preserve "..." --contracts "..." \
    --interactions "..." --testing "..." --assumptions "..."
 $S dispatch-ready --run r1

@@ -13,11 +13,15 @@ integrate, and report. Avoid bulk coding yourself; workers implement (program, m
 
 How to operate (details: `.agent-system/GUIDE.md`, `.agent-system/README.md`):
 1. Small, local change? Do it directly or as one `"trivial": true` task. Otherwise continue.
-2. Define the decisions you need, then delegate to the read-only `scout` subagent (Claude Code: the
-   `scout` agent; other programs: their own read-only subagent if they have one, otherwise research
-   yourself, read-only). Save the findings to a file and register them:
-   `python3 .agent-system/scheduler.py research round ...`.
-   Max **3 scout rounds per request** (1 broad + 2 targeted). After each round record
+2. Define the decisions you need, then **research them yourself**, read-only, in this chat (method:
+   the `agent-kit-research` skill, `.claude/skills/agent-kit-research/SKILL.md`): one loop keeps every
+   finding in your context, with no hand-off loss. Write the dossier (`.agent-system/prompts/research-packet.md`)
+   to a file and register it: `python3 .agent-system/scheduler.py research round ...`.
+   Delegate to the read-only `scout` subagent (Claude Code) **only** when inline research would flood
+   your context (a very large codebase or many files to read for little signal) or when several
+   independent questions can be researched in parallel; say which reason applies. Its dossier is
+   registered the same way.
+   Max **3 research rounds per request** (1 broad + 2 targeted). After each round record
    `research readiness` (`.agent-system/prompts/architecture-readiness.md`). Reopen critical
    evidence yourself before high-stakes decisions.
    Scale design effort to the risk: trivial work follows existing conventions; moderate work gets a

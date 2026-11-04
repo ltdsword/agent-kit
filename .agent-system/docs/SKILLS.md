@@ -4,8 +4,8 @@ The kit works without these. When installed, each role picks up only its own set
 
 | Role | Skill | Source (commit installed 2026-10-31) | Where |
 |---|---|---|---|
-| Scout (Sonnet) | `agent-kit-research` (kit-owned, read-only) | adapted from the two research skills below (MIT) | `<workspace>/.claude/skills/`, copied by `agent-kit create/update`; preloaded via `skills:` in `scout.md` |
-| Scout (Sonnet) | Context7 MCP (`resolve-library-id`, `query-docs`) | https://github.com/upstash/context7 | user MCP config (`~/.claude.json`) |
+| Orchestrator (research rounds) and the optional scout | `agent-kit-research` (kit-owned, read-only) | adapted from the two research skills below (MIT) | `<workspace>/.claude/skills/`, copied by `agent-kit create/update`; the orchestrator loads it for inline research, the scout preloads it via `skills:` in `scout.md` |
+| Orchestrator and scout | Context7 MCP (`resolve-library-id`, `query-docs`) | https://github.com/upstash/context7 | user MCP config (`~/.claude.json`) |
 | Opus | `research`, `codebase-design`, `domain-modeling` | https://github.com/mattpocock/skills @ `a496f55` | `~/.claude/skills/` |
 | Opus | `search-first`, `architecture-decision-records` | https://github.com/affaan-m/ECC @ `b38be6a` | `~/.claude/skills/` |
 | Opus | `architecture-patterns` | https://github.com/wshobson/agents @ `7e2fb55` | `~/.claude/skills/` |
@@ -39,7 +39,7 @@ because the scheduler starts Codex without a `CODEX_HOME` override.
 ## Update, disable, remove
 - Update: `npx skills@latest update -g`, or rerun the add commands; record the new commits here.
 - Remove: `npx skills@latest remove -g <name>`; `claude mcp remove --scope user context7`.
-- Without Context7 or the web, the scout falls back to repository evidence and says so.
+- Without Context7 or the web, research falls back to repository evidence and says so.
 - Without the worker skills, workers follow `WORKER-RULES.md` as before (rule 8 only applies if present).
 
 ## Precedence and safety

@@ -10,7 +10,7 @@ to the repo, so the repo only ever sees the code changes you approve.
 
 ```text
 You ──request──> orchestrator: any program + model you choose (default Claude Code, Opus 5.5): plans, reviews, integrates
-                   ├─ scout: Claude Code subagent (default Sonnet 5.5), read-only (max 3 research rounds per request)
+                   ├─ research: Opus itself, read-only (max 3 research rounds per request); optional scout subagent (default Sonnet 5.5) for very large or parallel research
                    ▼
                  1-3 tasks ──> scheduler.py (leases, state machine, durable JSON)
                    ├─ worker-1 ┐
@@ -32,7 +32,7 @@ The orchestrator asks with clickable choices (you get notified via Herdr / Remot
 |---|---|---|
 | You | - | Ask for a change, make the critical decisions, approve the merge and push |
 | Orchestrator | Any agent program and model you choose (default Claude Code, Opus 5.5) | Plans tasks, writes task files, reviews, integrates |
-| Scout | Claude Code subagent, the model you choose (default Sonnet 5.5), read-only | Reads the codebase and reports evidence |
+| Scout (optional) | Claude Code subagent, the model you choose (default Sonnet 5.5), read-only | Only for research that would flood the orchestrator's context, or independent questions in parallel; by default the orchestrator researches itself |
 | Workers 1-3 | Any agent program and model you choose (default Codex `gpt-6-luna`, `xhigh`) | Write the code, each in its own git worktree |
 | Herdr | terminal multiplexer | Runs all agents; keeps them alive when you detach |
 | `scheduler.py` | Python stdlib CLI | Tracks who works on what and enforces the rules |
@@ -450,7 +450,7 @@ Each workspace has three roles. `agent-kit create` asks for them on a terminal (
 | Role | What it does | Programs | Default |
 |---|---|---|---|
 | orchestrator | The main session: plans, reviews, integrates, asks you | Any program (Claude Code and Codex verified); launched by `agent-kit start` | `claude-opus-5-5`, `high` |
-| scout | Read-only research subagent | Claude Code only (with another orchestrator, it researches itself) | `claude-sonnet-5-5`, `medium` |
+| scout | Optional read-only research subagent (the orchestrator researches itself by default) | Claude Code only (with another orchestrator, it researches itself) | `claude-sonnet-5-5`, `medium` |
 | worker | Implements the tasks | Any program (Claude Code and Codex verified); launched by the scheduler | `gpt-6-luna`, `xhigh` |
 
 ```bash
@@ -532,7 +532,7 @@ Notes:
 1. **Start**: `cd ~/Code/myrepo.workspace && agent-kit start`. It opens Herdr and launches the
    orchestrator with the program, model and effort you chose (`agent-kit config --show`).
 2. **Ask**: describe the outcome you want. Small changes become one trivial task; larger ones get up to
-   3 scout rounds, then 1-3 tasks.
+   3 research rounds (Opus reads the code itself), then 1-3 tasks.
 3. **Watch** (optional): `ctrl+b w` jumps to a worker's Herdr workspace (`<run>-worker-N`).
    `ctrl+b q` detaches; agents keep running. Claude acts only while its turn is active: when you come
    back, ask it to "resume run r1".
@@ -603,7 +603,7 @@ Most of these are run by Claude as orchestrator. The ones marked **you** are mea
 |---|---|
 | `S run create --run R --tasks FILE [--base REF] [--request-id ID]` | Validate the 1-3 task DAG and create `agent/integration-R` |
 | `S run close --run R --status BLOCKED\|FAILED --reason "..." --decision D<n>` | Close a run (needs your decision) |
-| `S research round --run R --evidence FILE [--question Q ...] [--summary S]` | Register a scout dossier (max 3 rounds per request) |
+| `S research round --run R --evidence FILE [--question Q ...] [--summary S]` | Register a research dossier, written by Opus or the optional scout (max 3 rounds per request) |
 | `S research readiness --run R --status READY\|NOT_READY --preserve .. --contracts .. --interactions .. --testing .. --assumptions .. [--missing ..]` | Record the architecture-readiness gate; non-trivial tasks dispatch only after READY |
 | `S task new --name "<task name>" [--date DD-MM-YY]` | Create `gen-tasks/<task-name>-<dd-mm-yy>.md` from the template |
 | `S task new --repair-of gen-tasks/<file>.md` | Create a repair file for the same task |
@@ -712,7 +712,7 @@ needs in `worker.writable_dirs` (section 5).
 | `worker.writable_dirs` | Extra folders workers may write (build caches). `~`, `/`, `~/.ssh`, `~/.codex`, `~/.config`, ... are rejected |
 | `pool.size` / `pool.slots` | 1-3 worker slots |
 | `pool.worktree_root` | Where worktrees go: `worktrees` (workspace mode) or `../{repo_name}.agent-worktrees` (in-repo) |
-| `limits` | Max 3 tasks per request, parallelism, `max_major_repairs` (2 fix rounds per task), scout rounds (fixed at 3) |
+| `limits` | Max 3 tasks per request, parallelism, `max_major_repairs` (2 fix rounds per task), research rounds (fixed at 3; the key is still `max_scout_rounds`) |
 | `decisions.require_user_for` | Decision kinds that need you: `blocker`, `repair`, `scope_exception`, `abandon` |
 | `decisions.routine_repairs` | How many fix rounds per task Claude may send on its own (default 2, i.e. all of them) |
 | `tasks.dir`, `tasks.inline_diff_max_lines` | Task file folder (`gen-tasks`) and how much diff is inlined into it |

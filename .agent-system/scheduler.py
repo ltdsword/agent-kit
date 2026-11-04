@@ -2681,9 +2681,9 @@ def build_parser() -> argparse.ArgumentParser:
     ask.add_argument("--recommend", required=True, help="recommended option key")
     ask.add_argument("--note", help="why the option is recommended")
 
-    res = sub.add_parser("research", help="scout-round budget and architecture-readiness gate")
+    res = sub.add_parser("research", help="research-round budget and architecture-readiness gate")
     rr = res.add_subparsers(dest="action", required=True)
-    rd = rr.add_parser("round", help="register a Sonnet scout dossier (max 3 per request)")
+    rd = rr.add_parser("round", help="register a research dossier, by Opus or the optional scout (max 3 per request)")
     rd.add_argument("--run", required=True)
     rd.add_argument("--evidence", required=True, type=Path)
     rd.add_argument("--question", action="append", default=[], help="decision-targeted question (repeat)")

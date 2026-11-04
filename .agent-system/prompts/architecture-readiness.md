@@ -1,4 +1,4 @@
-# Architecture-readiness gate (Opus, after EVERY scout round)
+# Architecture-readiness gate (Opus, after EVERY research round)
 
 Record the outcome with:
 ```bash
@@ -21,9 +21,9 @@ Also confirm: callers of changed interfaces found; security / concurrency / sche
 task boundaries do not overlap hot files without sequencing.
 
 ## Decision rules
-- READY -> stop scouting; write task packets; `run create` (if not yet) and `dispatch-ready`.
+- READY -> stop researching; write task packets; `run create` (if not yet) and `dispatch-ready`.
 - NOT_READY and rounds < 3 -> next round with ONLY the unresolved questions and the relevant path:line refs.
-- NOT_READY after round 3 -> no more scouting for this request (the budget survives restarts and new runs
+- NOT_READY after round 3 -> no more research rounds for this request (the budget survives restarts and new runs
   with the same `--request-id`). Opus inspects the remaining evidence directly, narrows scope to what the
   evidence supports, or closes the run BLOCKED stating exactly what is missing. The gate is never waived.
-- Trivial, localized edits (`"trivial": true` in tasks.json) may skip scouting; Opus inspects directly.
+- Trivial, localized edits (`"trivial": true` in tasks.json) may skip research rounds; Opus inspects directly.

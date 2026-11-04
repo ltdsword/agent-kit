@@ -5,7 +5,8 @@ Reference for the files and commands in this directory. For a step-by-step walkt
 
 ```text
 User request -> orchestrator: configured program + model (default Claude Code, Opus 5.5), launched by `agent-kit start`
-                 |- scout subagent: configured Claude model (default Sonnet 5.5, effort medium), read-only (max 3 rounds/request)
+                 |- research: the orchestrator itself, read-only (max 3 rounds/request); optional scout subagent
+                 |  (default Sonnet 5.5, effort medium) only for very large or parallel research
                  v
             1..N task DAG -> scheduler.py (leases, states, durable JSON) -> workers
                  worker-1 / worker-2 / worker-3: the configured program + model (default Codex gpt-6-luna @ xhigh), one Herdr workspace + git worktree each
@@ -21,7 +22,7 @@ User request -> orchestrator: configured program + model (default Claude Code, O
 
 | Path | Purpose |
 |---|---|
-| `config.json` | Program/model/effort per role (orchestrator, scout, worker; set with `agent-kit config`), pool size, task cap and parallelism (3 by default; `agent-kit config --num-worker=N`, 1..10), max 2 fix rounds per task, 3 scout rounds, gate commands |
+| `config.json` | Program/model/effort per role (orchestrator, scout, worker; set with `agent-kit config`), pool size, task cap and parallelism (3 by default; `agent-kit config --num-worker=N`, 1..10), max 2 fix rounds per task, 3 research rounds, gate commands |
 | `models.py` | Model registry: Herdr agent programs (Claude Code and Codex verified, others unverified), Claude list, Codex catalog, effort checks, pick-from table |
 | `kitconfig.py` | `agent-kit config`: choose program/model/effort per role (flags, or interactive on a terminal) |
 | `kitstart.py` | `agent-kit start` / `continue`: open Herdr and launch the orchestrator with its program/model/effort, or resume its last chat |
@@ -34,7 +35,7 @@ User request -> orchestrator: configured program + model (default Claude Code, O
 | `prompts/task-packet.md` | Template + authoring guidance for a worker task file (`task new` copies it) |
 | `prompts/repair-packet.md` | Template for a repair file to the same worker (`task new --repair-of`) |
 | `prompts/review-checklist.md` | Review policy, verdict table, review-report format |
-| `prompts/research-packet.md` | Scout request + dossier format |
+| `prompts/research-packet.md` | Research dossier format (+ request format when delegating to the scout) |
 | `prompts/architecture-readiness.md` | Planning gate checklist (a)-(e) |
 | `scripts/doctor.sh` | Tooling/model/integration report (`--probe-codex` for a live model check) |
 | `scripts/verify.sh` | Stack-detecting quality gate (`--quick` for post-merge smoke) |
@@ -72,7 +73,7 @@ Prefix every command with `python3 .agent-system/scheduler.py`. Add `--json` bef
 | `pool init` / `pool show` | Create the worktree root, show slot paths/state; show per-slot model resolution |
 | `run create --run ID --tasks FILE [--base REF] [--request-id ID]` | Validate run title/goal and task DAG (1..`max_tasks_per_request`), create `agent/integration-ID` worktree |
 | `run status --run ID` / `run list` / `run close --run ID --status BLOCKED\|FAILED --reason ...` | Inspect or close runs |
-| `research round --run ID --evidence FILE --question Q...` | Register a scout dossier (rejects a 4th round per request) |
+| `research round --run ID --evidence FILE --question Q...` | Register a research dossier, by Opus or the optional scout (rejects a 4th round per request) |
 | `task new --name "<name>" [--date dd-mm-yy]` | Create `gen-tasks/<name>-<dd-mm-yy>.md` from the template (`-2`, `-3` on collision) |
 | `task new --repair-of gen-tasks/<file>.md` | Create `<file>-repairN.md` from the repair template |
 | `research readiness --run ID --status READY\|NOT_READY --preserve .. --contracts .. --interactions .. --testing .. --assumptions .. [--missing ..]` | Record the gate after each round |
@@ -153,7 +154,7 @@ written atomically under an exclusive file lock (`.orchestrator/scheduler.lock`)
 
 Every worker task and repair runs the configured worker model and effort (`agent-kit config`; no
 automatic downgrade); higher efforts raise latency and metered usage. Three parallel workers = three concurrent sessions. Keep
-small requests to one trivial task. Scout rounds are capped at 3 per request.
+small requests to one trivial task. Research rounds are capped at 3 per request.
 
 ## Troubleshooting
 
