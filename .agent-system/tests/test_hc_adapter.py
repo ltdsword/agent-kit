@@ -86,7 +86,8 @@ class HcRecordTests(unittest.TestCase):
                 self.assertEqual(rec["pane_id"], raw["address"])
                 self.assertEqual(rec["workspace_id"], raw.get("labels", {}).get("herdr.space"))
         missing = {"error": {"kind": "not_found", "message": 'no terminal "missing"'}}
-        hc = S.Hc(runner=lambda argv, **kwargs: completed(argv, json.dumps(missing), 3))
+        # Real hc 0.1.17 writes the error object to stderr, not stdout.
+        hc = S.Hc(runner=lambda argv, **kwargs: subprocess.CompletedProcess(argv, 3, "", json.dumps(missing)))
         self.assertEqual(hc.agent_record("missing"), (None, "absent"))
         hc = S.Hc(runner=lambda argv, **kwargs: (_ for _ in ()).throw(FileNotFoundError()))
         self.assertEqual(hc.agent_record("offline"), (None, "unknown"))

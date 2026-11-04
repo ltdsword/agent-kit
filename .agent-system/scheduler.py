@@ -927,8 +927,10 @@ class Hc:
         p = self._run(["get", name, "--json"])
         if p is None:
             return None, "unknown"
+        # hc prints the record on stdout but an error object (e.g. not_found, exit 3) on stderr.
+        text = p.stdout if p.stdout.strip() else (p.stderr or "")
         try:
-            raw = json.loads(p.stdout) if p.stdout.strip() else {}
+            raw = json.loads(text) if text.strip() else {}
         except json.JSONDecodeError:
             return None, "unknown"
         if isinstance(raw, dict) and isinstance(raw.get("error"), dict) \

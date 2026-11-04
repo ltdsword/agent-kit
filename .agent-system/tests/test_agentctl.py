@@ -181,7 +181,7 @@ class AgentCtlTests(Base):
                     if (not hc_present or (hc_name is None and target != "t2")
                             or (hc_name is not None and target not in (hc_name, "t2"))):
                         body = {"error": {"kind": "not_found", "message": f"no terminal {target}"}}
-                        return subprocess.CompletedProcess(args, 3, json.dumps(body), "")
+                        return subprocess.CompletedProcess(args, 3, "", json.dumps(body))
                     raw = {"address": "t2", "name": hc_name, "cwd": str(self.ws.resolve()),
                            "state": hc_terminal_state,
                            "status": {"app": hc_app, "msg": "sample status", "state": state["status"]},
