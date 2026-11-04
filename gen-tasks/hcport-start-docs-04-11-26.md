@@ -81,3 +81,61 @@ with the exact reason. Otherwise just do it.
 
 ---
 <!-- Do not edit above this line after dispatch. scheduler.py appends: Worker result, Review, Integration, Final gate. -->
+
+## Worker result - attempt 1 (04/11/26 21:54)
+
+- Status: **done** (worker worker-2, branch `agent/hcport-t3`)
+- Commits: none, changes left uncommitted (orchestrator commits after review)
+- Files: `.agent-system/GUIDE.md`, `.agent-system/README.md`, `.agent-system/kitstart.py`, `.agent-system/tests/test_scheduler.py`, `README.md`
+- Scope: OK
+- Tests reported:
+  - `python3 -m pytest -q .agent-system/tests` -> exit 1
+  - `python3 -m pytest -q .agent-system/tests` -> exit 0
+  - `python3 -m pytest -q .agent-system/tests` -> exit 0
+- Risks:
+  - No live Herdr app integration was run; HC behavior was tested with fakes.
+- Not done: none
+- Full diff: `.orchestrator/runs/hcport/reports/T3.diff`
+
+````text
+ .agent-system/GUIDE.md                |  44 ++++++------
+ .agent-system/README.md               |  20 ++++--
+ .agent-system/kitstart.py             | 127 ++++++++++++++++++++++++---------
+ .agent-system/tests/test_scheduler.py | 130 ++++++++++++++++++++++++++++++++--
+ README.md                             |  55 +++++++-------
+ 5 files changed, 282 insertions(+), 94 deletions(-)
+````
+
+(diff is 764 lines; read the full diff file)
+
+## Review round 1: PASS (04/11/26 21:56)
+
+- Verdict: **PASS** -> task is now PASSED (fix rounds used: 0/2)
+- Reviewed HEAD: bf5079e40af7, commits bf5079e40af7
+- Notes: start/continue per C4; docs updated; 213 tests pass
+
+# Review hcport T3 - start/continue + docs (Opus)
+
+Verdict: PASS
+
+- C4 met: `main` uses `make_herdr(cfg, env)`; `save_session` records `backend` on every launch path;
+  `live_agent` on `agent_record`; `launch` focuses via `herdr.focus`; hc path has no server wait / execvp,
+  `inside` = HC_TERMINAL_ID; legacy path unchanged (when-ready helper + attach only for legacy).
+- One orchestrator per workspace: `find_orchestrator` checks both backends by name + kind/cwd fallback;
+  other backend -> exit 1 naming it and `agent-kit continue`; same backend -> focus.
+- `stop_for_continue` closes via `workspace_close(workspace_id)` for both; `remember_session` returns the
+  saved chat for hc.
+- Docs: README / GUIDE / .agent-system README describe the app as default, `herdr.backend` auto/hc/legacy,
+  `hc read --lines 80`, spaces `<run>-worker-N`; troubleshooting rows no longer cite HERDR_ENV.
+- Minor (accepted): `find_orchestrator` rebuilds `make_herdr` instead of using the caller's backend; the
+  "already running" block is duplicated in the when-ready and main paths; GUIDE keeps `ctrl+b w` (old key).
+- Tests: 4 new TestStart cases; whole suite 213 passed in the worktree (Opus rerun).
+
+## Integration: merged (04/11/26 21:56)
+
+- On `agent/integration-hcport` at 924a5efe4623; `.agent-system/scripts/verify.sh --quick` passed (log `.orchestrator/runs/hcport/logs/post-merge-T3-a1.log`)
+
+## Final gate: PASS (04/11/26 21:57)
+
+- `.agent-system/scripts/verify.sh` exit 0 on agent/integration-hcport at 924a5efe4623 (log `.orchestrator/runs/hcport/logs/verify-1793804198.log`)
+- Task MERGED; run DONE

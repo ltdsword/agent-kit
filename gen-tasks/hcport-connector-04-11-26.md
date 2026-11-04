@@ -83,3 +83,61 @@ its orchestrator runs.
 
 ---
 <!-- Do not edit above this line after dispatch. scheduler.py appends: Worker result, Review, Integration, Final gate. -->
+
+## Worker result - attempt 1 (04/11/26 21:49)
+
+- Status: **done** (worker worker-1, branch `agent/hcport-t2`)
+- Commits: none, changes left uncommitted (orchestrator commits after review)
+- Files: `.agent-system/agentctl.py`, `.agent-system/tests/test_agentctl.py`
+- Scope: OK
+- Tests reported:
+  - `python3 -m pytest -q .agent-system/tests/test_agentctl.py -k 'hc or unnamed_hc or missing_hc or saved_hc'` -> exit 1
+  - `python3 -m pytest -q .agent-system/tests/test_agentctl.py -k 'hc or unnamed_hc or missing_hc or saved_hc'` -> exit 1
+  - `python3 -m pytest -q .agent-system/tests/test_agentctl.py -k 'hc or unnamed_hc or missing_hc or saved_hc'` -> exit 0
+  - `python3 -m pytest -q .agent-system/tests/test_agentctl.py -k workers_without_recorded_backend` -> exit 1
+  - `python3 -m pytest -q .agent-system/tests/test_agentctl.py -k workers_without_recorded_backend` -> exit 0
+  - `python3 -m pytest -q .agent-system/tests` -> exit 0
+- Risks: none
+- Not done:
+  - Commit left uncreated because .git is read-only in this worktree.
+- Full diff: `.orchestrator/runs/hcport/reports/T2.diff`
+
+````text
+ .agent-system/agentctl.py            | 199 ++++++++++++++++++++---------------
+ .agent-system/tests/test_agentctl.py | 185 +++++++++++++++++++++++++++++++-
+ 2 files changed, 300 insertions(+), 84 deletions(-)
+````
+
+(diff is 533 lines; read the full diff file)
+
+## Review round 1: PASS (04/11/26 21:54)
+
+- Verdict: **PASS** -> task is now PASSED (fix rounds used: 0/2)
+- Reviewed HEAD: 115e3d540e39, commits 115e3d540e39
+- Notes: connector per C3; PEM scrub regression fixed in review; 219 tests pass
+
+# Review hcport T2 - connector (Opus)
+
+Verdict: PASS (with one orchestrator fix applied before commit)
+
+- C3 met: `_backends` order orchestrator.json backend -> config -> [Hc, Herdr]; `_herdr_record` returns
+  (rec, state, backend), first non-absent/unknown wins, states forced into HUB_STATES; workspace fallback via
+  `agent_list` by kind + resolved cwd; target = REC name or pane_id.
+- No raw `["herdr", ...]` subprocess call left in agentctl.py; all 3 prompt-delivery paths use the finding
+  backend's `agent_prompt`, HELD/retry + log lines unchanged; READY_STATES imported from scheduler.
+- Snapshot workers use the run's `herdr_backend`, else probe both; watch/_orchestrator_alive use the same rule.
+- **Fixed (MAJOR, security):** `_screen` scrubbed line by line, so a multi-line PEM block was no longer
+  matched by PEM_RE and its body would reach the hub. Now scrubs the joined text then splits (old behaviour).
+  Added `test_hc_screen_redacts_multiline_pem_block`.
+- Minor (accepted): an hc agent with null status (unknown) plus legacy absent reports `absent`; liveness rule
+  treats both the same.
+- Tests: 9 worker tests + 1 review test; whole suite 219 passed (Opus rerun).
+
+## Integration: merged (04/11/26 21:54)
+
+- On `agent/integration-hcport` at 6470aff8a86d; `.agent-system/scripts/verify.sh --quick` passed (log `.orchestrator/runs/hcport/logs/post-merge-T2-a1.log`)
+
+## Final gate: PASS (04/11/26 21:57)
+
+- `.agent-system/scripts/verify.sh` exit 0 on agent/integration-hcport at 924a5efe4623 (log `.orchestrator/runs/hcport/logs/verify-1793804198.log`)
+- Task MERGED; run DONE

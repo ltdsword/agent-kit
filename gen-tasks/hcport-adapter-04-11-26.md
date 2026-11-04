@@ -107,3 +107,59 @@ report "blocked" with the exact reason. Everything else: just do it.
 
 ---
 <!-- Do not edit above this line after dispatch. scheduler.py appends: Worker result, Review, Integration, Final gate. -->
+
+## Worker result - attempt 1 (04/11/26 21:30)
+
+- Status: **done** (worker worker-1, branch `agent/hcport-t1`)
+- Commits: none, changes left uncommitted (orchestrator commits after review)
+- Files: `.agent-system/scheduler.py`, `.agent-system/tests/test_hc_adapter.py`, `.agent-system/tests/test_scheduler.py`
+- Scope: OK
+- Tests reported:
+  - `python3 -m pytest -q .agent-system/tests/test_hc_adapter.py` -> exit 1
+  - `python3 -m pytest -q .agent-system/tests/test_hc_adapter.py .agent-system/tests/test_scheduler.py -k 'HerdrBackendSchedulerTests or HcRecordTests'` -> exit 0
+  - `python3 -m pytest -q .agent-system/tests` -> exit 0
+- Risks:
+  - No live hc/herdr integration run; task boundaries required fake-only CLI tests.
+- Not done: none
+- Full diff: `.orchestrator/runs/hcport/reports/T1.diff`
+
+````text
+ .agent-system/scheduler.py             | 361 ++++++++++++++++++++++++++++++---
+ .agent-system/tests/test_hc_adapter.py | 285 ++++++++++++++++++++++++++
+ .agent-system/tests/test_scheduler.py  |  58 ++++++
+ 3 files changed, 677 insertions(+), 27 deletions(-)
+````
+
+(diff is 873 lines; read the full diff file)
+
+## Review round 1: PASS (04/11/26 21:32)
+
+- Verdict: **PASS** -> task is now PASSED (fix rounds used: 0/2)
+- Reviewed HEAD: f93368c3599a, commits f93368c3599a
+- Notes: adapter per C1/C2; 209 tests pass
+
+# Review hcport T1 - adapter (Opus)
+
+Verdict: PASS
+
+- Contract C1/C2 met: `Hc` mirrors `Herdr` (+ agent_record/agent_list/agent_read/focus/server_running on both);
+  REC normalized; states only from HUB_STATES (`error`/no status -> unknown, finished/not_found -> absent).
+- `hc run` argv uses `--no-parent --no-notify --keep`, labels `herdr.space` + `agentkit.kind`, binary from
+  `M.binary(kind)` after `--`; space.rename best effort; readiness waits for `reported` + idle/done with
+  injectable sleep/clock; `agent_not_ready` marker kept for kitstart.
+- `make_herdr` matrix per C2; `herdr_for(state)` + `herdr_backend` recorded on first live launch; all live
+  call sites (launch, same-session prompt, wait blocked check + backend-specific hint, collect, status,
+  cleanup) go through it; old runs default to legacy.
+- Doctor: hc/herdr-app warn, herdr fail only for legacy, `herdr-session` replaces `herdr-env`; integration
+  status only for legacy / HERDR_ENV. Order kept.
+- Tests: 17 new fake-runner tests replaying the hc 0.1.17 samples; whole suite 209 passed (Opus rerun).
+- Minor (accepted): `hc` missing with backend legacy is reported via level "ok"; fine.
+
+## Integration: merged (04/11/26 21:32)
+
+- On `agent/integration-hcport` at f9609bbf1001; `.agent-system/scripts/verify.sh --quick` passed (log `.orchestrator/runs/hcport/logs/post-merge-T1-a1.log`)
+
+## Final gate: PASS (04/11/26 21:57)
+
+- `.agent-system/scripts/verify.sh` exit 0 on agent/integration-hcport at 924a5efe4623 (log `.orchestrator/runs/hcport/logs/verify-1793804198.log`)
+- Task MERGED; run DONE
