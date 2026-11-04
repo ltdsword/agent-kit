@@ -72,6 +72,8 @@ def tearDownModule():
 
 
 class FakeHerdr(S.Herdr):
+    backend = "legacy"
+
     def __init__(self):
         super().__init__(binary="herdr-fake")
         self.calls, self.live, self._n = [], {}, 0
@@ -102,6 +104,26 @@ class FakeHerdr(S.Herdr):
         if name not in self.live:
             raise S.SchedulerError("agent not found")
         return {"result": {"name": name, "state": self.live[name]}}
+
+    def agent_record(self, name):
+        try:
+            rec = self.agent_get(name)["result"]
+        except S.SchedulerError:
+            return None, "absent"
+        return {**rec, "agent_status": rec.get("state", "unknown"), "cwd": None, "pane_id": None,
+                "workspace_id": None, "kind": "agent", "backend": self.backend}, rec.get("state", "unknown")
+
+    def agent_list(self):
+        return [self.agent_record(name)[0] for name in self.live]
+
+    def agent_read(self, name, lines):
+        return None
+
+    def focus(self, name):
+        return None
+
+    def server_running(self):
+        return True
 
 
 class Base(unittest.TestCase):
@@ -2245,6 +2267,42 @@ class AgentStateShapeTests(unittest.TestCase):
         res = {"agent": {"agent": "codex", "agent_session": {"agent": "codex", "kind": "id", "value": "x"},
                          "agent_status": "blocked", "name": "worker-3-hub5"}, "type": "agent"}
         self.assertEqual(S._agent_state(res), "blocked")
+
+
+class HerdrBackendSchedulerTests(Base):
+    def test_dispatch_records_the_injected_backend_for_the_run(self):
+        self.herdr.backend = "hc"
+        self.dag()
+        self.make_ready()
+        self.s.dispatch_ready("r1")
+        self.assertEqual(self.s.store.load("r1")["herdr_backend"], "hc")
+
+    def test_herdr_for_uses_legacy_for_a_legacy_record(self):
+        cfg = copy.deepcopy(self.cfg)
+        cfg["herdr"]["backend"] = "hc"
+        scheduler = S.Scheduler(self.repo, cfg=cfg)
+        adapter = scheduler.herdr_for({"herdr_backend": "legacy"})
+        self.assertIsInstance(adapter, S.Herdr)
+        self.assertEqual(adapter.backend, "legacy")
+
+    def test_config_rejects_unknown_herdr_backend(self):
+        cfg = copy.deepcopy(self.cfg)
+        cfg["herdr"]["backend"] = "x"
+        self.assertTrue(any("herdr.backend" in error for error in S.validate_config(cfg)))
+
+    def test_doctor_warns_for_missing_auto_herdr_and_fails_for_legacy_herdr(self):
+        system = self.repo / ".agent-system"
+        system.mkdir()
+        (system / "config.json").write_text(json.dumps(self.cfg))
+        with mock.patch.dict(os.environ, {"HERDR_ENV": "", "HC_TERMINAL_ID": ""}, clear=False), \
+                mock.patch.object(S.shutil, "which", side_effect=lambda name: "/bin/hc" if name == "hc" else None):
+            auto = {check["check"]: check for check in S.doctor(self.repo)}
+            self.assertEqual(auto["tool:herdr"]["status"], "warn")
+            self.assertNotEqual(auto["tool:herdr"]["status"], "fail")
+            self.cfg["herdr"]["backend"] = "legacy"
+            (system / "config.json").write_text(json.dumps(self.cfg))
+            legacy = {check["check"]: check for check in S.doctor(self.repo)}
+            self.assertEqual(legacy["tool:herdr"]["status"], "fail")
 
 
 class FinishAskCliTests(unittest.TestCase):

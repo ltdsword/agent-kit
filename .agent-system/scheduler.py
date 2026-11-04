@@ -18,6 +18,7 @@ import fnmatch
 import json
 import os
 import re
+import secrets
 import shutil
 import subprocess
 import sys
@@ -180,6 +181,10 @@ def validate_config(cfg: dict) -> list[str]:
         orch = cfg.get("orchestrator", {})
         if orch.get("kind", "claude") not in M.KINDS:
             errors.append(f"orchestrator.kind {orch.get('kind')!r} is not a program Herdr can launch")
+        herdr = cfg.get("herdr", {})
+        backend = herdr.get("backend", "auto") if isinstance(herdr, dict) else None
+        if backend not in ("auto", "hc", "legacy"):
+            errors.append("herdr.backend must be one of auto, hc, legacy")
         if worker["sandbox"] == "danger-full-access":
             errors.append("worker.sandbox must not be danger-full-access")
         bad = set(cfg.get("decisions", {}).get("require_user_for", GATED_KINDS)) - set(GATED_KINDS)
@@ -643,6 +648,40 @@ class Store:
 
 # --------------------------------------------------------------------------- herdr
 
+# Herdr states that mean the agent waits for input: "done" is a finished turn nobody has looked at yet
+# (the usual state while the user is away on the phone), so it is as ready as "idle".
+READY_STATES = ("idle", "done")
+HUB_STATES = ("idle", "working", "blocked", "done", "unknown", "absent")
+
+
+def agent_state_from_hc(rec: dict | None) -> str:
+    """Normalize an hc terminal record to the state enum used by the hub."""
+    if not isinstance(rec, dict):
+        return "unknown"
+    error = rec.get("error")
+    if isinstance(error, dict) and error.get("kind") == "not_found":
+        return "absent"
+    if rec.get("state") == "finished":
+        return "absent"
+    status = rec.get("status")
+    state = status.get("state") if isinstance(status, dict) else None
+    return state if state in HUB_STATES[:-2] else "unknown"
+
+
+def _hc_record(raw: dict) -> dict:
+    """Convert hc's terminal JSON into the stable record shared with the hub."""
+    status = raw.get("status") if isinstance(raw.get("status"), dict) else {}
+    app = status.get("app")
+    foreground = raw.get("foreground") if isinstance(raw.get("foreground"), dict) else {}
+    labels = raw.get("labels") if isinstance(raw.get("labels"), dict) else {}
+    kind = {"claude-code": "claude", "codex": "codex"}.get(app) or foreground.get("name") \
+        or raw.get("agent") or "agent"
+    return {"name": raw.get("name") or raw.get("address"), "agent_status": agent_state_from_hc(raw),
+            "cwd": raw.get("cwd"), "pane_id": raw.get("address"),
+            "workspace_id": labels.get("herdr.space"), "kind": kind, "backend": "hc",
+            "reported": bool(raw.get("reported"))}
+
+
 def _agent_state(res) -> str | None:
     """Find the lifecycle state (idle/working/blocked/done/unknown) in a herdr agent get result."""
     if isinstance(res, dict):
@@ -663,6 +702,8 @@ def _pick_id(obj, key: str):
 
 class Herdr:
     """Thin JSON wrapper over the herdr CLI. Its states are observations, not authority."""
+
+    backend = "legacy"
 
     def __init__(self, binary: str = "herdr", runner=subprocess.run):
         self.binary = binary
@@ -710,12 +751,255 @@ class Herdr:
     def agent_get(self, name: str) -> dict:
         return self._call("agent", "get", name)
 
+    def agent_record(self, name: str) -> tuple[dict | None, str]:
+        try:
+            result = self.agent_get(name)
+        except (SchedulerError, OSError, subprocess.TimeoutExpired) as e:
+            return None, "absent" if "not found" in str(e).lower() else "unknown"
+        agent = result.get("result", result)
+        if isinstance(agent, dict) and isinstance(agent.get("agent"), dict):
+            agent = agent["agent"]
+        if not isinstance(agent, dict):
+            return None, "unknown"
+        raw_state = _agent_state(agent)
+        state = raw_state if raw_state in HUB_STATES else "unknown"
+        rec = {**agent, "agent_status": state, "backend": self.backend,
+               "kind": agent.get("kind") or agent.get("agent") or "agent",
+               "pane_id": agent.get("pane_id") or agent.get("pane"),
+               "workspace_id": agent.get("workspace_id") or agent.get("workspace"),
+               "cwd": agent.get("cwd")}
+        return rec, state
+
+    def agent_list(self) -> list[dict] | None:
+        try:
+            result = self._call("agent", "list", timeout_s=5)
+        except (SchedulerError, OSError, subprocess.TimeoutExpired):
+            return None
+        data = result.get("result", result)
+        agents = data.get("agents", []) if isinstance(data, dict) else data
+        if isinstance(agents, dict):
+            agents = list(agents.values())
+        if not isinstance(agents, list):
+            return []
+        records = []
+        for agent in agents:
+            if not isinstance(agent, dict):
+                continue
+            raw_state = _agent_state(agent)
+            state = raw_state if raw_state in HUB_STATES else "unknown"
+            records.append({**agent, "agent_status": state, "backend": self.backend,
+                            "kind": agent.get("kind") or agent.get("agent") or "agent",
+                            "pane_id": agent.get("pane_id") or agent.get("pane"),
+                            "workspace_id": agent.get("workspace_id") or agent.get("workspace"),
+                            "cwd": agent.get("cwd")})
+        return records
+
+    def agent_read(self, name: str, lines: int) -> list[str] | None:
+        try:
+            p = self.runner([self.binary, "agent", "read", name, "--source", "visible", "--lines", str(lines)],
+                            capture_output=True, text=True, shell=False, timeout=5)
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+        if p.returncode != 0:
+            return None
+        return p.stdout.splitlines()[-lines:] if lines > 0 else []
+
+    def focus(self, name: str) -> None:
+        try:
+            self.runner([self.binary, "agent", "focus", name], capture_output=True, text=True,
+                        shell=False, timeout=5)
+        except Exception:
+            pass
+
+    def server_running(self) -> bool:
+        try:
+            p = self.runner([self.binary, "status", "server"], capture_output=True, text=True,
+                            shell=False, timeout=5)
+        except (OSError, subprocess.TimeoutExpired):
+            return False
+        return p.returncode == 0 and "status: running" in f"{p.stdout}\n{p.stderr}".lower()
+
+
+class Hc:
+    """Adapter for hc terminal records and the Herdr app's space labels."""
+
+    backend = "hc"
+
+    def __init__(self, binary: str = "hc", app_binary: str = "herdr-app", runner=subprocess.run,
+                 sleep=time.sleep, clock=time.monotonic):
+        self.binary = binary
+        self.app_binary = app_binary
+        self.runner = runner
+        self.sleep = sleep
+        self.clock = clock
+        self.workspaces = {}
+
+    def _run(self, args: list[str], timeout: float = 5) -> subprocess.CompletedProcess | None:
+        try:
+            return self.runner([self.binary, *args], capture_output=True, text=True,
+                               shell=False, timeout=timeout)
+        except (FileNotFoundError, OSError, subprocess.TimeoutExpired):
+            return None
+
+    def available(self) -> bool:
+        return shutil.which(self.binary) is not None and (bool(os.environ.get("HC_TERMINAL_ID"))
+                                                           or self.server_running())
+
+    def require(self) -> None:
+        if not self.available():
+            raise SchedulerError("hc is unavailable; start with `agent-kit start` or run inside Herdr")
+
+    def server_running(self) -> bool:
+        p = self._run(["server", "status"])
+        if not p or p.returncode != 0:
+            return False
+        try:
+            data = json.loads(p.stdout)
+        except (json.JSONDecodeError, TypeError):
+            return False
+        return isinstance(data, dict) and isinstance(data.get("pid"), int)
+
+    def workspace_create(self, cwd: str, label: str) -> tuple[str, str]:
+        workspace_id = "ak" + secrets.token_hex(8)
+        self.workspaces[workspace_id] = {"cwd": cwd, "label": label}
+        return workspace_id, workspace_id
+
+    def workspace_close(self, workspace_id: str) -> None:
+        for rec in self.agent_list() or []:
+            if rec.get("workspace_id") != workspace_id or not rec.get("pane_id"):
+                continue
+            self._run(["kill", rec["pane_id"]])
+            self._run(["rm", rec["pane_id"]])
+
+    def agent_start(self, name: str, pane: str, agent_args: list[str], timeout_ms: int,
+                    kind: str = "codex") -> dict:
+        workspace = self.workspaces.get(pane)
+        if not workspace:
+            raise SchedulerError(f"unknown pane: {pane}")
+        args = ["run", "--bg", "--no-parent", "--no-notify", "--keep", "--name", name,
+                "--cwd", workspace["cwd"], "--label", f"herdr.space={pane}", "--label",
+                f"agentkit.kind={kind}", "--", M.binary(kind), *agent_args]
+        p = self._run(args, timeout_ms / 1000)
+        if not p or p.returncode != 0:
+            detail = (p.stderr or p.stdout).strip() if p else "hc unavailable"
+            raise SchedulerError(f"hc run failed: {detail}")
+        try:
+            self.runner([self.app_binary, "do", "space.rename", "--id", pane, "--name", workspace["label"]],
+                        capture_output=True, text=True, shell=False, timeout=5)
+        except Exception:
+            pass
+        deadline = self.clock() + timeout_ms / 1000
+        while True:
+            rec, state = self.agent_record(name)
+            if rec and rec.get("reported") and state in READY_STATES:
+                return {"result": {"agent": rec}}
+            if self.clock() >= deadline:
+                break
+            self.sleep(0.5)
+        raise SchedulerError(f"agent_not_ready: {name} did not report an idle or done state")
+
+    def agent_prompt(self, name: str, text: str, timeout_ms: int) -> dict:
+        rec, state = self.agent_record(name)
+        if not rec or state not in READY_STATES:
+            raise SchedulerError(f"agent {name} is not ready for a prompt ({state})")
+        p = self._run(["send", name, text])
+        if not p or p.returncode != 0:
+            detail = (p.stderr or p.stdout).strip() if p else "hc unavailable"
+            raise SchedulerError(f"hc send failed: {detail}")
+        deadline = self.clock() + timeout_ms / 1000
+        while True:
+            observed, state = self.agent_record(name)
+            if observed and state in ("working", "blocked"):
+                return {"result": {"agent": observed}}
+            if self.clock() >= deadline:
+                raise SchedulerError(f"prompt not acknowledged by {name}")
+            self.sleep(0.5)
+
+    def agent_get(self, name: str) -> dict:
+        rec, state = self.agent_record(name)
+        if state == "absent":
+            raise SchedulerError(f"hc agent not found: {name}")
+        if rec is None:
+            raise SchedulerError(f"hc agent unreachable: {name}")
+        return {"result": {"agent": rec}}
+
+    def agent_record(self, name: str) -> tuple[dict | None, str]:
+        p = self._run(["get", name, "--json"])
+        if p is None:
+            return None, "unknown"
+        try:
+            raw = json.loads(p.stdout) if p.stdout.strip() else {}
+        except json.JSONDecodeError:
+            return None, "unknown"
+        if isinstance(raw, dict) and isinstance(raw.get("error"), dict) \
+                and raw["error"].get("kind") == "not_found":
+            return None, "absent"
+        if p.returncode != 0:
+            return None, "unknown"
+        if not isinstance(raw, dict):
+            return None, "unknown"
+        state = agent_state_from_hc(raw)
+        if state == "absent":
+            return None, "absent"
+        rec = _hc_record(raw)
+        return rec, state
+
+    def agent_list(self) -> list[dict] | None:
+        p = self._run(["ls", "--json"])
+        if not p or p.returncode != 0:
+            return None
+        try:
+            data = json.loads(p.stdout)
+        except json.JSONDecodeError:
+            return None
+        terminals = data.get("terminals", []) if isinstance(data, dict) else []
+        records = []
+        for terminal in terminals:
+            if not isinstance(terminal, dict) or terminal.get("state") != "live" or not terminal.get("address"):
+                continue
+            rec, _ = self.agent_record(terminal["address"])
+            if rec:
+                records.append(rec)
+        return records
+
+    def agent_read(self, name: str, lines: int) -> list[str] | None:
+        p = self._run(["read", "--lines", str(lines), name])
+        if not p or p.returncode != 0:
+            return None
+        output = [line for line in p.stdout.splitlines() if not line.startswith("[hc] ")]
+        return output[-lines:] if lines > 0 else []
+
+    def focus(self, name: str) -> None:
+        try:
+            self.runner([self.app_binary, "do", "agent.focus", "--terminal", name],
+                        capture_output=True, text=True, shell=False, timeout=5)
+        except Exception:
+            pass
+
+
+def make_herdr(cfg: dict, env=None, runner=subprocess.run) -> Herdr | Hc:
+    """Choose the configured backend, probing hc only for the auto setting."""
+    backend = cfg.get("herdr", {}).get("backend", "auto")
+    if backend == "hc":
+        return Hc(runner=runner)
+    if backend == "legacy":
+        return Herdr(runner=runner)
+    env = os.environ if env is None else env
+    hc_on_path = shutil.which("hc") is not None
+    if env.get("HC_TERMINAL_ID") and hc_on_path:
+        return Hc(runner=runner)
+    if env.get("HERDR_ENV") == "1":
+        return Herdr(runner=runner)
+    if hc_on_path and Hc(runner=runner).server_running():
+        return Hc(runner=runner)
+    return Herdr(runner=runner)
+
 
 # --------------------------------------------------------------------------- scheduler
 
 class Scheduler:
     def __init__(self, workspace_root: Path = DEFAULT_WORKSPACE_ROOT, cfg: dict | None = None,
-                 herdr: Herdr | None = None):
+                 herdr: Herdr | Hc | None = None):
         # workspace_root: config, state, task files, worktrees. project_root: the only git repo.
         self.workspace_root = Path(workspace_root).resolve()
         self.cfg = cfg if cfg is not None else load_config(self.workspace_root)
@@ -730,7 +1014,14 @@ class Scheduler:
                 raise SchedulerError(f"workspace {self.workspace_root} must not be inside the project repo "
                                      f"{self.project_root}")
         self.store = Store(self.workspace_root)
-        self.herdr = herdr or Herdr()
+        self.herdr_injected = herdr is not None
+        self.herdr = herdr if herdr is not None else make_herdr(self.cfg)
+
+    def herdr_for(self, state: dict) -> Herdr | Hc:
+        backend = state.get("herdr_backend", "legacy")
+        if self.herdr_injected or backend == self.herdr.backend:
+            return self.herdr
+        return Hc() if backend == "hc" else Herdr()
 
     # ---- paths
     @property
@@ -1142,20 +1433,22 @@ class Scheduler:
     def _launch_session(self, state: dict, wid: str, tid: str, text: str) -> None:
         """Fresh worker session in a Herdr workspace this run owns (new task => fresh context)."""
         self._require_worker_program()
-        self.herdr.require()
+        state.setdefault("herdr_backend", self.herdr.backend)
+        herdr = self.herdr_for(state)
+        herdr.require()
         w, t = state["workers"][wid], state["tasks"][tid]
         if w.get("herdr_workspace") and w.get("herdr_owner_run") == state["run_id"]:
             with contextlib.suppress(SchedulerError):
-                self.herdr.workspace_close(w["herdr_workspace"])
-        ws, pane = self.herdr.workspace_create(t["worktree"], f"{state['run_id']}-{wid}")
+                herdr.workspace_close(w["herdr_workspace"])
+        ws, pane = herdr.workspace_create(t["worktree"], f"{state['run_id']}-{wid}")
         w.update(herdr_workspace=ws, herdr_pane=pane, herdr_owner_run=state["run_id"])
         self.store.save(state)  # persist created IDs before anything else can fail
         name = self.agent_name(state["run_id"], wid)
-        self.herdr.agent_start(name, pane, self.worker_args(t["worktree"], state["run_id"]),
-                               self.cfg["herdr"]["agent_start_timeout_ms"], kind=self.worker_kind())
+        herdr.agent_start(name, pane, self.worker_args(t["worktree"], state["run_id"]),
+                          self.cfg["herdr"]["agent_start_timeout_ms"], kind=self.worker_kind())
         w.update(agent_name=name, session_task=tid, session_started_at=now())
         self.store.save(state)
-        self.herdr.agent_prompt(name, text, self.cfg["herdr"]["prompt_ack_timeout_ms"])
+        herdr.agent_prompt(name, text, self.cfg["herdr"]["prompt_ack_timeout_ms"])
 
     def manual_command(self, state: dict, tid: str, text: str) -> list[str]:
         t = state["tasks"][tid]
@@ -1175,7 +1468,7 @@ class Scheduler:
                 plan, skipped = plan_dispatch(state, self.cfg, self.workspace_root)
                 return {"plan": plan, "skipped": skipped}
             if launch == "herdr":
-                self.herdr.require()
+                (self.herdr_for(state) if state.get("herdr_backend") else self.herdr).require()
             partial = {}
             for tid, t in state["tasks"].items():
                 if t["status"] != "READY" or not t.get("redispatch_partial"):
@@ -1303,13 +1596,14 @@ class Scheduler:
             reported = [tid for tid in running
                         if report_matches_dispatch(reports / f"{tid}.json", tid, state["tasks"][tid])]
             blocked = []
-            if self.herdr.available():
+            herdr = self.herdr_for(state)
+            if herdr.available():
                 for tid in running:
                     name = state["workers"][state["tasks"][tid]["worker"]].get("agent_name")
                     if not name:
                         continue
                     try:
-                        if _agent_state(self.herdr.agent_get(name).get("result")) == "blocked":
+                        if _agent_state(herdr.agent_get(name).get("result")) == "blocked":
                             blocked.append({"task": tid, "agent": name})
                     except SchedulerError:
                         continue
@@ -1317,7 +1611,8 @@ class Scheduler:
                 return {"result": "ready", "reported": reported, "blocked": blocked,
                         "still_running": [tid for tid in running if tid not in reported],
                         "next": [f"collect --run {run_id} --task {tid}" for tid in reported] +
-                                [f"herdr agent read {b['agent']} --lines 80, then decision ask --kind "
+                                [f"{('hc read --lines 80' if herdr.backend == 'hc' else 'herdr agent read')} "
+                                 f"{b['agent']}{'' if herdr.backend == 'hc' else ' --lines 80'}, then decision ask --kind "
                                  f"worker_approval --task {b['task']} (never answer the prompt yourself)"
                                  for b in blocked]}
             if clock() >= deadline:
@@ -1332,9 +1627,10 @@ class Scheduler:
             t["lease"]["last_observed_at"] = now()
             obs = {"at": now()}
             w = state["workers"][t["worker"]]
-            if w.get("agent_name") and self.herdr.available():
+            herdr = self.herdr_for(state)
+            if w.get("agent_name") and herdr.available():
                 try:
-                    obs["herdr"] = self.herdr.agent_get(w["agent_name"]).get("result")
+                    obs["herdr"] = herdr.agent_get(w["agent_name"]).get("result")
                 except SchedulerError as e:
                     obs["herdr_error"] = str(e)
             rp = self.store.run_dir(run_id) / "reports" / f"{tid}.json"
@@ -1602,8 +1898,9 @@ class Scheduler:
             if relaunch or not w.get("agent_name") or w.get("session_task") != tid:
                 self._launch_session(state, wid, tid, text)
             else:
-                self.herdr.require()
-                self.herdr.agent_prompt(w["agent_name"], text, self.cfg["herdr"]["prompt_ack_timeout_ms"])
+                herdr = self.herdr_for(state)
+                herdr.require()
+                herdr.agent_prompt(w["agent_name"], text, self.cfg["herdr"]["prompt_ack_timeout_ms"])
             return {"task": tid, "worker": wid, "status": "RUNNING", "same_session": not relaunch}
 
     # ---- integration & verification
@@ -2301,9 +2598,10 @@ class Scheduler:
                     has_report = (self.store.run_dir(run_id) / "reports" / f"{tid}.json").exists()
                     w = state["workers"][t["worker"]]
                     live = None
-                    if w.get("agent_name") and self.herdr.available():
+                    herdr = self.herdr_for(state)
+                    if w.get("agent_name") and herdr.available():
                         try:
-                            live = self.herdr.agent_get(w["agent_name"]).get("result")
+                            live = herdr.agent_get(w["agent_name"]).get("result")
                         except SchedulerError:
                             live = "missing"
                     t["lease"]["last_observed_at"] = now()
@@ -2376,9 +2674,10 @@ class Scheduler:
                 raise SchedulerError(f"workers still leased: {busy}")
             for wid, w in sorted(state["workers"].items(), key=lambda kv: slot_order(kv[0])):
                 if w.get("herdr_workspace") and w.get("herdr_owner_run") == run_id and w["status"] != "BUSY":
-                    if self.herdr.available():
+                    herdr = self.herdr_for(state)
+                    if herdr.available():
                         try:
-                            self.herdr.workspace_close(w["herdr_workspace"])
+                            herdr.workspace_close(w["herdr_workspace"])
                             done.append(f"closed herdr workspace {w['herdr_workspace']} ({wid})")
                             w.update(herdr_workspace=None, herdr_pane=None, agent_name=None, session_task=None)
                         except SchedulerError as e:
@@ -2564,10 +2863,16 @@ def doctor(workspace_root: Path) -> list[dict]:
     programs = list(dict.fromkeys([M.binary(okind), M.binary(wkind)]))
     if okind == "claude" or wkind == "claude":
         programs = list(dict.fromkeys(programs + ["claude"]))
-    for tool, required in (("git", True), ("python3", True), ("herdr", True),
-                           *((t, True) for t in programs), ("jq", False)):
-        add(f"tool:{tool}", shutil.which(tool) is not None, shutil.which(tool) or "not on PATH",
-            "fail" if required else "warn")
+    backend = cfg.get("herdr", {}).get("backend", "auto")
+    tool_checks = [("git", "fail"), ("python3", "fail"),
+                   ("hc", "warn" if backend in ("auto", "hc") else "ok"),
+                   ("herdr-app", "warn"), ("herdr", "fail" if backend == "legacy" else "warn"),
+                   *((tool, "fail") for tool in programs), ("jq", "warn")]
+    for tool, missing_status in tool_checks:
+        path = shutil.which(tool)
+        add(f"tool:{tool}", path is not None,
+            path or ("not required by legacy backend" if tool == "hc" and backend == "legacy" else "not on PATH"),
+            missing_status)
     major, minor = sys.version_info[:2]
     python_ok = (major, minor) >= (3, 11)
     add("python-version", python_ok,
@@ -2594,10 +2899,12 @@ def doctor(workspace_root: Path) -> list[dict]:
         add("wsl-keepalive", True,
             "WSL stops when idle and the hub with it; to keep it running set `instanceIdleTimeout=-1` under "
             "`[general]` in `%UserProfile%\\.wslconfig` (then `wsl --shutdown`)")
-    add("herdr-env", os.environ.get("HERDR_ENV") == "1",
+    in_herdr = bool(os.environ.get("HC_TERMINAL_ID")) or os.environ.get("HERDR_ENV") == "1"
+    add("herdr-session", in_herdr,
+        "HC_TERMINAL_ID set" if os.environ.get("HC_TERMINAL_ID") else
         "HERDR_ENV=1" if os.environ.get("HERDR_ENV") == "1" else
-        "HERDR_ENV unset: live dispatch unavailable; start with `agent-kit start`", "warn")
-    if shutil.which("herdr"):
+        "not inside Herdr; start with `agent-kit start`", "warn")
+    if shutil.which("herdr") and (backend == "legacy" or os.environ.get("HERDR_ENV") == "1"):
         p = subprocess.run(["herdr", "integration", "status"], capture_output=True, text=True)
         for kind in dict.fromkeys([okind, wkind]):
             line = next((ln for ln in p.stdout.splitlines() if ln.split(":")[0].split(" ")[0] == kind), "")
