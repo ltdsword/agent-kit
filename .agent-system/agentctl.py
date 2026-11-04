@@ -41,7 +41,7 @@ HUB_DELIVERY_TIMEOUT = 10 * 60
 HUB_HELD_REASON = "waiting for Opus to finish its current step"
 # Herdr states that mean the agent waits for input: "done" is a finished turn nobody has looked at yet
 # (the usual state while the user is away on the phone), so it is as ready as "idle".
-READY_STATES = ("idle", "done")
+READY_STATES = S.READY_STATES
 HUB_FAILED_REASON = "Opus stayed busy for 10 minutes; not delivered"
 SECRET_RE = re.compile(
     r"sk-[A-Za-z0-9_-]{16,}|AKIA[0-9A-Z]{16}|Bearer [A-Za-z0-9._~+/-]{16,}=*|"
@@ -393,71 +393,95 @@ def load_runs(ws: Path) -> list[dict]:
     return inbox[:1] + [state for state in ordered if state.get("run_id") != "inbox"][:199]
 
 
-def _herdr_record(name: str | None, runner=subprocess.run) -> tuple[dict | None, str]:
-    """Return a Herdr agent record and protocol state; tolerate missing Herdr installations."""
+def _backend(kind: str, runner):
+    return S.Hc(runner=runner) if kind == "hc" else S.Herdr(runner=runner)
+
+
+def _backends(ws: Path, cfg: dict, runner) -> list:
+    """Choose the connector backend, honoring the saved session before workspace config."""
+    saved = kitstart.saved_session(ws).get("backend")
+    configured = cfg.get("herdr", {}).get("backend", "auto")
+    selected = saved if saved in ("hc", "legacy") else configured
+    if selected in ("hc", "legacy"):
+        return [_backend(selected, runner)]
+    return [S.Hc(runner=runner), S.Herdr(runner=runner)]
+
+
+def _backends_for_run(ws: Path, cfg: dict, runner, recorded: str | None) -> list:
+    if recorded in ("hc", "legacy"):
+        return [_backend(recorded, runner)]
+    return [S.Hc(runner=runner), S.Herdr(runner=runner)]
+
+
+def _herdr_record(name: str | None, runner=subprocess.run, backends=None) -> tuple[dict | None, str, object | None]:
+    """Return the first known record, its hub state, and the backend that found it."""
     if not name:
-        return None, "absent"
-    try:
-        result = runner(["herdr", "agent", "get", name], capture_output=True, text=True, timeout=5)
-    except (FileNotFoundError, OSError, subprocess.TimeoutExpired):
-        return None, "unknown"
-    output = (result.stdout or "") + "\n" + (result.stderr or "")
-    if result.returncode:
-        if re.search(r"agent[_ ]not[_ ]found|no such agent|agent .*not found", output, re.I):
-            return None, "absent"
-        return None, "unknown"
-    try:
-        data = json.loads(result.stdout or "{}")
-    except ValueError:
-        return None, "unknown"
-    agent = ((data.get("result") or {}).get("agent") if isinstance(data, dict) else None)
-    if not isinstance(agent, dict) and isinstance(data, dict):
-        agent = data.get("agent")
-    if not isinstance(agent, dict):
-        return None, "absent" if isinstance(data, dict) and ("result" in data or "agent" in data) else "unknown"
-    state = agent.get("agent_status")
-    return agent, state if state in ("idle", "working", "blocked", "done", "unknown", "absent") else "unknown"
+        return None, "absent", None
+    if backends is None:
+        backends = [S.Hc(runner=runner), S.Herdr(runner=runner)]
+    answered_absent = False
+    for backend in backends:
+        try:
+            record, state = backend.agent_record(name)
+        except (S.SchedulerError, OSError, subprocess.TimeoutExpired):
+            record, state = None, "unknown"
+        state = state if state in S.HUB_STATES else "unknown"
+        if state not in ("absent", "unknown"):
+            if not isinstance(record, dict):
+                state = "unknown"
+            else:
+                record = dict(record)
+                record["agent_status"] = state
+                if not record.get("name"):
+                    record["name"] = name
+                return record, state, backend
+        if state == "absent":
+            answered_absent = True
+    return None, "absent" if answered_absent else "unknown", None
+
+
+def _record_target(record: dict | None, fallback: str | None = None) -> str | None:
+    if not isinstance(record, dict):
+        return fallback
+    return record.get("name") or record.get("pane_id") or fallback
 
 
 def _herdr_record_for_workspace(name: str, workspace: Path, kind: str,
-                                runner=subprocess.run) -> tuple[dict | None, str, str]:
-    """Find a named orchestrator, then an unnamed agent of the configured kind in this workspace."""
-    record, state = _herdr_record(name, runner)
+                                runner=subprocess.run, backends=None) -> tuple[dict | None, str, str, object | None]:
+    """Find a named orchestrator, then an unnamed matching agent in this workspace."""
+    if backends is None:
+        backends = _backends(workspace, {}, runner)
+    record, state, backend = _herdr_record(name, runner, backends)
     if state != "absent":
-        return record, state, name
-    try:
-        result = runner(["herdr", "agent", "list"], capture_output=True, text=True, timeout=5)
-    except (FileNotFoundError, OSError, subprocess.TimeoutExpired):
-        return None, "unknown", name
-    if result.returncode:
-        return None, "unknown", name
-    try:
-        data = json.loads(result.stdout or "{}")
-    except ValueError:
-        return None, "unknown", name
-    result_data = data.get("result") if isinstance(data, dict) else None
-    agents = (result_data.get("agents") if isinstance(result_data, dict) else None)
-    if not isinstance(agents, list) and isinstance(data, dict):
-        agents = data.get("agents")
-    if not isinstance(agents, list):
-        return None, "unknown", name
+        return record, state, _record_target(record, name), backend
     expected_cwd = str(workspace.resolve())
-    for agent in agents:
-        if not isinstance(agent, dict) or (agent.get("kind") or agent.get("agent")) != kind:
-            continue
-        cwd = agent.get("cwd")
-        pane_id = agent.get("pane_id")
-        if not isinstance(cwd, str) or not isinstance(pane_id, str) or not pane_id:
-            continue
+    for backend in backends:
         try:
-            if str(Path(cwd).resolve()) != expected_cwd:
-                continue
-        except (OSError, ValueError):
+            agents = backend.agent_list()
+        except (S.SchedulerError, OSError, subprocess.TimeoutExpired):
+            agents = None
+        if not isinstance(agents, list):
             continue
-        state = agent.get("agent_status")
-        state = state if state in ("idle", "working", "blocked", "done", "unknown", "absent") else "unknown"
-        return agent, state, pane_id
-    return None, "absent", name
+        for agent in agents:
+            if not isinstance(agent, dict) or agent.get("kind") != kind:
+                continue
+            cwd = agent.get("cwd")
+            if not isinstance(cwd, str):
+                continue
+            try:
+                if str(Path(cwd).resolve()) != expected_cwd:
+                    continue
+            except (OSError, ValueError):
+                continue
+            target = _record_target(agent)
+            if not target:
+                continue
+            agent = dict(agent)
+            agent_state = agent.get("agent_status")
+            agent_state = agent_state if agent_state in S.HUB_STATES else "unknown"
+            agent["agent_status"] = agent_state
+            return agent, agent_state, target, backend
+    return None, state, name, None
 
 
 def _legacy_run(state: dict) -> dict:
@@ -536,18 +560,18 @@ def _snapshot_runs(states: list[dict], ws: Path, cfg: dict) -> tuple[list[dict],
     return valid_states, snapshots
 
 
-def _screen(name: str | None, lines: int, runner=subprocess.run):
-    if not name:
+def _screen(name: str | None, lines: int, runner=subprocess.run, backend=None):
+    if not name or backend is None:
         return None
+    limit = min(max(lines, 1), 200)
     try:
-        result = runner(["herdr", "agent", "read", name, "--source", "visible", "--lines", str(lines)],
-                        capture_output=True, text=True, timeout=5)
-    except (FileNotFoundError, OSError, subprocess.TimeoutExpired):
+        output = backend.agent_read(name, limit)
+    except (S.SchedulerError, FileNotFoundError, OSError, subprocess.TimeoutExpired):
         return None
-    if result.returncode:
+    if output is None:
         return None
-    output = scrub(result.stdout or "")
-    return output.splitlines()[-min(max(lines, 1), 200):]
+    # Scrub the joined text so multi-line secrets (PEM blocks) are still matched.
+    return scrub("\n".join(output)).splitlines()[-limit:]
 
 
 def _newest_worker_since(state: dict, slot: str, worker: dict) -> str | None:
@@ -629,12 +653,13 @@ def make_snapshot(ws: Path, cfg: dict, session_id: str, runner=subprocess.run, p
     repo_name = repo.name
     orch = cfg.get("orchestrator", {})
     orch_name = kitstart.agent_name(repo_name)
-    orch_record, orch_state, orch_target = _herdr_record_for_workspace(
-        orch_name, ws, orch.get("kind", "claude"), runner)
+    backends = _backends(ws, cfg, runner)
+    orch_record, orch_state, orch_target, orch_backend = _herdr_record_for_workspace(
+        orch_name, ws, orch.get("kind", "claude"), runner, backends)
     upload = config_hub(cfg).get("upload", {})
     screen_on = bool(upload.get("orchestrator_screen", True))
     screen_lines = config_hub(cfg).get("screen_lines", 40)
-    orch_screen = _screen(orch_target, screen_lines, runner) if screen_on else None
+    orch_screen = _screen(orch_target, screen_lines, runner, orch_backend) if screen_on else None
     orch_session = ((orch_record or {}).get("agent_session") or {}).get("value")
     if not orch_session:
         orch_session = kitstart.saved_session(ws).get("session_id")
@@ -643,11 +668,12 @@ def make_snapshot(ws: Path, cfg: dict, session_id: str, runner=subprocess.run, p
     visible_snapshots = [snapshot for snapshot in run_snapshots if snapshot.get("run_id") != "inbox"]
     newest = visible_runs[0] if visible_runs else None
     worker_states = (newest or {}).get("workers") or {}
+    worker_backends = _backends_for_run(ws, cfg, runner, (newest or {}).get("herdr_backend"))
     worker_items = []
     for slot in cfg.get("pool", {}).get("slots", []):
         worker = worker_states.get(slot, {})
         agent_name = worker.get("agent_name")
-        record, herdr_state = _herdr_record(agent_name, runner)
+        record, herdr_state, _ = _herdr_record(agent_name, runner, worker_backends)
         worker_items.append({
             "slot": slot, "status": worker.get("status", "IDLE"),
             "status_reason": str(worker.get("status_reason") or "")[:500] or None,
@@ -1116,11 +1142,13 @@ def _state_mtimes(ws: Path) -> tuple:
 
 
 def _orchestrator_alive(name: str, runner=subprocess.run, workspace: Path | None = None,
-                        kind: str = "claude") -> bool:
+                        kind: str = "claude", cfg: dict | None = None) -> bool:
     if workspace is not None:
-        _, state, _ = _herdr_record_for_workspace(name, workspace, kind, runner)
+        cfg = cfg or {}
+        _, state, _, _ = _herdr_record_for_workspace(
+            name, workspace, kind, runner, _backends(workspace, cfg, runner))
     else:
-        _, state = _herdr_record(name, runner)
+        _, state, _ = _herdr_record(name, runner)
     return state not in ("absent", "unknown")
 
 
@@ -1175,11 +1203,13 @@ def _short_reason(error) -> str:
     return (message or "command delivery failed")[:300]
 
 
-def _type_hub_notice(name: str, text: str, cfg: dict, runner=subprocess.run) -> tuple[bool, str | None]:
-    _, state = _herdr_record(name, runner)
+def _type_hub_notice(ws: Path, name: str, text: str, cfg: dict,
+                     runner=subprocess.run) -> tuple[bool, str | None]:
+    _, state, target, backend = _herdr_record_for_workspace(
+        name, ws, cfg.get("orchestrator", {}).get("kind", "claude"), runner, _backends(ws, cfg, runner))
     if state not in READY_STATES:
         return False, HUB_HELD_REASON
-    S.Herdr(runner=runner).agent_prompt(name, scrub(text), cfg["herdr"]["prompt_ack_timeout_ms"])
+    backend.agent_prompt(target, scrub(text), cfg["herdr"]["prompt_ack_timeout_ms"])
     return True, None
 
 
@@ -1296,7 +1326,7 @@ def _deliver_command(ws: Path, cfg: dict, name: str, runner, client: HubClient,
         except OSError as error:
             log_action(ws, f"hub command log unavailable: {error}")
         try:
-            delivered, _ = _type_hub_notice(name, notice, cfg, runner)
+            delivered, _ = _type_hub_notice(ws, name, notice, cfg, runner)
             if not delivered:
                 notice_retries.append(_new_delivery_schedule(command_id, notice, clock()))
         except Exception as error:
@@ -1311,7 +1341,8 @@ def _deliver_command(ws: Path, cfg: dict, name: str, runner, client: HubClient,
         _ack_command(client, command_id, "FAILED", _short_reason(error))
         return
     try:
-        _, state = _herdr_record(name, runner)
+        _, state, target, backend = _herdr_record_for_workspace(
+            name, ws, cfg.get("orchestrator", {}).get("kind", "claude"), runner, _backends(ws, cfg, runner))
     except Exception as error:
         _ack_command(client, command_id, "FAILED", _short_reason(error))
         return
@@ -1326,7 +1357,7 @@ def _deliver_command(ws: Path, cfg: dict, name: str, runner, client: HubClient,
         _ack_command(client, command_id, "FAILED", _short_reason(error))
         return
     try:
-        S.Herdr(runner=runner).agent_prompt(name, notice, cfg["herdr"]["prompt_ack_timeout_ms"])
+        backend.agent_prompt(target, notice, cfg["herdr"]["prompt_ack_timeout_ms"])
     except Exception as error:
         reason = _short_reason(error)
         try:
@@ -1351,7 +1382,7 @@ def _retry_hub_notices(ws: Path, name: str, cfg: dict, runner,
             remaining.append(item)
             continue
         try:
-            delivered, _ = _type_hub_notice(name, notice, cfg, runner)
+            delivered, _ = _type_hub_notice(ws, name, notice, cfg, runner)
         except Exception as error:
             log_action(ws, f"answer notice retry failed for {command_id}: {_short_reason(error)}")
             delivered = False
@@ -1379,14 +1410,16 @@ def _retry_hub_commands(ws: Path, name: str, cfg: dict, runner, client: HubClien
         if now_mono < item["next_at"]:
             continue
         try:
-            _, state = _herdr_record(name, runner)
+            _, state, target, backend = _herdr_record_for_workspace(
+                name, ws, cfg.get("orchestrator", {}).get("kind", "claude"), runner,
+                _backends(ws, cfg, runner))
             if state not in READY_STATES:
                 log_action(ws, f"hub command {command_id} still held: orchestrator {name} is {state}")
                 _advance_delivery_schedule(item)
                 continue
             command = item["command"]
             _append_hub_log(ws, command, records)
-            S.Herdr(runner=runner).agent_prompt(name, item["notice"], cfg["herdr"]["prompt_ack_timeout_ms"])
+            backend.agent_prompt(target, item["notice"], cfg["herdr"]["prompt_ack_timeout_ms"])
         except Exception as error:
             reason = _short_reason(error)
             try:
@@ -1530,7 +1563,8 @@ def watch(ws: Path, interval=5, no_orchestrator=False, runner=subprocess.run, sl
             changed = last_mtimes is None or mtimes != last_mtimes
             due = now_mono - last_check >= max(interval, 0)
             last_mtimes = mtimes
-            orch_record, orch_state, orch_target = _herdr_record_for_workspace(orch_name, ws, orch_kind, runner)
+            orch_record, orch_state, orch_target, _ = _herdr_record_for_workspace(
+                orch_name, ws, orch_kind, runner, _backends(ws, cfg, runner))
             if not no_orchestrator:
                 if orch_state not in ("absent", "unknown"):
                     gone_count = 0

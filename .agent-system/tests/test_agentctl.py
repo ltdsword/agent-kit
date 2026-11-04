@@ -138,6 +138,7 @@ class FakeBackend:
 class AgentCtlTests(Base):
     def setUp(self):
         super().setUp()
+        self.cfg["herdr"]["backend"] = "legacy"
         self.cfg["hub"] = {"enabled": True, "url": "http://127.0.0.1:7420",
                            "workspace_id": "ws_abcdefghijklmnop",
                            "upload": {"documents": True, "diffs": True, "orchestrator_screen": True}, "screen_lines": 40}
@@ -164,6 +165,63 @@ class AgentCtlTests(Base):
                 return subprocess.CompletedProcess(args, 0, "{}", "")
             return subprocess.CompletedProcess(args, 1, "", "agent not found")
         return runner
+
+    def fake_connectors(self, *, hc_status="idle", hc_terminal_state="live", hc_name=None,
+                        hc_app="claude-code", hc_present=True, legacy_status="idle",
+                        legacy_present=False, read_output="visible screen\n"):
+        calls = []
+        state = {"status": hc_status}
+
+        def runner(args, **kwargs):
+            args = list(args)
+            calls.append(args)
+            if args[0] == "hc":
+                if args[1] == "get":
+                    target = args[2]
+                    if (not hc_present or (hc_name is None and target != "t2")
+                            or (hc_name is not None and target not in (hc_name, "t2"))):
+                        body = {"error": {"kind": "not_found", "message": f"no terminal {target}"}}
+                        return subprocess.CompletedProcess(args, 3, json.dumps(body), "")
+                    raw = {"address": "t2", "name": hc_name, "cwd": str(self.ws.resolve()),
+                           "state": hc_terminal_state,
+                           "status": {"app": hc_app, "msg": "sample status", "state": state["status"]},
+                           "reported": True, "labels": {"herdr.space": "spe86sample"},
+                           "foreground": {"argv": ["claude", "--resume"], "cwd": str(self.ws.resolve()),
+                                          "name": "claude", "pid": 9659}}
+                    return subprocess.CompletedProcess(args, 0, json.dumps(raw), "")
+                if args[1:3] == ["ls", "--json"]:
+                    terminals = []
+                    if hc_present and hc_terminal_state == "live":
+                        terminals.append({"address": "t2", "agent": "claude-code", "cwd": str(self.ws.resolve()),
+                                          "state": "live", "status": state["status"], "turn": 8,
+                                          "where": "agent-kit / 1"})
+                    return subprocess.CompletedProcess(args, 0,
+                                                       json.dumps({"hidden_finished": 1, "terminals": terminals}), "")
+                if args[1] == "read":
+                    return subprocess.CompletedProcess(args, 0, read_output, "")
+                if args[1] == "send":
+                    state["status"] = "working"
+                    return subprocess.CompletedProcess(args, 0, "", "")
+                return subprocess.CompletedProcess(args, 1, "", "unsupported hc command")
+            if args[0] == "herdr":
+                if args[1:3] == ["agent", "get"]:
+                    if not legacy_present:
+                        return subprocess.CompletedProcess(args, 1, "", "agent not found")
+                    body = {"result": {"agent": {"agent_status": legacy_status, "kind": "claude",
+                                                   "cwd": str(self.ws.resolve()), "pane_id": "w9:p1"}}}
+                    return subprocess.CompletedProcess(args, 0, json.dumps(body), "")
+                if args[1:3] == ["agent", "list"]:
+                    agents = ([{"agent": "claude", "agent_status": legacy_status,
+                                "cwd": str(self.ws.resolve()), "pane_id": "w9:p1"}]
+                              if legacy_present else [])
+                    return subprocess.CompletedProcess(args, 0, json.dumps({"result": {"agents": agents}}), "")
+                if args[1:3] == ["agent", "read"]:
+                    return subprocess.CompletedProcess(args, 0, read_output, "")
+                if args[1:3] == ["agent", "prompt"]:
+                    return subprocess.CompletedProcess(args, 0, "{}", "")
+            return subprocess.CompletedProcess(args, 1, "", "unsupported command")
+
+        return runner, calls
 
     @staticmethod
     def command(command_id, kind, body, run_id="r1", decision_id="D3", by="alice", created_at="2026-10-29T00:00:00Z"):
@@ -300,7 +358,143 @@ class AgentCtlTests(Base):
         self.assertEqual(snapshot["orchestrator"]["session_id"], "fallback-session")
         self.assertEqual(snapshot["orchestrator"]["screen"], ["fallback screen"])
         self.assertIn(["herdr", "agent", "read", "w9:p1", "--source", "visible", "--lines", "40"], calls)
-        self.assertTrue(AC._orchestrator_alive("orch-repo", runner, self.ws, "claude"))
+        self.assertTrue(AC._orchestrator_alive("orch-repo", runner, self.ws, "claude", self.cfg))
+
+    def test_hc_named_orchestrator_snapshot_and_scrubbed_screen(self):
+        self.cfg["herdr"]["backend"] = "hc"
+        orch_name = AC.kitstart.agent_name(S.project_root_for(self.ws, self.cfg).name)
+        runner, calls = self.fake_connectors(
+            hc_status="working", hc_name=orch_name,
+            read_output="visible screen\n[hc] incomplete: older output may be missing\naccess_token=sample-placeholder\n")
+
+        snapshot = AC.make_snapshot(self.ws, self.cfg, "ses_abcdefghijklmnop", runner)
+
+        self.assertEqual(snapshot["orchestrator"]["herdr_state"], "working")
+        self.assertEqual(snapshot["orchestrator"]["screen"], ["visible screen", "access_[REDACTED]"])
+        self.assertIn(["hc", "read", "--lines", "40", orch_name], calls)
+        self.assertFalse(any(args[0] == "herdr" for args in calls))
+
+    def test_hc_screen_redacts_multiline_pem_block(self):
+        self.cfg["herdr"]["backend"] = "hc"
+        orch_name = AC.kitstart.agent_name(S.project_root_for(self.ws, self.cfg).name)
+        runner, _ = self.fake_connectors(
+            hc_status="working", hc_name=orch_name,
+            read_output="before\n-----BEGIN PRIVATE KEY-----\nplaceholderbody\n-----END PRIVATE KEY-----\nafter\n")
+
+        snapshot = AC.make_snapshot(self.ws, self.cfg, "ses_abcdefghijklmnop", runner)
+
+        self.assertEqual(snapshot["orchestrator"]["screen"], ["before", "[REDACTED]", "after"])
+
+    def test_unnamed_hc_orchestrator_matches_workspace_and_kind(self):
+        self.cfg["herdr"]["backend"] = "auto"
+        runner, calls = self.fake_connectors(hc_status="working", hc_name=None, hc_app="claude-code")
+
+        snapshot = AC.make_snapshot(self.ws, self.cfg, "ses_abcdefghijklmnop", runner)
+
+        self.assertEqual(snapshot["orchestrator"]["herdr_state"], "working")
+        self.assertIn(["hc", "ls", "--json"], calls)
+        self.assertIn(["hc", "read", "--lines", "40", "t2"], calls)
+
+    def test_hc_error_status_is_unknown_in_snapshot(self):
+        self.cfg["herdr"]["backend"] = "hc"
+        orch_name = AC.kitstart.agent_name(S.project_root_for(self.ws, self.cfg).name)
+        runner, _ = self.fake_connectors(hc_status="error", hc_name=orch_name)
+
+        snapshot = AC.make_snapshot(self.ws, self.cfg, "ses_abcdefghijklmnop", runner)
+
+        self.assertEqual(snapshot["orchestrator"]["herdr_state"], "unknown")
+        hubschema.validate("Snapshot", snapshot)
+
+    def test_hc_prompt_is_sent_once_to_idle_orchestrator(self):
+        self.cfg["herdr"]["backend"] = "hc"
+        orch_name = AC.kitstart.agent_name(S.project_root_for(self.ws, self.cfg).name)
+        runner, calls = self.fake_connectors(hc_name=orch_name)
+
+        class Client:
+            def __init__(self): self.acks = []
+            def ack_command(self, command_id, status, reason=None): self.acks.append((status, reason))
+
+        client = Client()
+        command = self.command("cmd_hc_idle_00000001", "prompt", {"text": "Please continue"},
+                               run_id=None, decision_id=None)
+        AC._deliver_command(self.ws, self.cfg, orch_name, runner, client, command, {}, [], {}, lambda: 0)
+
+        self.assertEqual([args for args in calls if args[0] == "hc" and args[1] == "send"],
+                         [["hc", "send", orch_name, "[hub] Please continue"]])
+        self.assertEqual(client.acks, [("DELIVERED", None)])
+
+    def test_hc_prompt_while_working_is_held_without_send(self):
+        self.cfg["herdr"]["backend"] = "hc"
+        orch_name = AC.kitstart.agent_name(S.project_root_for(self.ws, self.cfg).name)
+        runner, calls = self.fake_connectors(hc_status="working", hc_name=orch_name)
+
+        class Client:
+            def __init__(self): self.acks = []
+            def ack_command(self, command_id, status, reason=None): self.acks.append((status, reason))
+
+        client = Client()
+        command = self.command("cmd_hc_busy_00000001", "prompt", {"text": "Please continue"},
+                               run_id=None, decision_id=None)
+        AC._deliver_command(self.ws, self.cfg, orch_name, runner, client, command, {}, [], {}, lambda: 0)
+
+        self.assertFalse(any(args[0] == "hc" and args[1] == "send" for args in calls))
+        self.assertEqual(client.acks, [("HELD", AC.HUB_HELD_REASON)])
+
+    def test_missing_hc_agent_falls_back_to_legacy(self):
+        self.cfg["herdr"]["backend"] = "auto"
+        runner, calls = self.fake_connectors(hc_present=False, legacy_present=True)
+
+        snapshot = AC.make_snapshot(self.ws, self.cfg, "ses_abcdefghijklmnop", runner)
+
+        self.assertEqual(snapshot["orchestrator"]["herdr_state"], "idle")
+        self.assertIn(["hc", "get", AC.kitstart.agent_name(S.project_root_for(self.ws, self.cfg).name), "--json"], calls)
+        self.assertIn(["herdr", "agent", "get", AC.kitstart.agent_name(S.project_root_for(self.ws, self.cfg).name)], calls)
+
+    def test_saved_hc_backend_does_not_call_legacy(self):
+        self.cfg["herdr"]["backend"] = "legacy"
+        orch_name = AC.kitstart.agent_name(S.project_root_for(self.ws, self.cfg).name)
+        session_path = AC.kitstart.session_file(self.ws)
+        session_path.parent.mkdir(parents=True, exist_ok=True)
+        session_path.write_text(json.dumps({"backend": "hc"}))
+        runner, calls = self.fake_connectors(hc_name=orch_name)
+
+        snapshot = AC.make_snapshot(self.ws, self.cfg, "ses_abcdefghijklmnop", runner)
+
+        self.assertEqual(snapshot["orchestrator"]["herdr_state"], "idle")
+        self.assertFalse(any(args[0] == "herdr" for args in calls))
+
+    def test_workers_without_recorded_backend_probe_both_backends(self):
+        self.cfg["herdr"]["backend"] = "hc"
+        state = self._write_legacy_run("worker-backend")
+        state["workers"] = {"worker-1": {"status": "BUSY", "task": "T1", "agent_name": "worker-legacy"}}
+        state_path = self.ws / ".orchestrator" / "runs" / "worker-backend" / "state.json"
+        state_path.write_text(json.dumps(state))
+        session_path = AC.kitstart.session_file(self.ws)
+        session_path.parent.mkdir(parents=True, exist_ok=True)
+        session_path.write_text(json.dumps({"backend": "hc"}))
+        runner, calls = self.fake_connectors(hc_present=False, legacy_present=True)
+
+        snapshot = AC.make_snapshot(self.ws, self.cfg, "ses_abcdefghijklmnop", runner)
+
+        worker = next(item for item in snapshot["workers"] if item["slot"] == "worker-1")
+        self.assertEqual(worker["herdr_state"], "idle")
+        self.assertIn(["hc", "get", "worker-legacy", "--json"], calls)
+        self.assertIn(["herdr", "agent", "get", "worker-legacy"], calls)
+
+    def test_watch_stops_after_hc_orchestrator_is_finished(self):
+        self.cfg["herdr"]["backend"] = "hc"
+        orch_name = AC.kitstart.agent_name(S.project_root_for(self.ws, self.cfg).name)
+        runner, calls = self.fake_connectors(hc_terminal_state="finished", hc_name=orch_name)
+        with FakeBackend() as backend:
+            self.set_backend(backend)
+            with redirect_stdout(StringIO()), redirect_stderr(StringIO()):
+                code = AC.watch(self.ws, runner=runner, sleep=lambda _: None, max_loops=4)
+
+        self.assertEqual(code, 0)
+        goodbye = [request["body"] for request in backend.requests if request["path"].endswith("/goodbye")]
+        self.assertEqual(goodbye[0]["reason"], "orchestrator_gone")
+        self.assertTrue(any(args[:2] == ["hc", "get"] for args in calls))
+        self.assertFalse(any(args[0] == "herdr" for args in calls))
 
     def test_enable_rewrites_only_hub_object_and_keeps_key_order(self):
         source = ('{\n  "first" : [1,  2],\n "hub" : {"enabled": false, "workspace_id": null},\n'
