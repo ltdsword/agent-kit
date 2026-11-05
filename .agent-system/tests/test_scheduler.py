@@ -74,9 +74,11 @@ def tearDownModule():
 class FakeHerdr(S.Herdr):
     backend = "legacy"
 
-    def __init__(self):
+    def __init__(self, sleep=lambda _: None):
         super().__init__(binary="herdr-fake")
         self.calls, self.live, self._n = [], {}, 0
+        self.sleep = sleep
+        self.start_labels = []
 
     def available(self):
         return True
@@ -89,11 +91,17 @@ class FakeHerdr(S.Herdr):
     def workspace_close(self, ws):
         self.calls.append(("workspace_close", ws))
 
-    def agent_start(self, name, pane, agent_args, timeout_ms, kind="codex"):
+    def agent_start(self, name, pane, agent_args, timeout_ms, kind="codex", labels=None):
         self.calls.append(("agent_start", name, pane, list(agent_args)))
         self.kinds = getattr(self, "kinds", []) + [kind]
+        self.start_labels.append(labels)
         self.live[name] = "idle"
         return {}
+
+    def wait_change(self, addresses, timeout_s):
+        self.calls.append(("wait_change", set(addresses), timeout_s))
+        self.sleep(timeout_s)
+        return False
 
     def agent_prompt(self, name, text, timeout_ms):
         self.calls.append(("agent_prompt", name, text))
@@ -335,6 +343,37 @@ class TestDag(Base):
             S.transition_worker(st, "worker-1", "IDLE")  # IDLE -> IDLE
 
 
+class TestLocalAlert(unittest.TestCase):
+    def test_local_alert_uses_exact_argv_and_swallows_failures(self):
+        calls = []
+
+        def runner(argv, **kwargs):
+            calls.append((argv, kwargs))
+            return subprocess.CompletedProcess(argv, 0, "", "")
+
+        with mock.patch.object(S.shutil, "which", return_value="/bin/herdr-task"):
+            self.assertTrue(S.local_alert(Path("/project"), {"herdr": {}}, "Decision D1 needs you", "Choose",
+                                          env={"HC_TERMINAL_ID": "t13"}, runner=runner))
+        self.assertEqual(calls[0][0], ["herdr-task", "alert", "Decision D1 needs you", "--body", "Choose",
+                                       "--folder", "/project", "--json"])
+        self.assertEqual(calls[0][1], {"capture_output": True, "text": True, "shell": False, "timeout": 5})
+
+        calls.clear()
+        with mock.patch.object(S.shutil, "which", return_value="/bin/herdr-task"):
+            self.assertFalse(S.local_alert(Path("/project"), {"herdr": {"alerts": False}}, "t", "b",
+                                           env={"HC_TERMINAL_ID": "t13"}, runner=runner))
+            self.assertFalse(S.local_alert(Path("/project"), {"herdr": {}}, "t", "b", env={}, runner=runner))
+        with mock.patch.object(S.shutil, "which", return_value=None):
+            self.assertFalse(S.local_alert(Path("/project"), {"herdr": {}}, "t", "b",
+                                           env={"HC_TERMINAL_ID": "t13"}, runner=runner))
+        self.assertEqual(calls, [])
+
+        with mock.patch.object(S.shutil, "which", return_value="/bin/herdr-task"):
+            self.assertFalse(S.local_alert(Path("/project"), {"herdr": {}}, "t", "b",
+                                           env={"HC_TERMINAL_ID": "t13"},
+                                           runner=lambda *a, **k: (_ for _ in ()).throw(OSError("failed"))))
+
+
 class TestConfig(Base):
     def test_every_slot_is_luna_xhigh(self):
         self.assertEqual(S.validate_config(KIT_CONFIG), [])
@@ -361,6 +400,12 @@ class TestConfig(Base):
         bad["pool"].update(size=11, slots=[f"worker-{i}" for i in range(1, 12)])
         self.assertTrue(any("1..10" in e for e in S.validate_config(bad)))
 
+    def test_herdr_alerts_and_artifacts_must_be_bool(self):
+        for key in ("alerts", "artifacts"):
+            bad = copy.deepcopy(KIT_CONFIG)
+            bad["herdr"][key] = "yes"
+            self.assertTrue(any(f"herdr.{key} must be a bool" in error for error in S.validate_config(bad)))
+
     def test_sample_dispatch_args_carry_model_and_effort(self):
         self.dag()
         out = self.s.dispatch_ready("r1", launch="herdr")
@@ -375,6 +420,7 @@ class TestConfig(Base):
     def test_codex_trusts_worktree_and_repo_root_for_the_run_and_network_switch(self):
         self.cfg["worker"].update(trust_worktree=True, network_access=True, web_search=False)
         args = self.new_scheduler().codex_args("/wt", "r1")
+        self.assertIn("check_for_update_on_startup=false", args)
         self.assertIn('projects."/wt".trust_level="trusted"', args)
         self.assertIn(f'projects."{self.repo.resolve()}".trust_level="trusted"', args)
         self.assertIn("sandbox_workspace_write.network_access=true", args)
@@ -386,6 +432,12 @@ class TestConfig(Base):
 
 
 class TestDispatch(Base):
+    def test_hc_launch_passes_run_and_slot_labels(self):
+        self.herdr.backend = "hc"
+        self.s.create_run("r1", [self.task("T1", trivial=True)])
+        self.s.dispatch_ready("r1")
+        self.assertEqual(self.herdr.start_labels, [{"agentkit.run": "r1", "agentkit.slot": "worker-1"}])
+
     def test_independent_concurrent_dependent_waits_for_merge(self):
         self.dag()
         out = self.s.dispatch_ready("r1", launch="herdr")
@@ -906,15 +958,61 @@ class TestTaskFiles(Base):
         out = self.s.wait("r1", timeout_s=3, interval_s=0, sleep=lambda s: None, clock=clock)
         self.assertEqual(out["result"], "timeout")
         self.herdr.live["worker-2-r1"] = "blocked"
-        out = self.s.wait("r1", timeout_s=3, interval_s=0, sleep=lambda s: None, clock=clock)
+        with mock.patch.object(S, "local_alert") as alert:
+            out = self.s.wait("r1", timeout_s=3, interval_s=0, sleep=lambda s: None, clock=clock)
+        alert.assert_called_once_with(self.s.project_root, self.cfg,
+                                      "Worker worker-2-r1 is waiting for approval",
+                                      "Worker worker-2-r1 is waiting for approval")
         self.assertEqual([b["task"] for b in out["blocked"]], ["T3"])
         self.worker_commit("r1", "T1")
         out = self.s.wait("r1", tids=["T1"], timeout_s=3, interval_s=0, sleep=lambda s: None, clock=clock)
         self.assertEqual(out["reported"], ["T1"])
         self.assertIn("collect --run r1 --task T1", out["next"])
 
+    def test_hc_wait_uses_terminal_events_while_legacy_wait_sleeps(self):
+        self.herdr.backend = "hc"
+        self.s.create_run("r1", [self.task("T1", trivial=True)])
+        self.s.dispatch_ready("r1")
+        original_record = self.herdr.agent_record
+
+        def hc_record(name):
+            rec, state = original_record(name)
+            return ({**rec, "pane_id": "terminal-1"} if rec else None), state
+
+        self.herdr.agent_record = hc_record
+        now = [0.0]
+        self.herdr.sleep = lambda seconds: now.__setitem__(0, now[0] + seconds)
+        scheduler_sleeps = []
+        out = self.s.wait("r1", timeout_s=1, interval_s=0.5,
+                          sleep=scheduler_sleeps.append, clock=lambda: now[0])
+        self.assertEqual(out["result"], "timeout")
+        self.assertEqual([call for call in self.herdr.calls if call[0] == "wait_change"],
+                         [("wait_change", {"terminal-1"}, 0.5), ("wait_change", {"terminal-1"}, 0.5)])
+        self.assertEqual(scheduler_sleeps, [])
+
+    def test_legacy_wait_keeps_using_scheduler_sleep(self):
+        self.s.create_run("r1", [self.task("T1", trivial=True)])
+        self.s.dispatch_ready("r1")
+        now, sleeps = [0.0], []
+
+        def sleep(seconds):
+            sleeps.append(seconds)
+            now[0] += seconds
+
+        out = self.s.wait("r1", timeout_s=0.5, interval_s=0.25, sleep=sleep, clock=lambda: now[0])
+        self.assertEqual(out["result"], "timeout")
+        self.assertEqual(sleeps, [0.25, 0.25])
+        self.assertFalse([call for call in self.herdr.calls if call[0] == "wait_change"])
+
 
 class TestDecisions(Base):
+    def test_decision_ask_sends_alert_after_saving(self):
+        self.s.create_run("r1", [self.task("T1", trivial=True)])
+        with mock.patch.object(S, "local_alert") as alert:
+            result = self.s.decision_ask("r1", "question", "Choose", "Pick one", ["A=one", "B=two"])
+        alert.assert_called_once_with(self.s.project_root, self.cfg, "Decision D1 needs you", "Choose")
+        self.assertEqual(self.s.store.load("r1")["decisions"][result["decision"]]["status"], "PENDING")
+
     def test_question_accepts_a_typed_reply_as_its_answer(self):
         question = self.s.inbox_ask("Push?", "Push now?", ["A=Push", "B=Not yet"], "A")["decision"]
         answer = self.s.decision_answer("inbox", question, "reply", "Later", quote="Later")
@@ -1421,7 +1519,10 @@ class TestFinish(WorkspaceBase):
 
     def test_report_has_summary_and_total_diff(self):
         self.done_run()
-        out = self.s.report("r1", "Added t1/out.txt.")
+        with mock.patch.object(S, "local_alert") as alert:
+            out = self.s.report("r1", "Added t1/out.txt.")
+        alert.assert_called_once_with(self.s.project_root, self.cfg,
+                                      "Run r1 is ready to finish", "Run r1 is ready to finish")
         text = Path(out["report"]).read_text()
         for needle in ("Added t1/out.txt.", "Started from: `main`", "Final gate: PASS", "| T1 |", "T1: work"):
             self.assertIn(needle, text)

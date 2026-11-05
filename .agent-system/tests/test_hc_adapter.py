@@ -1,5 +1,6 @@
 """Tests for the hc adapter, using only replayed CLI output."""
 import json
+import os
 import subprocess
 import sys
 import unittest
@@ -112,18 +113,81 @@ class HcRecordTests(unittest.TestCase):
                 return completed(argv)
             if argv[1:2] == ["get"]:
                 return completed(argv, json.dumps(next(polls)))
+            if argv[1:2] == ["read"]:
+                return completed(argv)
             raise AssertionError(argv)
 
         hc = S.Hc(runner=runner, sleep=time.sleep, clock=time.clock)
         workspace, pane = hc.workspace_create("/work", "run-worker")
         self.assertRegex(workspace, r"^ak[0-9a-f]{16}$")
         self.assertEqual(pane, workspace)
-        hc.agent_start("worker", pane, ["--model", "test"], 2000, kind="codex")
+        hc.agent_start("worker", pane, ["--model", "test"], 2000, kind="codex",
+                       labels={"agentkit.run": "r1", "agentkit.slot": "worker-1"})
         self.assertEqual(calls[0][0], ["hc", "run", "--bg", "--no-parent", "--no-notify", "--keep",
                                        "--name", "worker", "--cwd", "/work", "--label",
-                                       f"herdr.space={pane}", "--label", "agentkit.kind=codex", "--",
+                                       f"herdr.space={pane}", "--label", "agentkit.kind=codex", "--label",
+                                       "agentkit.run=r1", "--label", "agentkit.slot=worker-1", "--",
                                        M.binary("codex"), "--model", "test"])
         self.assertEqual(calls[1][0], ["herdr-app", "do", "space.rename", "--id", pane, "--name", "run-worker"])
+
+    def test_agent_start_answers_only_the_safe_startup_dialogs(self):
+        dialogs = [
+            ("  Hooks need review\n› 1. Review hooks\n  2. Trust all and continue\n"
+             "  3. Continue without trusting (hooks won't run)\n", ["down", "down", "enter"], "hooks_review"),
+            ("Update available · 0.165.0 → 0.166.0\n› 1. Update now\n  2. Skip\n", ["esc"], "update"),
+        ]
+        for screen, expected_keys, answered in dialogs:
+            with self.subTest(answered=answered):
+                clock = FakeTime()
+                calls = []
+                reads = []
+                gets = 0
+
+                def runner(argv, **kwargs):
+                    nonlocal gets
+                    calls.append(argv)
+                    if argv[1:3] == ["run", "--bg"] or argv[:3] == ["herdr-app", "do", "space.rename"]:
+                        return completed(argv)
+                    if argv[1:2] == ["get"]:
+                        gets += 1
+                        raw = {"address": "t1", "name": "worker", "state": "live",
+                               "reported": gets > 1, "status": {"app": "codex", "state": "idle"}
+                               if gets > 1 else None, "labels": {}}
+                        return completed(argv, json.dumps(raw))
+                    if argv[1:2] == ["read"]:
+                        reads.append(argv)
+                        return completed(argv, screen)
+                    return completed(argv)
+
+                hc = S.Hc(runner=runner, sleep=clock.sleep, clock=clock.clock)
+                _, pane = hc.workspace_create("/work", "worker")
+                rec = hc.agent_start("worker", pane, [], 2000)["result"]["agent"]
+                self.assertEqual(rec["auto_answered"], [answered])
+                self.assertEqual([call[2:] for call in calls if call[1:2] == ["keys"]],
+                                 [["worker", *expected_keys]])
+                self.assertTrue(reads)
+
+    def test_agent_start_never_answers_trust_dialog(self):
+        time = FakeTime()
+        calls = []
+
+        def runner(argv, **kwargs):
+            calls.append(argv)
+            if argv[1:2] == ["run"]:
+                return completed(argv, '{"address":"t1"}')
+            if argv[1:2] == ["get"]:
+                raw = {"address": "t1", "name": "worker", "state": "live",
+                       "status": None, "reported": False, "labels": {}}
+                return completed(argv, json.dumps(raw))
+            if argv[1:2] == ["read"]:
+                return completed(argv, "› 1. Trust this folder?\n  2. Continue\n")
+            return completed(argv)
+
+        hc = S.Hc(runner=runner, sleep=time.sleep, clock=time.clock)
+        _, pane = hc.workspace_create("/work", "worker")
+        with self.assertRaisesRegex(S.SchedulerError, "agent_not_ready"):
+            hc.agent_start("worker", pane, [], 1000)
+        self.assertFalse(any(call[1:2] == ["keys"] for call in calls))
 
     def test_agent_start_times_out_when_never_reported(self):
         time = FakeTime()
@@ -210,6 +274,7 @@ class HcRecordTests(unittest.TestCase):
         self.assertIn(["hc", "rm", "t1"], calls)
         self.assertNotIn(["hc", "kill", "t2"], calls)
         self.assertNotIn(["hc", "rm", "t2"], calls)
+        self.assertIn(["herdr-app", "do", "space.close", "--id", "wanted", "--confirmed", "true"], calls)
 
     def test_agent_read_drops_hc_lines_and_keeps_last_n(self):
         calls = []
@@ -220,6 +285,77 @@ class HcRecordTests(unittest.TestCase):
 
         self.assertEqual(S.Hc(runner=runner).agent_read("t1", 2), ["second", "third"])
         self.assertEqual(calls, [["hc", "read", "--lines", "2", "t1"]])
+
+    def test_wait_change_skips_snapshot_and_unwatched_terminal(self):
+        class FakeProcess:
+            def __init__(self, content):
+                self.read_fd, self.write_fd = os.pipe()
+                self.stdout = os.fdopen(self.read_fd, "rb", buffering=0)
+                os.write(self.write_fd, content)
+                os.close(self.write_fd)
+                self.write_fd = None
+                self.terminated = False
+
+            def terminate(self):
+                self.terminated = True
+                if self.write_fd is not None:
+                    os.close(self.write_fd)
+                    self.write_fd = None
+
+            def wait(self, timeout=None):
+                return 0
+
+        snapshot = {"channel": None, "seq": 1, "terminals": [{"address": "ours"}]}
+        other = {"jsonrpc": "2.0", "method": "event", "params":
+                 {"data": {}, "seq": 2, "terminal": "other", "type": "foreground"}}
+        mine = {"jsonrpc": "2.0", "method": "event", "params":
+                {"data": {}, "seq": 3, "terminal": "ours", "type": "foreground"}}
+        mine_by_data = {"jsonrpc": "2.0", "method": "event", "params":
+                        {"data": {"address": "ours"}, "seq": 4, "type": "created"}}
+        for lines, expected in (([snapshot, other], False), ([snapshot, mine], True),
+                                ([snapshot, mine_by_data], True)):
+            proc = FakeProcess(("\n".join(json.dumps(line) for line in lines) + "\n").encode())
+            calls = []
+
+            def popen(argv, **kwargs):
+                calls.append((argv, kwargs))
+                return proc
+
+            result = S.Hc(popen=popen).wait_change({"ours"}, 1)
+            self.assertEqual(result, expected)
+            self.assertTrue(proc.terminated)
+            self.assertEqual(calls[0][0], ["hc", "events", "--json"])
+            self.assertIs(calls[0][1]["stdout"], subprocess.PIPE)
+
+    def test_wait_change_timeout_and_popen_error(self):
+        class FakeProcess:
+            def __init__(self):
+                self.read_fd, self.write_fd = os.pipe()
+                self.stdout = os.fdopen(self.read_fd, "rb", buffering=0)
+                self.terminated = False
+
+            def terminate(self):
+                self.terminated = True
+                os.close(self.write_fd)
+                self.write_fd = None
+
+            def wait(self, timeout=None):
+                return 0
+
+        proc = FakeProcess()
+        time = FakeTime()
+        with mock.patch.object(S.select, "select", return_value=([], [], [])) as select_mock:
+            self.assertFalse(S.Hc(popen=lambda *a, **k: proc, clock=time.clock).wait_change({"ours"}, 2))
+        self.assertTrue(proc.terminated)
+        self.assertEqual(select_mock.call_args.args[3], 2)
+
+        sleeps = []
+
+        def failed_popen(*args, **kwargs):
+            raise OSError("unavailable")
+
+        self.assertFalse(S.Hc(popen=failed_popen, sleep=sleeps.append).wait_change({"ours"}, 3))
+        self.assertEqual(sleeps, [3])
 
     def test_make_herdr_backend_selection_matrix(self):
         server_output = json.dumps({"core": {"id": "451e123", "name": "host"}, "finished": 1,
