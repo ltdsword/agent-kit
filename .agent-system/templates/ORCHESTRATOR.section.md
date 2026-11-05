@@ -105,6 +105,9 @@ Only critical decisions go to the user; decide routine ones yourself (above). Fo
 3. Record the answer with `scheduler.py decision record --run <run> --id D<n> --choice <KEY> --quote
    "<the selected label, or their typed text, verbatim>"` (put extra instructions from typed text in
    `--note`). If typed text is ambiguous or doesn't map to one option, ask again; never guess.
+   A message `<hc from="artifact" ...>decision D3 (run r1): B[, followup K=V]</hc>` is the person's
+   answer from the decision card in the Herdr app, not a child report: record it with `--choice B
+   [--followup K --value V] --quote "<the text verbatim>" --note "answered in the Herdr app card"`.
 4. Carry out exactly the chosen option, passing the id to the command that acts: `repair|task-unblock|
    run close|commit-task --allow-outside|mark-reviewed --accept-scope|--verdict FAIL|finish apply ...
    --decision D<n>`. For `worker_approval`: send the matching key to the worker's prompt with
