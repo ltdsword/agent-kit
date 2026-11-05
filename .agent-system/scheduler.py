@@ -29,6 +29,10 @@ import tomllib
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+try:  # Herdr app panels are optional: a workspace without the module still runs
+    import artifacts  # noqa: E402
+except ImportError:  # pragma: no cover
+    artifacts = None
 import models as M  # noqa: E402  (model registry, same folder)
 
 SCHEMA_VERSION = 1
@@ -656,6 +660,8 @@ class Store:
                 f.flush()
                 os.fsync(f.fileno())
             os.replace(tmp, p)
+            if artifacts:
+                artifacts.write_board(self, state)
         finally:
             if tmp.exists():
                 tmp.unlink()
@@ -1397,6 +1403,15 @@ class Scheduler:
             log_event(state, "run_created", base_sha=base_sha)
             (run_dir / "tasks.json").write_text(json.dumps({"tasks": tasks}, indent=2) + "\n")
             self.store.save(state)
+            if artifacts and artifacts.enabled(self.cfg):
+                artifact_id = artifacts.publish_board(self.project_root, run_dir, state, self.cfg)
+                if artifact_id:
+                    try:
+                        self.store.save(state)
+                    except Exception:
+                        print(f"Herdr board artifact id could not be saved for {run_id}", file=sys.stderr)
+                else:
+                    print(f"Herdr board artifact publish failed for {run_id}", file=sys.stderr)
             self._write_research_index(state)
             return state
 
@@ -2425,6 +2440,18 @@ class Scheduler:
                     "", "Waiting for the user's answer in chat."])
             log_event(state, "decision_opened", id=did, decision_kind=kind, task=task)
         local_alert(self.project_root, self.cfg, f"Decision {did} needs you", title)
+        try:
+            if artifacts and artifacts.enabled(self.cfg):
+                artifact_id = artifacts.publish_decision(self.project_root, self.store.run_dir(run_id), state,
+                                                         self.cfg, did)
+                if artifact_id:
+                    with self.txn(run_id) as current:
+                        if did in current.get("decisions", {}):
+                            current["decisions"][did]["artifact_id"] = artifact_id
+                else:
+                    print(f"Herdr decision artifact publish failed for {did}", file=sys.stderr)
+        except Exception:
+            print(f"Herdr decision artifact publish failed for {did}", file=sys.stderr)
         hub_online = self._hub_online_hint()
         lines = [f"{o['key']}: {o['label']}" +
                  (f" — consequence: {o['consequence']}" if o["consequence"] else "") for o in parsed]
@@ -2833,7 +2860,10 @@ class Scheduler:
     def cleanup(self, run_id: str, remove_worktrees: bool = False) -> dict:
         """Close only Herdr workspaces this run created; optionally remove CLEAN worktrees."""
         done = []
+        artifact_ids = []
         with self.txn(run_id) as state:
+            artifact_ids = [decision.get("artifact_id") for decision in state.get("decisions", {}).values()
+                            if decision.get("artifact_id")]
             busy = [w for w, v in state["workers"].items() if v["status"] == "BUSY"]
             if busy and remove_worktrees:
                 raise SchedulerError(f"workers still leased: {busy}")
@@ -2858,6 +2888,8 @@ class Scheduler:
                         r = git(self.project_root, "worktree", "remove", str(p), check=False)
                         done.append(f"removed {p}" if r.returncode == 0 else f"kept {p}: {r.stderr.strip()}")
             log_event(state, "cleanup", actions=done)
+        if artifacts:
+            artifacts.remove(artifact_ids)
         return {"run": run_id, "actions": done}
 
     def status(self, run_id: str) -> dict:
