@@ -423,7 +423,7 @@ class AgentCtlTests(Base):
                          [["hc", "send", orch_name, "[hub] Please continue"]])
         self.assertEqual(client.acks, [("DELIVERED", None)])
 
-    def test_hc_prompt_while_working_is_held_without_send(self):
+    def test_hc_prompt_while_working_is_delivered_with_send(self):
         self.cfg["herdr"]["backend"] = "hc"
         orch_name = AC.kitstart.agent_name(S.project_root_for(self.ws, self.cfg).name)
         runner, calls = self.fake_connectors(hc_status="working", hc_name=orch_name)
@@ -437,8 +437,9 @@ class AgentCtlTests(Base):
                                run_id=None, decision_id=None)
         AC._deliver_command(self.ws, self.cfg, orch_name, runner, client, command, {}, [], {}, lambda: 0)
 
-        self.assertFalse(any(args[0] == "hc" and args[1] == "send" for args in calls))
-        self.assertEqual(client.acks, [("HELD", AC.HUB_HELD_REASON)])
+        self.assertEqual([args for args in calls if args[0] == "hc" and args[1] == "send"],
+                         [["hc", "send", orch_name, "[hub] Please continue"]])
+        self.assertEqual(client.acks, [("DELIVERED", None)])
 
     def test_missing_hc_agent_falls_back_to_legacy(self):
         self.cfg["herdr"]["backend"] = "auto"
@@ -902,6 +903,111 @@ class AgentCtlTests(Base):
         self.assertEqual(current["prompts"], ["[hub] Run it"])
         self.assertEqual(client.acks[-1], ("DELIVERED", None))
         self.assertNotIn(command["id"], commands)
+
+    def test_working_hc_delivers_answer_notice_without_retry(self):
+        class Client:
+            def __init__(self):
+                self.acks = []
+
+            def ack_command(self, command_id, status, reason=None):
+                self.acks.append((status, reason))
+
+        self.sample_run()
+        self.cfg["herdr"]["backend"] = "hc"
+        runner, calls = self.fake_connectors(hc_status="working")
+        client, records, notices, commands = Client(), {}, [], {}
+        command = self.command("cmd_hc_answer_000001", "answer", {"choice": "A"})
+
+        AC._deliver_command(self.ws, self.cfg, "orch-repo", runner, client, command,
+                            records, notices, commands, lambda: 0)
+
+        sends = [call for call in calls if call[:2] == ["hc", "send"]]
+        self.assertEqual(sends, [["hc", "send", "t2",
+                                  "[hub] D3 answered by alice: A (Allow). It is recorded; "
+                                  "carry it out with --decision D3."]])
+        self.assertEqual(client.acks, [("DELIVERED", None)])
+        self.assertEqual(notices, [])
+        self.assertEqual(commands, {})
+
+    def test_blocked_hc_prompt_stays_held(self):
+        class Client:
+            def __init__(self):
+                self.acks = []
+
+            def ack_command(self, command_id, status, reason=None):
+                self.acks.append((status, reason))
+
+        self.cfg["herdr"]["backend"] = "hc"
+        runner, calls = self.fake_connectors(hc_status="blocked")
+        client, commands = Client(), {}
+        command = self.command("cmd_hc_blocked_0001", "prompt", {"text": "Run the check"},
+                               run_id=None, decision_id=None)
+
+        AC._deliver_command(self.ws, self.cfg, "orch-repo", runner, client, command,
+                            {}, [], commands, lambda: 0)
+
+        self.assertFalse(any(call[:2] == ["hc", "send"] for call in calls))
+        self.assertEqual(client.acks, [("HELD", AC.HUB_HELD_REASON)])
+        self.assertIn(command["id"], commands)
+
+    def test_working_legacy_prompt_stays_held(self):
+        class Client:
+            def __init__(self):
+                self.acks = []
+
+            def ack_command(self, command_id, status, reason=None):
+                self.acks.append((status, reason))
+
+        self.cfg["herdr"]["backend"] = "legacy"
+        runner, calls = self.fake_connectors(hc_present=False, legacy_present=True,
+                                             legacy_status="working")
+        client, commands = Client(), {}
+        command = self.command("cmd_legacy_working_001", "prompt", {"text": "Run the check"},
+                               run_id=None, decision_id=None)
+
+        AC._deliver_command(self.ws, self.cfg, "orch-repo", runner, client, command,
+                            {}, [], commands, lambda: 0)
+
+        self.assertFalse(any(call[:2] == ["herdr", "agent", "prompt"] for call in calls))
+        self.assertEqual(client.acks, [("HELD", AC.HUB_HELD_REASON)])
+        self.assertIn(command["id"], commands)
+
+    def test_hc_send_failure_retries_answer_and_fails_phone_prompt(self):
+        class Client:
+            def __init__(self):
+                self.acks = []
+
+            def ack_command(self, command_id, status, reason=None):
+                self.acks.append((status, reason))
+
+        self.sample_run()
+        self.cfg["herdr"]["backend"] = "hc"
+        base_runner, calls = self.fake_connectors(hc_status="working")
+
+        def failed_send_runner(args, **kwargs):
+            args = list(args)
+            if args[:2] == ["hc", "send"]:
+                calls.append(args)
+                return subprocess.CompletedProcess(args, 1, "", "send failed")
+            return base_runner(args, **kwargs)
+
+        client, records, notices, commands = Client(), {}, [], {}
+        answer = self.command("cmd_hc_failed_answer_01", "answer", {"choice": "A"})
+        AC._deliver_command(self.ws, self.cfg, "orch-repo", failed_send_runner, client, answer,
+                            records, notices, commands, lambda: 0)
+        self.assertEqual(len(notices), 1)
+        self.assertEqual(notices[0]["notice"],
+                         "[hub] D3 answered by alice: A (Allow). It is recorded; "
+                         "carry it out with --decision D3.")
+
+        prompt = self.command("cmd_hc_failed_prompt_01", "prompt", {"text": "Run the check"},
+                              run_id=None, decision_id=None)
+        AC._deliver_command(self.ws, self.cfg, "orch-repo", failed_send_runner, client, prompt,
+                            records, notices, commands, lambda: 0)
+
+        self.assertEqual(client.acks, [("DELIVERED", None), ("FAILED", "hc send failed: send failed")])
+        self.assertEqual(records[prompt["id"]]["status"], "FAILED")
+        self.assertEqual(len([call for call in calls if call[:2] == ["hc", "send"]]), 2)
 
     def test_done_state_counts_as_ready_for_a_hub_prompt(self):
         # Herdr reports "done" for a finished turn nobody has looked at (the user is on the phone).

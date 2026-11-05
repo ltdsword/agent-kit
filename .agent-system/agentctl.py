@@ -1203,13 +1203,31 @@ def _short_reason(error) -> str:
     return (message or "command delivery failed")[:300]
 
 
+def _deliverable(state: str, backend) -> bool:
+    return state in READY_STATES or (getattr(backend, "backend", None) == "hc" and state == "working")
+
+
+def _send_notice(backend, target: str, state: str, text: str, cfg: dict) -> None:
+    if state in READY_STATES:
+        backend.agent_prompt(target, text, cfg["herdr"]["prompt_ack_timeout_ms"])
+        return
+    try:
+        process = backend.runner([backend.binary, "send", target, text], capture_output=True,
+                                 text=True, shell=False, timeout=5)
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise S.SchedulerError(f"hc send failed: {_short_reason(error)}") from error
+    if not process or process.returncode != 0:
+        detail = (process.stderr or process.stdout).strip() if process else "hc unavailable"
+        raise S.SchedulerError(f"hc send failed: {detail}")
+
+
 def _type_hub_notice(ws: Path, name: str, text: str, cfg: dict,
                      runner=subprocess.run) -> tuple[bool, str | None]:
     _, state, target, backend = _herdr_record_for_workspace(
         name, ws, cfg.get("orchestrator", {}).get("kind", "claude"), runner, _backends(ws, cfg, runner))
-    if state not in READY_STATES:
+    if not _deliverable(state, backend):
         return False, HUB_HELD_REASON
-    backend.agent_prompt(target, scrub(text), cfg["herdr"]["prompt_ack_timeout_ms"])
+    _send_notice(backend, target, state, scrub(text), cfg)
     return True, None
 
 
@@ -1346,7 +1364,7 @@ def _deliver_command(ws: Path, cfg: dict, name: str, runner, client: HubClient,
     except Exception as error:
         _ack_command(client, command_id, "FAILED", _short_reason(error))
         return
-    if state not in READY_STATES:
+    if not _deliverable(state, backend):
         log_action(ws, f"hub command {command_id} held: orchestrator {name} is {state}")
         command_retries[command_id] = _new_delivery_schedule(command_id, notice, clock(), command=command)
         _ack_command(client, command_id, "HELD", HUB_HELD_REASON)
@@ -1357,7 +1375,7 @@ def _deliver_command(ws: Path, cfg: dict, name: str, runner, client: HubClient,
         _ack_command(client, command_id, "FAILED", _short_reason(error))
         return
     try:
-        backend.agent_prompt(target, notice, cfg["herdr"]["prompt_ack_timeout_ms"])
+        _send_notice(backend, target, state, notice, cfg)
     except Exception as error:
         reason = _short_reason(error)
         try:
@@ -1413,13 +1431,13 @@ def _retry_hub_commands(ws: Path, name: str, cfg: dict, runner, client: HubClien
             _, state, target, backend = _herdr_record_for_workspace(
                 name, ws, cfg.get("orchestrator", {}).get("kind", "claude"), runner,
                 _backends(ws, cfg, runner))
-            if state not in READY_STATES:
+            if not _deliverable(state, backend):
                 log_action(ws, f"hub command {command_id} still held: orchestrator {name} is {state}")
                 _advance_delivery_schedule(item)
                 continue
             command = item["command"]
             _append_hub_log(ws, command, records)
-            backend.agent_prompt(target, item["notice"], cfg["herdr"]["prompt_ack_timeout_ms"])
+            _send_notice(backend, target, state, item["notice"], cfg)
         except Exception as error:
             reason = _short_reason(error)
             try:
