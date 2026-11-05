@@ -528,3 +528,7 @@ Verdict: PASS (one Opus fix before commit)
 
 - `.agent-system/scripts/verify.sh` exit 0 on agent/integration-hcpid at 585e28029752 (log `.orchestrator/runs/hcpid/logs/verify-1793872806.log`)
 - Task MERGED; run DONE
+
+## Finished (05/11/26 17:02)
+
+- merged into hub/plan (decision D1)
