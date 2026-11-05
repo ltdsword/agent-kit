@@ -114,7 +114,7 @@ fi
 
 # --- Orchestration scaffold self-test (full mode, when present)
 if [ "$MODE" = full ] && [ -d .agent-system/tests ]; then
-  run "agent-system scheduler tests" python3 -m unittest discover -s .agent-system/tests -q
+  run "agent-system scheduler tests" env -u HC_TERMINAL_ID -u HERDR_ENV python3 -m unittest discover -s .agent-system/tests -q
 fi
 
 if [ $RAN -eq 0 ]; then
