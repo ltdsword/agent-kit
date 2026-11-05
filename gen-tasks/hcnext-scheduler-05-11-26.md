@@ -177,3 +177,7 @@ Verdict: PASS (with two orchestrator fixes applied before commit)
 
 - `.agent-system/scripts/verify.sh` exit 0 on agent/integration-hcnext at 9ab640e42edf (log `.orchestrator/runs/hcnext/logs/verify-1793848936.log`)
 - Task MERGED; run DONE
+
+## Finished (05/11/26 15:32)
+
+- merged into hub/plan (decision D7)
