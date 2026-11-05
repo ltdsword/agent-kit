@@ -84,3 +84,96 @@ machine; git push/merge/rebase/reset/checkout; installs; systemctl.
 
 ---
 <!-- Do not edit above this line after dispatch. scheduler.py appends: Worker result, Review, Integration, Final gate. -->
+
+## Worker result - attempt 1 (05/11/26 09:02)
+
+- Status: **done** (worker worker-1, branch `agent/hcnext-t1`)
+- Commits: none, changes left uncommitted (orchestrator commits after review)
+- Files: `.agent-system/scheduler.py`, `.agent-system/tests/test_hc_adapter.py`, `.agent-system/tests/test_scheduler.py`
+- Scope: OK
+- Tests reported:
+  - `python3 -m pytest -q .agent-system/tests` -> exit 0
+  - `python3 -m pytest -q .agent-system/tests` -> exit 0
+- Risks: none
+- Not done:
+  - commit (worktree .git is read-only)
+- Full diff: `.orchestrator/runs/hcnext/reports/T1.diff`
+
+````text
+ .agent-system/scheduler.py             | 173 +++++++++++++++++++++++++++++++--
+ .agent-system/tests/test_hc_adapter.py | 139 +++++++++++++++++++++++++-
+ .agent-system/tests/test_scheduler.py  | 109 ++++++++++++++++++++-
+ 3 files changed, 407 insertions(+), 14 deletions(-)
+````
+
+(diff is 663 lines; read the full diff file)
+
+## Decision D1 needed (scope_exception) (05/11/26 09:04)
+
+**Commit tests/conftest.py with T1?**
+
+T1's tests sent real alerts to your Herdr app. The fix is a new .agent-system/tests/conftest.py (4 lines) that removes HC_TERMINAL_ID/HERDR_ENV before tests run, so no test can reach your app. It is outside T1's owned paths.
+
+- `A`: Allow: commit conftest.py with T1 (recommended)
+- `B`: Don't: keep the fix out of this run
+
+Waiting for the user's answer in chat.
+
+## Decision D1 answered by the user (05/11/26 09:05)
+
+- Choice: **A**: Allow: commit conftest.py with T1
+- User's words (hub): "Allow: commit conftest.py with T1"
+
+## Decision D2 needed (scope_exception) (05/11/26 09:07)
+
+**Accept conftest.py in T1's review (same file as D1)**
+
+Same file you allowed in D1 (.agent-system/tests/conftest.py, keeps tests away from your real app). The kit needs a second answer to accept it at review; then T1 is merged.
+
+- `A`: Accept it (same as D1) (recommended)
+- `B`: Reject: send T1 back without it
+
+Waiting for the user's answer in chat.
+
+## Decision D2 answered by the user (05/11/26 09:09)
+
+- Choice: **A**: Accept it (same as D1)
+- User's words (hub): "Accept it (same as D1)"
+
+## Review round 1: PASS (05/11/26 09:09)
+
+- Verdict: **PASS** -> task is now PASSED (fix rounds used: 0/2)
+- Reviewed HEAD: d88d9893e523, commits d88d9893e523
+- Notes: C1-C3 met; test isolation (conftest, D1/D2) and app space close fixed in review; 233 tests pass
+
+# Review hcnext T1 - scheduler: Codex startup, events, alerts (Opus)
+
+Verdict: PASS (with two orchestrator fixes applied before commit)
+
+- C1: `check_for_update_on_startup=false` always; readiness loop reads the screen every 2 s, answers
+  "Hooks need review" by moving from the selected line to "Continue without trusting" (keys computed from the
+  screen), update prompt -> esc; trust prompts never touched; `auto_answered` recorded; `Hc.keys`.
+- C2: `Hc.wait_change` on `hc events --json` (snapshot skipped, terminal/data.address match, select bounded by
+  injected clock, child always terminated, error -> sleep); `wait` uses it for hc, sleep for legacy; workers get
+  `agentkit.run` / `agentkit.slot` labels.
+- C3: `local_alert` gated by `herdr.alerts`, HC_TERMINAL_ID and herdr-task; called from decision_ask, wait
+  (blocked) and report (report already requires DONE); validate_config checks bool alerts/artifacts.
+- **Fixed (MAJOR, test isolation):** the suite sent REAL alerts to the person's app ("Decision D2 needs you",
+  "Run formatter?") because tests inherit HC_TERMINAL_ID from the worker's app terminal. Added
+  `.agent-system/tests/conftest.py` removing HC_TERMINAL_ID/HERDR_ENV. Proof: full suite with HC_TERMINAL_ID set
+  and a logging fake `herdr-task` first on PATH -> 0 calls. (conftest.py is outside T1's owned paths: Opus fix.)
+- **Fixed (MINOR, found live):** `Hc.workspace_close` left the app space behind (empty spaces piled up and the
+  app started idle Assistants in them). Now also `herdr-app do space.close --id <id> --confirmed true`, best
+  effort; test asserts the argv.
+- Minor (accepted): `wait` alerts once per blocked agent per wait call (a re-run wait alerts again); hooks
+  answer is tried once per launch.
+- Tests: whole suite 233 passed (Opus rerun with the fixes).
+
+## Integration: merged (05/11/26 09:09)
+
+- On `agent/integration-hcnext` at 422487cbe52f; `.agent-system/scripts/verify.sh --quick` passed (log `.orchestrator/runs/hcnext/logs/post-merge-T1-a1.log`)
+
+## Final gate: PASS (05/11/26 10:27)
+
+- `.agent-system/scripts/verify.sh` exit 0 on agent/integration-hcnext at 9ab640e42edf (log `.orchestrator/runs/hcnext/logs/verify-1793848936.log`)
+- Task MERGED; run DONE
