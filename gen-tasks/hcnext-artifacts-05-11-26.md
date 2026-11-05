@@ -56,3 +56,62 @@ push/merge/rebase/reset/checkout; installs.
 
 ---
 <!-- Do not edit above this line after dispatch. scheduler.py appends: Worker result, Review, Integration, Final gate. -->
+
+## Worker result - attempt 1 (05/11/26 09:31)
+
+- Status: **blocked** (worker worker-1, branch `agent/hcnext-t2`)
+- Commits: none, changes left uncommitted (orchestrator commits after review)
+- Files: `.agent-system/artifacts.py`, `.agent-system/artifacts/board/main.js`, `.agent-system/artifacts/decision/main.js`, `.agent-system/scheduler.py`, `.agent-system/tests/test_artifacts.py`
+- Scope: OK
+- Tests reported:
+  - `python3 -m pytest -q .agent-system/tests/test_artifacts.py` -> exit 0
+  - `python3 -m pytest -q .agent-system/tests` -> exit 1
+- Risks:
+  - Workspaces created by the current installer fail to import scheduler.py after this change because artifacts.py and artifacts/ are not copied.
+- Not done:
+  - Installer packaging change is needed to ship artifacts.py and artifacts/, but the task boundaries forbid editing .agent-system/scripts/install.sh.
+  - The full test suite is not green until that packaging gap is resolved.
+- Full diff: `.orchestrator/runs/hcnext/reports/T2.diff`
+
+````text
+ .agent-system/artifacts.py               | 184 ++++++++++++++++++++++++++
+ .agent-system/artifacts/board/main.js    |  65 ++++++++++
+ .agent-system/artifacts/decision/main.js |  82 ++++++++++++
+ .agent-system/scheduler.py               |  27 ++++
+ .agent-system/tests/test_artifacts.py    | 215 +++++++++++++++++++++++++++++++
+ 5 files changed, 573 insertions(+)
+````
+
+(diff is 644 lines; read the full diff file)
+
+## Decision D3 needed (scope_exception) (05/11/26 09:36)
+
+**Commit install.sh line with T2?**
+
+T2 adds artifacts.py and artifacts/ (the Herdr panels). install.sh copies a fixed file list into workspaces, so without adding them there every workspace's scheduler would break. Fix: one line in .agent-system/scripts/install.sh (outside T2's owned paths); the scheduler's import is also made optional as a safety net.
+
+- `A`: Allow: commit the install.sh line with T2 (recommended)
+- `B`: Don't
+
+Waiting for the user's answer in chat.
+
+## Decision D4 needed (scope_exception) (05/11/26 09:36)
+
+**Accept install.sh line in T2's review (same change)**
+
+T2 adds artifacts.py and artifacts/ (the Herdr panels). install.sh copies a fixed file list into workspaces, so without adding them there every workspace's scheduler would break. Fix: one line in .agent-system/scripts/install.sh (outside T2's owned paths); the scheduler's import is also made optional as a safety net. The kit needs this second answer to accept the same file at review.
+
+- `A`: Accept it (same change) (recommended)
+- `B`: Reject
+
+Waiting for the user's answer in chat.
+
+## Decision D3 answered by the user (05/11/26 09:39)
+
+- Choice: **A**: Allow: commit the install.sh line with T2
+- User's words (hub): "Allow: commit the install.sh line with T2"
+
+## Decision D4 answered by the user (05/11/26 09:40)
+
+- Choice: **A**: Accept it (same change)
+- User's words (hub): "Accept it (same change)"
