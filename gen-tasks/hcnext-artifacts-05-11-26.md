@@ -1,0 +1,58 @@
+# hcnext artifacts: run board and decision cards in the Herdr app (05/11/26)
+
+## Goal
+Inside the Herdr app, each run has a live board panel, and each decision gets a card whose buttons send the
+person's answer to the orchestrator, alongside the existing chat, phone and website paths.
+
+## Read first
+- `plans/261105-0839-herdr-app-next/plan.md`: "Verified facts" and **C4 (your spec)**.
+- `herdr-artifact guide` output is summarised in the plan; the API truth is `~/.config/herdr-app/AGENTS.md`
+  (sections Mods, UI, the `herdr` module), `~/.config/herdr-app/gpui-kit.d.ts`, `~/.config/herdr-app/herdr.d.ts`.
+  Read them before writing JS (reading is fine).
+- `.agent-system/scheduler.py`: `RunStore.save` (~626), `run_create`, `decision_ask` (~2211), decision state
+  shape (`state["decisions"]`), `local_alert` (merged by T1).
+
+## Steps
+1. New `.agent-system/artifacts.py` (stdlib only): `board_data(state)`, `write_board(store_or_run_dir, state)`
+   (atomic write; never raises), `enabled(cfg, env=None)`, `publish_board(project_root, run_dir, state, cfg,
+   env=None, runner=subprocess.run) -> str|None`, `publish_decision(..., decision_id) -> str|None`,
+   `remove(ids, runner)`. Exactly per C4. `herdr-artifact ... --json` output parsed for the id; any failure ->
+   None (caller logs one line).
+2. Shipped panels: `.agent-system/artifacts/board/main.js`, `.agent-system/artifacts/decision/main.js`, both
+   importing `./data.js` (generated) and `./artifact.js` (written by publish). Follow the guide's rules: theme
+   colors only, text 12-15 px, `size_full`, scroll long content, work at 320 px, no title repeated, no emojis,
+   no setTimeout, never keep `cx`. Decision reply text exactly
+   `decision <id> (run <run>): <choice>` plus `, followup <key>=<value>` when a followup was chosen.
+3. scheduler.py call sites (small): `RunStore.save` -> `artifacts.write_board` (best effort); `run_create` ->
+   `publish_board` when `artifacts.enabled`; `decision_ask` -> `publish_decision`; store ids as in C4
+   (make sure `validate_state` accepts the new keys). `cleanup` removes decision cards of that run (keep the
+   board).
+4. Tests `.agent-system/tests/test_artifacts.py`: board_data shape and no extra fields (no packet text);
+   write_board atomic + survives an unwritable dir; enabled matrix; publish argv (`--title`, `--folder`,
+   `--json`) and generated `data.js` content with a fake runner; failure returns None and the scheduler command
+   still succeeds; decision answered -> board shows answer; a test that runs `herdr-app check <copy>` on both
+   panels with a sample board.json, **skipped when `herdr-app` is not on PATH**.
+
+## Boundaries
+**You may edit:** `.agent-system/artifacts.py` (new), `.agent-system/artifacts/**` (new),
+`.agent-system/scheduler.py` (only the call sites above), `.agent-system/tests/test_artifacts.py` (new).
+**You must not edit:** agentctl.py, kitstart.py, hubctl.py, config.json, hub/**, docs, plans/**, gen-tasks/**,
+.orchestrator/**, anything in `~/.config/herdr-app`.
+**You may run:** `python3 -m pytest`, `herdr-app check <dir>` on copies in a temp dir, read-only git,
+`git add`/`git commit` on your branch.
+**You must not run:** `herdr-artifact publish|update|rm`, `herdr-app do`, `hc`, `herdr-task`; git
+push/merge/rebase/reset/checkout; installs.
+**When to ask:** only a real blocker -> report "blocked" with the reason.
+
+## Do not
+- Put secrets, env values, packet bodies or file contents into board.json or the panels. Make any artifact
+  failure fail a scheduler command. Change the hub protocol.
+
+## Done when
+- [ ] Both panels pass `herdr-app check`; artifacts.py per C4; tests pass; whole suite green.
+
+## Run these
+- `python3 -m pytest -q .agent-system/tests`: expect all passed.
+
+---
+<!-- Do not edit above this line after dispatch. scheduler.py appends: Worker result, Review, Integration, Final gate. -->
