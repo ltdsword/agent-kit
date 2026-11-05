@@ -312,7 +312,10 @@ class HcRecordTests(unittest.TestCase):
                 {"data": {}, "seq": 3, "terminal": "ours", "type": "foreground"}}
         mine_by_data = {"jsonrpc": "2.0", "method": "event", "params":
                         {"data": {"address": "ours"}, "seq": 4, "type": "created"}}
-        for lines, expected in (([snapshot, other], False), ([snapshot, mine], True),
+        title = {"jsonrpc": "2.0", "method": "event", "params":
+                 {"data": {"title": "spinner"}, "seq": 5, "terminal": "ours", "type": "title"}}
+        for lines, expected in (([snapshot, other], False), ([snapshot, title], False),
+                                ([snapshot, mine], True),
                                 ([snapshot, mine_by_data], True)):
             proc = FakeProcess(("\n".join(json.dumps(line) for line in lines) + "\n").encode())
             calls = []

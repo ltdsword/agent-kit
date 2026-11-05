@@ -1069,6 +1069,8 @@ class Hc:
                     params = event.get("params", {}) if isinstance(event, dict) else {}
                     data = params.get("data", {}) if isinstance(params, dict) else {}
                     top_data = event.get("data", {}) if isinstance(event, dict) else {}
+                    if isinstance(params, dict) and params.get("type") == "title":
+                        continue  # spinner title updates arrive several times a second; not a state change
                     terminal = params.get("terminal") if isinstance(params, dict) else None
                     data_address = data.get("address") if isinstance(data, dict) else None
                     top_address = top_data.get("address") if isinstance(top_data, dict) else None
