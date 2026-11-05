@@ -250,19 +250,14 @@ def start_connector(ws: Path, cfg: dict, popen=None, log=None, no_orchestrator=F
     if not (cfg.get("hub") or {}).get("enabled"):
         return
     log = log or print
+    import agentctl
+
     pidfile = ws / ".orchestrator" / "hub-connector.pid"
     try:
         pid = int(pidfile.read_text().strip())
-        if pid <= 0:
-            pid = None
-            raise ProcessLookupError
-        try:
-            os.kill(pid, 0)
-        except PermissionError:
-            pass
     except (OSError, ValueError):
         pid = None
-    if pid is not None:
+    if pid is not None and agentctl.connector_alive(pid, ws):
         log("hub connector already running")
         return
     popen = popen or subprocess.Popen

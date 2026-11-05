@@ -199,7 +199,7 @@ def _start_registered_connectors() -> None:
                 pid = int(pidfile.read_text(encoding="ascii").strip())
             except (OSError, ValueError):
                 pid = None
-            if pid and pid > 0 and agentctl.pid_alive(pid):
+            if pid and pid > 0 and agentctl.connector_alive(pid, workspace):
                 continue
             agentctl.kitstart.start_connector(workspace, cfg, no_orchestrator=True)
         except Exception as error:
@@ -352,7 +352,7 @@ def hub_start(source: Path, workspace: Path | None = None, start_connector=True)
             pid = int(pidfile.read_text().strip())
         except (OSError, ValueError):
             pid = 0
-        if agentctl.pid_alive(pid):
+        if agentctl.backend_alive(pid):
             print(f"Agent Hub backend is already running (pid {pid})")
             if start_connector:
                 _start_registered_connectors()
@@ -387,7 +387,7 @@ def hub_stop(sleep=time.sleep, clock=time.monotonic) -> int:
     except (OSError, ValueError):
         print("Agent Hub backend is not running")
         return connector_status
-    if not agentctl.pid_alive(pid):
+    if not agentctl.backend_alive(pid):
         pidfile.unlink(missing_ok=True)
         print("Agent Hub backend pid is stale")
         return connector_status
@@ -396,12 +396,12 @@ def hub_stop(sleep=time.sleep, clock=time.monotonic) -> int:
     except OSError as error:
         raise HubCtlError(f"could not stop Agent Hub backend pid {pid}: {error}") from error
     deadline = clock() + 10
-    while agentctl.pid_alive(pid):
+    while agentctl.backend_alive(pid):
         remaining = deadline - clock()
         if remaining <= 0:
             break
         sleep(min(0.1, remaining))
-    if agentctl.pid_alive(pid):
+    if agentctl.backend_alive(pid):
         print(f"still running (pid {pid})")
     else:
         print("stopped")
@@ -489,7 +489,7 @@ def hub_status() -> int:
         pid = int((directory / "hub.pid").read_text(encoding="ascii").strip())
     except (OSError, ValueError):
         pid = None
-    if pid is not None and not agentctl.pid_alive(pid):
+    if pid is not None and not agentctl.backend_alive(pid):
         pid = None
     try:
         response = agentctl.ping("http://127.0.0.1:7420", agentctl.read_key())

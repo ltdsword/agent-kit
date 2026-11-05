@@ -1110,6 +1110,58 @@ def pid_alive(pid: int) -> bool:
         return False
 
 
+def process_command(pid: int, runner=subprocess.run) -> str | None:
+    if sys.platform.startswith("linux"):
+        try:
+            command = Path(f"/proc/{pid}/cmdline").read_bytes().replace(b"\0", b" ").decode(
+                "utf-8", errors="replace").strip()
+        except OSError:
+            return None
+        return command or None
+    try:
+        result = runner(["ps", "-o", "command=", "-p", str(pid)], capture_output=True, text=True,
+                        check=False)
+    except OSError:
+        return None
+    if result.returncode != 0:
+        return None
+    command = result.stdout.strip()
+    return command or None
+
+
+def process_cwd(pid: int) -> Path | None:
+    if not sys.platform.startswith("linux"):
+        return None
+    try:
+        return Path(os.readlink(f"/proc/{pid}/cwd")).resolve()
+    except OSError:
+        return None
+
+
+def connector_alive(pid: int, ws: Path) -> bool:
+    if not pid_alive(pid):
+        return False
+    command = process_command(pid)
+    if command is None:
+        return True
+    if "agentctl" not in command or "watch" not in command:
+        return False
+    ws = ws.resolve()
+    # The workspace's own script path, or (kit copy started with cwd=ws) the exact working folder;
+    # a bare `str(ws) in command` would also match a sibling folder such as `<ws>-2`.
+    return str(ws / ".agent-system" / "agentctl.py") in command or process_cwd(pid) == ws
+
+
+def backend_alive(pid: int) -> bool:
+    if not pid_alive(pid):
+        return False
+    command = process_command(pid)
+    if command is None:
+        return True
+    executable = Path(command.split(maxsplit=1)[0]).name
+    return executable in {"node", "nodejs"} and "cli.ts" in command and "serve" in command
+
+
 def write_hint(ws: Path, online: bool) -> None:
     atomic_write(ws / ".orchestrator" / "hub.json", json.dumps(
         {"connector_pid": os.getpid(), "backend": "online" if online else "offline", "heartbeat_at": now()},
@@ -1488,7 +1540,7 @@ def watch(ws: Path, interval=5, no_orchestrator=False, runner=subprocess.run, sl
         existing = int(pidfile.read_text().strip())
     except (OSError, ValueError):
         existing = None
-    if existing and existing != os.getpid() and pid_alive(existing):
+    if existing and existing != os.getpid() and connector_alive(existing, ws):
         print(f"hub connector already running as pid {existing}", file=sys.stderr)
         return 1
     atomic_write(pidfile, f"{os.getpid()}\n")
@@ -1740,7 +1792,8 @@ def command_status(ws: Path) -> int:
         tail = []
     print(json.dumps({"enabled": bool(hub.get("enabled")), "url": display_url(hub.get("url", "")),
                       "workspace_id": hub.get("workspace_id"), "backend": backend,
-                      "pid": pid, "pid_alive": bool(pid and pid_alive(pid)), "last_hint": hint, "log_tail": tail},
+                      "pid": pid, "pid_alive": bool(pid and connector_alive(pid, ws)),
+                      "last_hint": hint, "log_tail": tail},
                      ensure_ascii=False, indent=2))
     return 0
 
@@ -1752,7 +1805,7 @@ def command_stop(ws: Path) -> int:
     except (OSError, ValueError):
         print("hub connector is not running")
         return 0
-    if not pid_alive(pid):
+    if not connector_alive(pid, ws):
         print("hub connector pid is stale")
         return 0
     try:

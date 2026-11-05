@@ -228,6 +228,66 @@ class HubCtlTests(Base):
         self.assertEqual(connector_calls[0][2], {"no_orchestrator": True})
         self.assertIn(f"hub workspace skipped (missing folder): {missing}", output.getvalue())
 
+    def test_hub_start_restarts_connector_pid_from_another_workspace(self):
+        self.configure_workspace(self.repo)
+        (self.repo / ".orchestrator").mkdir(exist_ok=True)
+        (self.repo / ".orchestrator" / "hub-connector.pid").write_text("999\n")
+        (self.config_dir / "workspaces.json").write_text(json.dumps({"workspaces": [str(self.repo)]}))
+        other = Path(self.tmp.name) / "other-workspace"
+        command = f"python {other}/.agent-system/agentctl.py watch --no-orchestrator"
+        backend_calls, connector_calls = [], []
+        with mock.patch.object(HC, "node24", return_value=Path("/usr/bin/node")), \
+                mock.patch.object(HC.subprocess, "Popen", side_effect=lambda *a, **k:
+                                  backend_calls.append((a, k)) or type("Process", (), {"pid": 501})()), \
+                mock.patch.object(HC.agentctl, "pid_alive", return_value=True), \
+                mock.patch.object(HC.agentctl, "process_command", return_value=command), \
+                mock.patch.object(HC.agentctl, "process_cwd", return_value=other.resolve()), \
+                mock.patch.object(HC.agentctl.kitstart, "start_connector",
+                                  side_effect=lambda *a, **k: connector_calls.append((a, k))), \
+                redirect_stdout(StringIO()):
+            self.assertEqual(HC.hub_start(ROOT, self.repo), 0)
+        self.assertEqual(len(backend_calls), 1)
+        self.assertEqual(connector_calls[0][0][0], self.repo.resolve())
+
+    def test_hub_start_replaces_foreign_backend_pid(self):
+        self.data_dir.mkdir()
+        (self.data_dir / "hub.pid").write_text("456\n")
+        calls = []
+        with mock.patch.object(HC, "node24", return_value=Path("/usr/bin/node")), \
+                mock.patch.object(HC.subprocess, "Popen", side_effect=lambda *a, **k:
+                                  calls.append((a, k)) or type("Process", (), {"pid": 501})()), \
+                mock.patch.object(HC.agentctl, "pid_alive", return_value=True), \
+                mock.patch.object(HC.agentctl, "process_command", return_value="python unrelated.py"), \
+                redirect_stdout(StringIO()):
+            self.assertEqual(HC.hub_start(ROOT, start_connector=False), 0)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual((self.data_dir / "hub.pid").read_text(), "501\n")
+
+    def test_hub_stop_does_not_signal_foreign_backend_pid(self):
+        self.data_dir.mkdir()
+        pidfile = self.data_dir / "hub.pid"
+        pidfile.write_text("456\n")
+        output = StringIO()
+        with mock.patch.object(HC, "_stop_registered_connectors", return_value=0), \
+                mock.patch.object(HC.agentctl, "pid_alive", return_value=True), \
+                mock.patch.object(HC.agentctl, "process_command", return_value="python unrelated.py"), \
+                mock.patch.object(HC.os, "kill") as kill, redirect_stdout(output):
+            self.assertEqual(HC.hub_stop(), 0)
+        kill.assert_not_called()
+        self.assertIn("Agent Hub backend pid is stale", output.getvalue())
+        self.assertFalse(pidfile.exists())
+
+    def test_hub_status_reports_foreign_backend_pid_stopped(self):
+        self.data_dir.mkdir()
+        (self.data_dir / "hub.pid").write_text("456\n")
+        output = StringIO()
+        with mock.patch.object(HC.agentctl, "pid_alive", return_value=True), \
+                mock.patch.object(HC.agentctl, "process_command", return_value="python unrelated.py"), \
+                mock.patch.object(HC.agentctl, "ping", return_value={"protocol": 2}), \
+                mock.patch.object(HC.agentctl, "read_key", return_value="key"), redirect_stdout(output):
+            self.assertEqual(HC.hub_status(), 0)
+        self.assertIn("pid: stopped", output.getvalue())
+
     def test_hub_stop_stops_registered_connectors_before_backend(self):
         first, second = Path(self.tmp.name) / "first", Path(self.tmp.name) / "second"
         self.configure_workspace(first)

@@ -2099,6 +2099,24 @@ class TestStart(WorkspaceBase):
         self.assertEqual(kwargs["stdin"], subprocess.DEVNULL)
         self.assertIs(kwargs["stdout"], kwargs["stderr"])
 
+    def test_connector_start_restarts_pid_from_another_workspace(self):
+        self.cfg["hub"] = {"enabled": True}
+        pidfile = self.ws / ".orchestrator" / "hub-connector.pid"
+        pidfile.parent.mkdir(parents=True, exist_ok=True)
+        pidfile.write_text("999\n")
+        other = Path(self.tmp.name) / "other-workspace"
+        command = f"python {other}/.agent-system/agentctl.py watch --no-orchestrator"
+        calls = []
+        with mock.patch.object(AC, "pid_alive", return_value=True), \
+                mock.patch.object(AC, "process_command", return_value=command), \
+                mock.patch.object(AC, "process_cwd", return_value=other.resolve()), \
+                mock.patch.object(KS.subprocess, "Popen",
+                                  side_effect=lambda *a, **k: calls.append((a, k))), \
+                mock.patch("builtins.print"):
+            KS.start_connector(self.ws, self.cfg)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0][1]["cwd"], str(self.ws))
+
 
 class TestInstall(Base):
     """scripts/install.sh (agent-kit) run for real against temp repos."""

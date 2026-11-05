@@ -1226,6 +1226,122 @@ class AgentCtlTests(Base):
         goodbye = [r["body"] for r in backend.requests if r["path"].endswith("/goodbye")]
         self.assertEqual(goodbye[0]["reason"], "orchestrator_gone")
 
+    def test_process_command_reads_linux_proc_cmdline(self):
+        with mock.patch.object(AC.sys, "platform", "linux"), \
+                mock.patch.object(AC.Path, "read_bytes", return_value=b"python\0/workspace/agentctl.py\0watch\0"):
+            self.assertEqual(AC.process_command(41), "python /workspace/agentctl.py watch")
+
+    def test_process_command_uses_ps_off_linux(self):
+        runner = mock.Mock(return_value=subprocess.CompletedProcess([], 0, "node cli.ts serve\n", ""))
+        with mock.patch.object(AC.sys, "platform", "darwin"):
+            self.assertEqual(AC.process_command(41, runner=runner), "node cli.ts serve")
+        runner.assert_called_once_with(["ps", "-o", "command=", "-p", "41"],
+                                       capture_output=True, text=True, check=False)
+
+    def test_process_cwd_reads_linux_proc_link(self):
+        with mock.patch.object(AC.sys, "platform", "linux"), \
+                mock.patch.object(AC.os, "readlink", return_value=str(self.ws)):
+            self.assertEqual(AC.process_cwd(41), self.ws.resolve())
+
+    def test_connector_alive_rejects_another_workspace(self):
+        other = Path(self.tmp.name) / "other-workspace"
+        command = f"python {other}/.agent-system/agentctl.py watch --no-orchestrator"
+        with mock.patch.object(AC, "pid_alive", return_value=True), \
+                mock.patch.object(AC, "process_command", return_value=command), \
+                mock.patch.object(AC, "process_cwd", return_value=other.resolve()):
+            self.assertFalse(AC.connector_alive(41, self.ws))
+        sibling = Path(f"{self.ws.resolve()}-2")
+        with mock.patch.object(AC, "pid_alive", return_value=True), \
+                mock.patch.object(AC, "process_command",
+                                  return_value=f"python {sibling}/.agent-system/agentctl.py watch"), \
+                mock.patch.object(AC, "process_cwd", return_value=sibling):
+            self.assertFalse(AC.connector_alive(41, self.ws))
+
+    def test_connector_alive_accepts_matching_command_or_cwd_and_unknown_falls_back(self):
+        with mock.patch.object(AC, "pid_alive", return_value=True), \
+                mock.patch.object(AC, "process_command", return_value=f"python {self.ws}/.agent-system/agentctl.py watch"), \
+                mock.patch.object(AC, "process_cwd", return_value=None):
+            self.assertTrue(AC.connector_alive(41, self.ws))
+        with mock.patch.object(AC, "pid_alive", return_value=True), \
+                mock.patch.object(AC, "process_command", return_value="python agentctl.py watch"), \
+                mock.patch.object(AC, "process_cwd", return_value=self.ws.resolve()):
+            self.assertTrue(AC.connector_alive(41, self.ws))
+        with mock.patch.object(AC, "pid_alive", return_value=True), \
+                mock.patch.object(AC, "process_command", return_value=None):
+            self.assertTrue(AC.connector_alive(41, self.ws))
+
+    def test_backend_alive_requires_cli_serve_command_and_unknown_falls_back(self):
+        with mock.patch.object(AC, "pid_alive", return_value=True), \
+                mock.patch.object(AC, "process_command", return_value="python unrelated"):
+            self.assertFalse(AC.backend_alive(41))
+        with mock.patch.object(AC, "pid_alive", return_value=True), \
+                mock.patch.object(AC, "process_command", return_value="python /hub/server/src/cli.ts serve"):
+            self.assertFalse(AC.backend_alive(41))
+        with mock.patch.object(AC, "pid_alive", return_value=True), \
+                mock.patch.object(AC, "process_command", return_value="node /hub/server/src/cli.ts serve"):
+            self.assertTrue(AC.backend_alive(41))
+        with mock.patch.object(AC, "pid_alive", return_value=True), \
+                mock.patch.object(AC, "process_command", return_value=None):
+            self.assertTrue(AC.backend_alive(41))
+
+    def test_watch_starts_when_pid_belongs_to_another_workspace(self):
+        pidfile = self.ws / ".orchestrator" / "hub-connector.pid"
+        pidfile.parent.mkdir(parents=True, exist_ok=True)
+        pidfile.write_text("999\n")
+        other = Path(self.tmp.name) / "other-workspace"
+        command = f"python {other}/.agent-system/agentctl.py watch --no-orchestrator"
+        with FakeBackend() as backend:
+            self.set_backend(backend)
+            with mock.patch.object(AC, "pid_alive", return_value=True), \
+                    mock.patch.object(AC, "process_command", return_value=command), \
+                    mock.patch.object(AC, "process_cwd", return_value=other.resolve()), \
+                    redirect_stdout(StringIO()), redirect_stderr(StringIO()):
+                code = AC.watch(self.ws, runner=self.fake_herdr(), no_orchestrator=True, max_loops=1)
+        self.assertEqual(code, 0)
+        self.assertTrue(any(r["path"].endswith("/agent/hello") for r in backend.requests))
+
+    def test_watch_keeps_a_matching_connector_pid(self):
+        pidfile = self.ws / ".orchestrator" / "hub-connector.pid"
+        pidfile.parent.mkdir(parents=True, exist_ok=True)
+        pidfile.write_text("999\n")
+        command = f"python {self.ws}/.agent-system/agentctl.py watch --no-orchestrator"
+        with mock.patch.object(AC, "pid_alive", return_value=True), \
+                mock.patch.object(AC, "process_command", return_value=command), \
+                redirect_stdout(StringIO()), redirect_stderr(StringIO()):
+            code = AC.watch(self.ws, runner=self.fake_herdr(), no_orchestrator=True, max_loops=1)
+        self.assertEqual(code, 1)
+        self.assertEqual(pidfile.read_text(), "999\n")
+
+    def test_status_reports_foreign_connector_pid_not_alive(self):
+        pidfile = self.ws / ".orchestrator" / "hub-connector.pid"
+        pidfile.parent.mkdir(parents=True, exist_ok=True)
+        pidfile.write_text("999\n")
+        other = Path(self.tmp.name) / "other-workspace"
+        command = f"python {other}/.agent-system/agentctl.py watch"
+        output = StringIO()
+        with mock.patch.object(AC, "pid_alive", return_value=True), \
+                mock.patch.object(AC, "process_command", return_value=command), \
+                mock.patch.object(AC, "process_cwd", return_value=other.resolve()), \
+                mock.patch.object(AC, "ping", return_value={}), mock.patch.object(AC, "read_key", return_value="key"), \
+                redirect_stdout(output):
+            self.assertEqual(AC.command_status(self.ws), 0)
+        self.assertFalse(json.loads(output.getvalue())["pid_alive"])
+
+    def test_stop_does_not_signal_foreign_connector_pid(self):
+        pidfile = self.ws / ".orchestrator" / "hub-connector.pid"
+        pidfile.parent.mkdir(parents=True, exist_ok=True)
+        pidfile.write_text("999\n")
+        other = Path(self.tmp.name) / "other-workspace"
+        command = f"python {other}/.agent-system/agentctl.py watch"
+        output = StringIO()
+        with mock.patch.object(AC, "pid_alive", return_value=True), \
+                mock.patch.object(AC, "process_command", return_value=command), \
+                mock.patch.object(AC, "process_cwd", return_value=other.resolve()), \
+                mock.patch.object(AC.os, "kill") as kill, redirect_stdout(output):
+            self.assertEqual(AC.command_stop(self.ws), 0)
+        kill.assert_not_called()
+        self.assertIn("hub connector pid is stale", output.getvalue())
+
     def test_loopback_requests_ignore_proxy_environment(self):
         with FakeBackend() as backend:
             with mock.patch.dict(os.environ, {"HTTP_PROXY": "http://127.0.0.1:1", "http_proxy": "http://127.0.0.1:1",
