@@ -115,3 +115,73 @@ Waiting for the user's answer in chat.
 
 - Choice: **A**: Accept it (same change)
 - User's words (hub): "Accept it (same change)"
+
+## Decision D5 needed (blocker) (05/11/26 09:41)
+
+**Unblock T2 so its worker can confirm and hand in**
+
+T2's worker stopped as blocked on the installer gap you approved in D3/D4. Opus already applied that fix and the review fixes in its worktree (243 tests pass). Unblocking keeps all that work; the worker only re-checks and reports done, then T2 is merged.
+
+- `A`: Unblock T2 (keeps the work) (recommended)
+- `B`: Leave T2 blocked
+
+Waiting for the user's answer in chat.
+
+## Decision D5 answered by the user (05/11/26 09:42)
+
+- Choice: **A**: Unblock T2 (keeps the work)
+- User's words (hub): "Unblock T2 (keeps the work)"
+
+## Worker result - attempt 2 (05/11/26 09:46)
+
+- Status: **done** (worker worker-1, branch `agent/hcnext-t2`)
+- Commits: none, changes left uncommitted (orchestrator commits after review)
+- Files: `.agent-system/artifacts.py`, `.agent-system/artifacts/board/main.js`, `.agent-system/artifacts/decision/main.js`, `.agent-system/scheduler.py`, `.agent-system/scripts/install.sh`, `.agent-system/tests/test_artifacts.py`
+- Scope: outside owned paths ['.agent-system/scripts/install.sh']; secret-like []
+- Tests reported:
+  - `python3 -m pytest -q .agent-system/tests` -> exit 0
+- Risks: none
+- Not done: none
+- Full diff: `.orchestrator/runs/hcnext/reports/T2.diff`
+
+````text
+ .agent-system/artifacts.py               | 184 ++++++++++++++++++++++++++
+ .agent-system/artifacts/board/main.js    |  65 ++++++++++
+ .agent-system/artifacts/decision/main.js |  84 ++++++++++++
+ .agent-system/scheduler.py               |  32 +++++
+ .agent-system/scripts/install.sh         |   2 +-
+ .agent-system/tests/test_artifacts.py    | 215 +++++++++++++++++++++++++++++++
+ 6 files changed, 581 insertions(+), 1 deletion(-)
+````
+
+(diff is 664 lines; read the full diff file)
+
+## Review round 2: PASS (05/11/26 09:46)
+
+- Verdict: **PASS** -> task is now PASSED (fix rounds used: 0/2)
+- Reviewed HEAD: 3b3e6f2fa6ab, commits 3b3e6f2fa6ab
+- Notes: C4 met; install.sh line (D3/D4), click ids and one-reply guard fixed in review; 243 tests pass
+
+# Review hcnext T2 - artifacts: run board and decision cards (Opus)
+
+Verdict: PASS (worker reported blocked correctly; Opus fixes applied before commit)
+
+- C4 met: `artifacts.py` (board_data only titles/statuses/questions/options, atomic write_board from
+  RunStore.save, enabled gate, publish board at run create and decision card at decision ask, ids in state,
+  cleanup removes cards); two panels read board.json live (5 s timer), theme colors, scroll, 320 px.
+- **Blocker resolved (D3/D4):** install.sh copies a fixed file list; added `artifacts.py artifacts`, else every
+  workspace's scheduler fails to import. Safety net: `import artifacts` optional, every call site guarded.
+- **Fixed (MAJOR):** buttons had no `.id()`; the app's guide requires `.id("unique")` before `.on_click`, so
+  clicks could be dead. Added ids (options, followups, back, scroll lists).
+- **Fixed (MINOR):** a card could send its answer twice; now one reply per card.
+- `herdr-app check` passes for both panels with a sample board (Opus run). Whole suite 243 passed.
+- Minor (accepted): an "input" followup (type a branch) replies without a value; Opus asks in chat.
+
+## Integration: merged (05/11/26 09:46)
+
+- On `agent/integration-hcnext` at 131e34a2c978; `.agent-system/scripts/verify.sh --quick` passed (log `.orchestrator/runs/hcnext/logs/post-merge-T2-a2.log`)
+
+## Final gate: PASS (05/11/26 10:27)
+
+- `.agent-system/scripts/verify.sh` exit 0 on agent/integration-hcnext at 9ab640e42edf (log `.orchestrator/runs/hcnext/logs/verify-1793848936.log`)
+- Task MERGED; run DONE
