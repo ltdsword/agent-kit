@@ -71,6 +71,11 @@ CLI still works when `herdr.backend` is set to `legacy`. The setting accepts `au
 `auto` selects `hc` inside the app, `legacy` inside old Herdr, and otherwise `hc` when its core is
 running. The doctor checks `hc`, `herdr-app` and `herdr-session`.
 
+The app shows in-app alerts, a board for each run, and decision cards in the Artifacts panel. Answer a
+card in the app, in chat, by phone, or on the website. Codex workers skip the update prompt and
+continue past “Hooks need review” without trusting hooks; folder trust remains your choice:
+`worker.trust_worktree` controls it.
+
 **Models.** You choose the program, model and effort for each role with `agent-kit config` (section 4):
 Claude Code and Codex are verified; every other program Herdr can launch is listed as **unverified**.
 Workers always use exactly the configured model and effort; there is deliberately no automatic

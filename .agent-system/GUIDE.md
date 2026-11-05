@@ -228,6 +228,8 @@ D2  T1 is blocked: the spec doesn't say whether to use contract X or Y.
     ( ) Other: B, use the 2024 contract
 ```
 
+The Herdr app shows a board for each run and puts decision cards in the Artifacts panel.
+
 Opus records your answer word for word (`decision record --run r1 --id D2 --choice B --quote "..."`) and
 carries it out. The scheduler refuses critical actions (`task-unblock`, `run close`,
 scope exceptions, FAIL, merge/push) without a recorded answer, and routine ones without Opus's reason.
