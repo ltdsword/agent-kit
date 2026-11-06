@@ -55,9 +55,14 @@ def minimal_run_state():
 class ArtifactBoardTests(unittest.TestCase):
     def test_board_data_has_only_the_safe_contract_fields(self):
         board = A.board_data(sample_state())
-        self.assertEqual(set(board), {"run_id", "title", "status", "updated_at", "tasks", "decisions"})
-        self.assertEqual(set(board["tasks"][0]), {"id", "title", "status", "worker", "verdict"})
+        self.assertEqual(set(board), {"run_id", "title", "goal", "status", "integration_branch",
+                                      "gate", "updated_at", "tasks", "problems", "decisions"})
+        self.assertEqual(set(board["tasks"][0]), {"id", "title", "summary", "status", "worker", "verdict",
+                                                   "depends_on", "fix_rounds"})
         self.assertEqual(board["tasks"][0]["verdict"], "PASS")
+        self.assertEqual(board["tasks"][0]["depends_on"], [])
+        self.assertEqual(board["tasks"][0]["fix_rounds"], 0)
+        self.assertEqual(board["problems"], [])
         self.assertEqual(set(board["decisions"][0]),
                          {"id", "kind", "title", "question", "options", "recommend", "followup", "answer"})
         self.assertEqual(board["decisions"][0]["options"], [{"key": "A", "label": "Small"},
@@ -66,6 +71,44 @@ class ArtifactBoardTests(unittest.TestCase):
         serialized = json.dumps(board)
         for private in ("packet body", "private answer quote", "private note", "/private/path", "event body"):
             self.assertNotIn(private, serialized)
+
+    def test_board_data_includes_graph_gate_and_safe_problems(self):
+        state = sample_state()
+        state["goal"] = "Ship the run board"
+        state["integration_branch"] = "agent/integration"
+        state["verify"] = {"exit_code": 0}
+        state["status"] = "BLOCKED"
+        state["close_reason"] = "Integration stopped"
+        state["tasks"]["T1"].update(summary="Root summary", depends_on=[], major_repairs=2)
+        long_note = "problem note " * 30
+        state["tasks"]["T2"] = {
+            "id": "T2", "title": "Dependent task", "summary": "Needs T1", "status": "FIX_REQUIRED",
+            "worker": "worker-2", "depends_on": ["T1"], "major_repairs": 3,
+            "status_reason": long_note, "packet": "private packet", "prompt": "private prompt",
+        }
+        state["decisions"]["D2"] = {"id": "D2", "task": "T2", "status": "PENDING"}
+
+        board = A.board_data(state)
+
+        self.assertEqual(board["goal"], "Ship the run board")
+        self.assertEqual(board["integration_branch"], "agent/integration")
+        self.assertEqual(board["gate"], "PASS")
+        self.assertEqual(board["tasks"][0]["summary"], "Root summary")
+        self.assertEqual(board["tasks"][0]["fix_rounds"], 2)
+        self.assertEqual(board["tasks"][1]["depends_on"], ["T1"])
+        self.assertEqual(board["tasks"][1]["fix_rounds"], 3)
+        self.assertEqual(board["problems"], [
+            {"task_id": "T2", "type": "FIX_REQUIRED", "decision_id": "D2", "note": long_note[:200]},
+            {"task_id": None, "type": "BLOCKED", "decision_id": None, "note": "Integration stopped"},
+        ])
+        serialized = json.dumps(board)
+        self.assertNotIn("private packet", serialized)
+        self.assertNotIn("private prompt", serialized)
+
+        state["verify"]["exit_code"] = 1
+        self.assertEqual(A.board_data(state)["gate"], "FAIL")
+        state["verify"]["exit_code"] = None
+        self.assertIsNone(A.board_data(state)["gate"])
 
     def test_write_board_is_atomic_and_ignores_write_errors(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -220,8 +263,22 @@ class ArtifactBoardTests(unittest.TestCase):
 
     @unittest.skipUnless(shutil.which("herdr-app"), "herdr-app is not on PATH")
     def test_herdr_app_check_accepts_both_shipped_panels(self):
-        sample = {"run_id": "run-one", "title": "Sample", "status": "RUNNING", "updated_at": None,
-                  "tasks": [], "decisions": []}
+        sample = {
+            "run_id": "run-one", "title": "Sample", "goal": "Check the task graph",
+            "status": "RUNNING", "integration_branch": "agent/integration", "gate": "PASS",
+            "updated_at": None,
+            "tasks": [
+                {"id": "T1", "title": "Root task", "summary": "Starts the graph", "status": "PASSED",
+                 "worker": "worker-1", "verdict": "PASS", "depends_on": [], "fix_rounds": 0},
+                {"id": "T2", "title": "Dependent task", "summary": "Needs T1", "status": "FIX_REQUIRED",
+                 "worker": "worker-2", "verdict": None, "depends_on": ["T1"], "fix_rounds": 1},
+            ],
+            "problems": [{"task_id": "T2", "type": "FIX_REQUIRED", "decision_id": "D1",
+                          "note": "Needs a repair decision"}],
+            "decisions": [{"id": "D1", "kind": "repair", "title": "Repair task",
+                           "question": "Choose a repair", "options": [{"key": "A", "label": "Retry"}],
+                           "recommend": "A", "followup": None, "answer": None}],
+        }
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             board_path = root / "board.json"

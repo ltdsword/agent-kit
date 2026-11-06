@@ -29,9 +29,39 @@ def board_data(state: dict) -> dict:
         tasks.append({
             "id": task.get("id", task_id),
             "title": task.get("title"),
+            "summary": task.get("summary"),
             "status": task.get("status"),
             "worker": task.get("worker"),
             "verdict": verdict,
+            "depends_on": task.get("depends_on", []),
+            "fix_rounds": int(task.get("major_repairs") or 0),
+        })
+
+    verification = state.get("verify") or {}
+    code = verification.get("exit_code")
+    gate = "PASS" if code == 0 else "FAIL" if code is not None else None
+    problems = []
+    decisions_by_id = state.get("decisions") or {}
+    for task in (state.get("tasks") or {}).values():
+        if task.get("status") not in ("BLOCKED", "FIX_REQUIRED"):
+            continue
+        last = next((event for event in reversed(events)
+                     if event.get("kind") == "task" and event.get("task") == task.get("id")), {})
+        decision_id = next((decision_id for decision_id, decision in decisions_by_id.items()
+                            if decision.get("task") == task.get("id")
+                            and decision.get("status") == "PENDING"), None)
+        problems.append({
+            "task_id": task.get("id"),
+            "type": task.get("status"),
+            "decision_id": decision_id,
+            "note": str(task.get("status_reason") or last.get("reason") or "")[:200],
+        })
+    if state.get("status") in ("BLOCKED", "FAILED") and state.get("close_reason"):
+        problems.append({
+            "task_id": None,
+            "type": state["status"],
+            "decision_id": None,
+            "note": str(state["close_reason"])[:200],
         })
 
     decisions = []
@@ -72,9 +102,13 @@ def board_data(state: dict) -> dict:
     return {
         "run_id": state.get("run_id"),
         "title": state.get("title"),
+        "goal": state.get("goal"),
         "status": state.get("status"),
+        "integration_branch": state.get("integration_branch", ""),
+        "gate": gate,
         "updated_at": updated_at,
         "tasks": tasks,
+        "problems": problems[:50],
         "decisions": decisions,
     }
 
