@@ -394,3 +394,7 @@ Verdict: PASS
 
 - `.agent-system/scripts/verify.sh` exit 0 on agent/integration-hctasks at 7fffd702d3f4 (log `.orchestrator/runs/hctasks/logs/verify-1793933790.log`)
 - Task MERGED; run DONE
+
+## Finished (06/11/26 10:01)
+
+- merged into hub/plan (decision D1)
