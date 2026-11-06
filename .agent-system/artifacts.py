@@ -150,6 +150,24 @@ def enabled(cfg: dict, env=None) -> bool:
         return False
 
 
+def show_panel(cfg: dict, env=None, runner=subprocess.run) -> bool:
+    try:
+        if not enabled(cfg, env):
+            return False
+        commands = (
+            ["herdr-app", "do", "layout.select", "--stack", "panel-body", "--child", "artifacts"],
+            ["herdr-app", "do", "layout.select", "--stack", "artifacts", "--child", "artifacts-list"],
+            ["herdr-app", "do", "layout.show", "--id", "panel"],
+        )
+        for argv in commands:
+            result = runner(argv, capture_output=True, text=True, shell=False, timeout=5)
+            if result.returncode != 0:
+                return False
+        return True
+    except Exception:
+        return False
+
+
 def _data_module(run_dir: Path, run_id: str, decision_id: str = "") -> str:
     board_path = (run_dir / "board.json").resolve()
     return (f"export const DATA = {json.dumps(str(board_path))};\n"

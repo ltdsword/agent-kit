@@ -133,6 +133,53 @@ class ArtifactBoardTests(unittest.TestCase):
             which.return_value = None
             self.assertFalse(A.enabled({"herdr": {}}, {"HC_TERMINAL_ID": "t1", "PATH": "/bin"}))
 
+    def test_show_panel_runs_layout_commands_in_order(self):
+        calls = []
+
+        def runner(argv, **kwargs):
+            calls.append((argv, kwargs))
+            return subprocess.CompletedProcess(argv, 0, "", "")
+
+        commands = [
+            ["herdr-app", "do", "layout.select", "--stack", "panel-body", "--child", "artifacts"],
+            ["herdr-app", "do", "layout.select", "--stack", "artifacts", "--child", "artifacts-list"],
+            ["herdr-app", "do", "layout.show", "--id", "panel"],
+        ]
+        with mock.patch.object(A, "enabled", return_value=True):
+            self.assertTrue(A.show_panel({"herdr": {}}, {"HC_TERMINAL_ID": "t1"}, runner))
+
+        self.assertEqual([argv for argv, _ in calls], commands)
+        self.assertEqual([kwargs for _, kwargs in calls], [
+            {"capture_output": True, "text": True, "shell": False, "timeout": 5},
+        ] * 3)
+
+    def test_show_panel_disabled_does_not_run_commands(self):
+        calls = []
+        with mock.patch.object(A, "enabled", return_value=False):
+            self.assertFalse(A.show_panel({"herdr": {"artifacts": False}}, {},
+                                          lambda argv, **kwargs: calls.append(argv)))
+        self.assertEqual(calls, [])
+
+    def test_show_panel_stops_after_first_failed_command(self):
+        calls = []
+
+        def runner(argv, **kwargs):
+            calls.append(argv)
+            return subprocess.CompletedProcess(argv, 1, "", "failed")
+
+        with mock.patch.object(A, "enabled", return_value=True):
+            self.assertFalse(A.show_panel({"herdr": {}}, {}, runner))
+        self.assertEqual(calls, [
+            ["herdr-app", "do", "layout.select", "--stack", "panel-body", "--child", "artifacts"],
+        ])
+
+    def test_show_panel_runner_exception_returns_false(self):
+        def runner(argv, **kwargs):
+            raise OSError("unavailable")
+
+        with mock.patch.object(A, "enabled", return_value=True):
+            self.assertFalse(A.show_panel({"herdr": {}}, {}, runner))
+
     def test_publish_board_uses_cli_contract_and_writes_data_module(self):
         calls = []
 
@@ -228,6 +275,52 @@ class ArtifactBoardTests(unittest.TestCase):
         state = minimal_run_state()
         state.update(artifacts={"board": "board-id"}, decisions={"D1": {"artifact_id": "decision-id"}})
         S.validate_state(state)
+
+    def test_create_run_shows_panel_only_after_board_publish(self):
+        task = [{"id": "T1", "title": "Create board", "summary": "Build the run board for this task.",
+                 "depends_on": [], "owned_paths": [], "acceptance": ["done"], "packet": "task.md"}]
+        cfg = {"limits": {"max_tasks_per_request": 4, "max_scout_rounds": 0},
+               "pool": {"slots": [], "worktree_root": "{repo_name}-worktrees"},
+               "herdr": {"artifacts": True}}
+
+        def run_case(published_id):
+            with tempfile.TemporaryDirectory() as tmp:
+                workspace = Path(tmp)
+                scheduler = S.Scheduler.__new__(S.Scheduler)
+                scheduler.workspace_root = workspace
+                scheduler.project_root = workspace
+                scheduler.cfg = cfg
+                scheduler.store = mock.Mock()
+                scheduler.store.lock.return_value = contextlib.nullcontext()
+                scheduler.store.state_path.side_effect = lambda run_id: workspace / f"{run_id}.json"
+                scheduler.store.list_runs.return_value = []
+                scheduler.store.run_dir.side_effect = lambda run_id: workspace / "runs" / run_id
+                scheduler._task_source_issues = mock.Mock(return_value=[])
+                scheduler._write_research_index = mock.Mock()
+                events = []
+                publish = mock.Mock(side_effect=lambda *args: events.append("publish") or published_id)
+                show = mock.Mock(side_effect=lambda *args: events.append("show") or False)
+                git_result = mock.Mock(stdout="main\n", returncode=0)
+                stderr = io.StringIO()
+                with mock.patch.object(S, "git_out", return_value="base-sha"), \
+                        mock.patch.object(S, "git", return_value=git_result), \
+                        mock.patch.object(S, "git_branch_exists", return_value=False), \
+                        mock.patch.object(A, "enabled", return_value=True), \
+                        mock.patch.object(A, "publish_board", publish), \
+                        mock.patch.object(A, "show_panel", show), \
+                        contextlib.redirect_stderr(stderr):
+                    result = scheduler.create_run("panel-run", task)
+                self.assertEqual(result["status"], "RUNNING")
+                publish.assert_called_once()
+                if published_id:
+                    show.assert_called_once_with(cfg)
+                    self.assertEqual(events, ["publish", "show"])
+                else:
+                    show.assert_not_called()
+                    self.assertEqual(events, ["publish"])
+
+        run_case("board-id")
+        run_case(None)
 
     def test_scheduler_decision_command_succeeds_when_card_publish_fails(self):
         with tempfile.TemporaryDirectory() as tmp:

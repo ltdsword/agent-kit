@@ -1408,6 +1408,7 @@ class Scheduler:
             if artifacts and artifacts.enabled(self.cfg):
                 artifact_id = artifacts.publish_board(self.project_root, run_dir, state, self.cfg)
                 if artifact_id:
+                    artifacts.show_panel(self.cfg)
                     try:
                         self.store.save(state)
                     except Exception:
