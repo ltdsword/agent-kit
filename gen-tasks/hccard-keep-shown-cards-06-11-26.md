@@ -218,3 +218,7 @@ Verdict: PASS
 
 - `.agent-system/scripts/verify.sh` exit 0 on agent/integration-hccard at 2d9f852e2f83 (log `.orchestrator/runs/hccard/logs/verify-1793931662.log`)
 - Task MERGED; run DONE
+
+## Finished (06/11/26 09:24)
+
+- merged into hub/plan (decision D1)
