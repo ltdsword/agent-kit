@@ -5,6 +5,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 
@@ -173,9 +174,42 @@ def publish_decision(project_root, run_dir, state: dict, cfg: dict, decision_id:
     return artifact_id
 
 
-def remove(ids, runner=subprocess.run) -> None:
+def shown_in_layouts(env=None) -> set[str]:
+    shown = set()
+    try:
+        env = os.environ if env is None else env
+        app_home = Path(env.get("HERDR_APP_HOME") or "~/.config/herdr-app").expanduser()
+
+        def collect(value):
+            if isinstance(value, dict):
+                content = value.get("content")
+                if isinstance(content, dict):
+                    mod = content.get("mod")
+                    if isinstance(mod, str) and mod.startswith("art-"):
+                        shown.add(mod[4:])
+                for child in value.values():
+                    collect(child)
+            elif isinstance(value, list):
+                for child in value:
+                    collect(child)
+
+        for layout in (app_home / "layouts").glob("*.json"):
+            try:
+                collect(json.loads(layout.read_text(encoding="utf-8")))
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return shown
+
+
+def remove(ids, runner=subprocess.run, env=None) -> None:
+    shown = shown_in_layouts(env)
     for artifact_id in ids:
         if not isinstance(artifact_id, str) or not artifact_id:
+            continue
+        if artifact_id in shown:
+            sys.stderr.write(f"kept artifact {artifact_id}: shown in a Herdr layout\n")
             continue
         try:
             runner(["herdr-artifact", "rm", artifact_id], capture_output=True, text=True,

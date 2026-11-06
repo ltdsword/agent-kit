@@ -1,4 +1,6 @@
 """Artifact board and decision card tests."""
+import contextlib
+import io
 import json
 import os
 import shutil
@@ -133,20 +135,51 @@ class ArtifactBoardTests(unittest.TestCase):
             self.assertIsNone(A.publish_board(Path(tmp), run_dir, sample_state(), {"herdr": {}},
                                                {"HC_TERMINAL_ID": "t1", "PATH": "/bin"}, failed))
 
-    def test_remove_calls_cli_for_each_id(self):
-        calls = []
+    def test_remove_keeps_cards_shown_in_layouts_and_ignores_broken_layouts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            layouts = home / "layouts"
+            layouts.mkdir()
+            (layouts / "main.json").write_text(json.dumps({
+                "blocks": [{"id": "artifacts-view-body", "content": {"mod": "art-kept"}}],
+            }))
+            (layouts / "other.json").write_text(json.dumps({
+                "nested": [{"content": {"mod": "art-second"}}],
+            }))
+            (layouts / "broken.json").write_text("{")
+            env = {"HERDR_APP_HOME": str(home)}
+            calls = []
 
-        def runner(argv, **kwargs):
-            calls.append(argv)
-            return subprocess.CompletedProcess(argv, 0, "", "")
+            def runner(argv, **kwargs):
+                calls.append(argv)
+                return subprocess.CompletedProcess(argv, 0, "", "")
 
-        A.remove(["d1", "d2"], runner)
-        self.assertEqual(calls, [["herdr-artifact", "rm", "d1"], ["herdr-artifact", "rm", "d2"]])
+            stderr = io.StringIO()
+            with contextlib.redirect_stderr(stderr):
+                A.remove(["kept", "other", "second"], runner, env=env)
+
+            self.assertEqual(calls, [["herdr-artifact", "rm", "other"]])
+            self.assertEqual(stderr.getvalue(),
+                             "kept artifact kept: shown in a Herdr layout\n"
+                             "kept artifact second: shown in a Herdr layout\n")
+
+    def test_remove_calls_cli_for_each_id_when_layouts_dir_is_absent(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            env = {"HERDR_APP_HOME": tmp}
+            calls = []
+
+            def runner(argv, **kwargs):
+                calls.append(argv)
+                return subprocess.CompletedProcess(argv, 0, "", "")
+
+            A.remove(["d1", "d2"], runner, env=env)
+            self.assertEqual(calls, [["herdr-artifact", "rm", "d1"],
+                                     ["herdr-artifact", "rm", "d2"]])
 
         def failed_runner(argv, **kwargs):
             raise OSError("unavailable")
 
-        A.remove(["d1", "d2"], failed_runner)
+        A.remove(["d1", "d2"], failed_runner, env=env)
 
     def test_state_validation_accepts_artifact_ids(self):
         state = minimal_run_state()
