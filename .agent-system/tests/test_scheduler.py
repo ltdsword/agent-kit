@@ -796,6 +796,26 @@ class TestPersistence(Base):
         actions = self.new_scheduler().resume("r1")["actions"]
         self.assertIn("T1: no live agent and no report -> relaunch --run r1 --task T1", actions)
 
+    def test_start_timeout_keeps_agent_name_so_resume_sees_live_agent(self):
+        self.dag()
+        real_start = self.herdr.agent_start
+
+        def stuck_start(name, *args, **kwargs):
+            real_start(name, *args, **kwargs)  # the agent exists but never reports ready
+            raise S.SchedulerError(f"agent_not_ready: {name} did not report an idle or done state")
+        self.herdr.agent_start = stuck_start
+        res = self.s.dispatch_ready("r1", launch="herdr")
+        self.assertTrue(res["errors"])
+        state = self.s.store.load("r1")
+        task = state["tasks"]["T1"]
+        agent_name = state["workers"][task["worker"]]["agent_name"]
+        self.assertTrue(agent_name)
+        self.assertTrue(task.get("launch_error"))
+        actions = self.new_scheduler().resume("r1")["actions"]
+        action = next(a for a in actions if a.startswith("T1:"))
+        self.assertIn(f"agent {agent_name} is live but has not reported", action)
+        self.assertNotIn("relaunch --run", action)
+
     def test_resume_live_agent_without_launch_error_keeps_running_message(self):
         self.dag()
         self.s.dispatch_ready("r1", launch="herdr")

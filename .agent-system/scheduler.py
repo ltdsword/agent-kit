@@ -1603,6 +1603,10 @@ class Scheduler:
         w.update(herdr_workspace=ws, herdr_pane=pane, herdr_owner_run=state["run_id"])
         self.store.save(state)  # persist created IDs before anything else can fail
         name = self.agent_name(state["run_id"], wid)
+        # Record the name before starting: a start that times out (e.g. stuck on a startup screen) leaves a
+        # live agent, and resume must be able to see it instead of advising a second launch.
+        w.update(agent_name=name, session_task=tid, session_started_at=now())
+        self.store.save(state)
         agent_args = self.worker_args(t["worktree"], state["run_id"])
         if herdr.backend == "hc":
             herdr.agent_start(name, pane, agent_args, self.cfg["herdr"]["agent_start_timeout_ms"],
@@ -1611,8 +1615,6 @@ class Scheduler:
         else:
             herdr.agent_start(name, pane, agent_args, self.cfg["herdr"]["agent_start_timeout_ms"],
                               kind=self.worker_kind())
-        w.update(agent_name=name, session_task=tid, session_started_at=now())
-        self.store.save(state)
         herdr.agent_prompt(name, text, self.cfg["herdr"]["prompt_ack_timeout_ms"])
 
     def manual_command(self, state: dict, tid: str, text: str) -> list[str]:
