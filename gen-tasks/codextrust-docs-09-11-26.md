@@ -147,3 +147,7 @@ index 26cec8d..8305e62 100644
 
 - `.agent-system/scripts/verify.sh` exit 0 on agent/integration-codextrust at c7afff53e72e (log `.orchestrator/runs/codextrust/logs/verify-1794199776.log`)
 - Task MERGED; run DONE
+
+## Finished (09/11/26 12:23)
+
+- merged into hub/plan (decision D2)
