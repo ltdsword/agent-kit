@@ -9,6 +9,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import tomllib
 import unittest
 from contextlib import redirect_stderr
 from io import StringIO
@@ -421,10 +422,30 @@ class TestConfig(Base):
         self.cfg["worker"].update(trust_worktree=True, network_access=True, web_search=False)
         args = self.new_scheduler().codex_args("/wt", "r1")
         self.assertIn("check_for_update_on_startup=false", args)
-        self.assertIn('projects."/wt".trust_level="trusted"', args)
-        self.assertIn(f'projects."{self.repo.resolve()}".trust_level="trusted"', args)
+        project_configs = [args[i + 1] for i, arg in enumerate(args[:-1])
+                           if arg == "-c" and args[i + 1].startswith("projects=")]
+        self.assertEqual(len(project_configs), 1)
+        projects = tomllib.loads("projects=" + project_configs[0].split("=", 1)[1])["projects"]
+        self.assertEqual(projects, {"/wt": {"trust_level": "trusted"},
+                                    str(self.repo.resolve()): {"trust_level": "trusted"}})
+        self.assertFalse(any('projects."' in arg for arg in args))
         self.assertIn("sandbox_workspace_write.network_access=true", args)
         self.assertNotIn("--search", args)
+
+        same_path_args = self.new_scheduler().codex_args(str(self.repo.resolve()), "r1")
+        same_path_config = next(same_path_args[i + 1] for i, arg in enumerate(same_path_args[:-1])
+                                if arg == "-c" and same_path_args[i + 1].startswith("projects="))
+        same_path_projects = tomllib.loads("projects=" + same_path_config.split("=", 1)[1])["projects"]
+        self.assertEqual(same_path_projects, {str(self.repo.resolve()): {"trust_level": "trusted"}})
+
+        quoted_path = '/wt/with"quote'
+        quoted_args = self.new_scheduler().codex_args(quoted_path, "r1")
+        quoted_config = next(quoted_args[i + 1] for i, arg in enumerate(quoted_args[:-1])
+                             if arg == "-c" and quoted_args[i + 1].startswith("projects="))
+        quoted_projects = tomllib.loads("projects=" + quoted_config.split("=", 1)[1])["projects"]
+        self.assertEqual(quoted_projects, {quoted_path: {"trust_level": "trusted"},
+                                           str(self.repo.resolve()): {"trust_level": "trusted"}})
+
         self.cfg["worker"]["web_search"] = True
         self.assertIn("--search", self.new_scheduler().codex_args("/wt", "r1"))
         self.cfg["worker"].update(network_access=False)
@@ -745,6 +766,46 @@ class TestPersistence(Base):
         self.herdr.live.clear()  # agents vanished during the outage
         res = self.new_scheduler().resume("r1")
         self.assertTrue(any("relaunch" in a for a in res["actions"]))
+
+    def test_resume_live_agent_after_launch_timeout_does_not_suggest_relaunch(self):
+        self.dag()
+        self.s.dispatch_ready("r1", launch="herdr")
+        state = self.s.store.load("r1")
+        task = state["tasks"]["T1"]
+        agent_name = state["workers"][task["worker"]]["agent_name"]
+        task["launch_error"] = "agent_not_ready"
+        self.s.store.save(state)
+
+        actions = self.new_scheduler().resume("r1")["actions"]
+        action = next(a for a in actions if a.startswith("T1:"))
+        self.assertEqual(action, f"T1: agent {agent_name} is live but has not reported "
+                         "(launch timed out: it may be stuck on a startup screen; read it with "
+                         "hc read / herdr agent read, then answer it or stop it before relaunch)")
+        self.assertNotIn("relaunch --run", action)
+
+    def test_resume_missing_agent_after_launch_timeout_suggests_relaunch(self):
+        self.dag()
+        self.s.dispatch_ready("r1", launch="herdr")
+        state = self.s.store.load("r1")
+        task = state["tasks"]["T1"]
+        agent_name = state["workers"][task["worker"]]["agent_name"]
+        task["launch_error"] = "agent_not_ready"
+        self.s.store.save(state)
+        self.herdr.live.pop(agent_name)
+
+        actions = self.new_scheduler().resume("r1")["actions"]
+        self.assertIn("T1: no live agent and no report -> relaunch --run r1 --task T1", actions)
+
+    def test_resume_live_agent_without_launch_error_keeps_running_message(self):
+        self.dag()
+        self.s.dispatch_ready("r1", launch="herdr")
+        state = self.s.store.load("r1")
+        task = state["tasks"]["T1"]
+        agent_name = state["workers"][task["worker"]]["agent_name"]
+
+        actions = self.new_scheduler().resume("r1")["actions"]
+        self.assertIn(f"T1: running on {task['worker']} (herdr: {{'name': '{agent_name}', 'state': 'working'}})",
+                      actions)
 
     def test_lock_excludes_second_instance(self):
         self.dag()

@@ -1262,10 +1262,10 @@ class Scheduler:
         for d in w.get("writable_dirs", []):  # build-tool caches, e.g. ~/.gradle
             args += ["--add-dir", str(Path(d).expanduser())]
         if w.get("trust_worktree"):
-            # For this run only (not saved). Codex applies trust to the git repository root for a worktree,
-            # so trust the repo root too, or the worker stops at a "Trust this folder?" prompt.
-            for path in dict.fromkeys([worktree, str(self.project_root)]):
-                args += ["-c", f'projects."{path}".trust_level="trusted"']
+            # Codex 0.165 ignores the dotted-key form; this inline table works and applies per run only.
+            projects = ",".join(f'{json.dumps(path)}={{trust_level="trusted"}}'
+                                for path in dict.fromkeys([worktree, str(self.project_root)]))
+            args += ["-c", f"projects={{{projects}}}"]
         if w.get("network_access"):  # e.g. tests that open sockets; Codex cannot limit this to localhost
             args += ["-c", "sandbox_workspace_write.network_access=true"]
         if w.get("web_search"):  # Codex's built-in web search, to look up docs and references
@@ -2793,17 +2793,23 @@ class Scheduler:
                     has_report = (self.store.run_dir(run_id) / "reports" / f"{tid}.json").exists()
                     w = state["workers"][t["worker"]]
                     live = None
+                    observable = False
                     herdr = self.herdr_for(state)
                     if w.get("agent_name") and herdr.available():
                         try:
                             live = herdr.agent_get(w["agent_name"]).get("result")
+                            observable = True
                         except SchedulerError:
                             live = "missing"
                     t["lease"]["last_observed_at"] = now()
                     if has_report:
                         actions.append(f"{tid}: report present -> scheduler.py collect --run {run_id} --task {tid}")
-                    elif live == "missing" or t.get("launch_error"):
+                    elif live == "missing" or (t.get("launch_error") and not observable):
                         actions.append(f"{tid}: no live agent and no report -> relaunch --run {run_id} --task {tid}")
+                    elif t.get("launch_error"):
+                        actions.append(f"{tid}: agent {w['agent_name']} is live but has not reported "
+                                       "(launch timed out: it may be stuck on a startup screen; read it with "
+                                       "hc read / herdr agent read, then answer it or stop it before relaunch)")
                     else:
                         actions.append(f"{tid}: running on {t['worker']} (herdr: {live or 'not observable'})")
                 elif t["status"] == "REVIEW":
