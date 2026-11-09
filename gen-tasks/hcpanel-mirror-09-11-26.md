@@ -64,3 +64,47 @@ under `~/.config/herdr-app/mods/tasks/bin/herdr_task/` (read only).
 
 ---
 <!-- Do not edit above this line after dispatch. scheduler.py appends: Worker result, Review, Integration, Final gate. -->
+
+## Worker result - attempt 1 (09/11/26 15:56)
+
+- Status: **done** (worker worker-1, branch `agent/hcpanel-t1`)
+- Commits: none, changes left uncommitted (orchestrator commits after review)
+- Files: `.agent-system/herdr_tasks.py`, `.agent-system/tests/test_herdr_tasks.py`
+- Scope: OK
+- Tests reported:
+  - `python3 -m pytest -q .agent-system/tests/test_herdr_tasks.py` -> exit 0
+  - `python3 -m pytest -q .agent-system/tests` -> exit 0
+- Risks:
+  - Herdr behavior was exercised through fake runners and a fake package; real Herdr commands were not run per task boundaries.
+- Not done:
+  - No commit created; worker .git metadata is read-only.
+- Full diff: `.orchestrator/runs/hcpanel/reports/T1.diff`
+
+````text
+ .agent-system/herdr_tasks.py            | 283 +++++++++++++++++++++++++++++
+ .agent-system/tests/test_herdr_tasks.py | 311 ++++++++++++++++++++++++++++++++
+ 2 files changed, 594 insertions(+)
+````
+
+(diff is 606 lines; read the full diff file)
+
+## Review round 1: PASS (09/11/26 15:57)
+
+- Verdict: **PASS** -> task is now PASSED (fix rounds used: 0/2)
+- Reviewed HEAD: 08f60f3ccd3e, commits 08f60f3ccd3e
+- Notes: Opus fix: live terminal counts before first status; live check passed
+
+# Review hcpanel T1 (mirror module) - PASS with Opus fix
+- herdr_tasks.py: enabled/sync/show_panel per packet; never raises; atomic map file; fingerprint skip; dependency order + --after; adopt via Herdr Store (lock), backup "skipped" marker, hc label.
+- Opus fix: `_agent_address` required a reported agent state, so a worker stuck on a startup screen (no status yet) was never attached. Now: any `hc get` record with state "live" and an address.
+- Live (Opus, real herdr-task/hc, scratch folder): T1 RUNNING -> HPLI-1 running, agent t2s attached, label herdr.task set, status Working; T2 PENDING -> todo waiting_for [1]. T1 MERGED -> done, T2 waiting cleared; T2 REVIEW -> running + status. Cleaned up (tasks, store file, label).
+- Tests: 14 module tests pass.
+
+## Integration: merged (09/11/26 15:57)
+
+- On `agent/integration-hcpanel` at 44374f034b2b; `.agent-system/scripts/verify.sh --quick` passed (log `.orchestrator/runs/hcpanel/logs/post-merge-T1-a1.log`)
+
+## Final gate: PASS (09/11/26 16:15)
+
+- `.agent-system/scripts/verify.sh` exit 0 on agent/integration-hcpanel at 29f37c5c4627 (log `.orchestrator/runs/hcpanel/logs/verify-1794215680.log`)
+- Task MERGED; run DONE
