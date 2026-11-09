@@ -172,6 +172,12 @@ class Base(unittest.TestCase):
         self.cfg["gate"]["post_merge_check"] = PY_OK
         self.cfg["gate"]["verify_cmd"] = PY_OK
         self.herdr = FakeHerdr()
+        herdr_tasks = getattr(S, "herdr_tasks", None)
+        if herdr_tasks:
+            for name, value in (("enabled", False), ("sync", None), ("show_panel", False)):
+                patcher = mock.patch.object(herdr_tasks, name, return_value=value)
+                patcher.start()
+                self.addCleanup(patcher.stop)
         self.s = self.new_scheduler()
 
     def new_scheduler(self):
@@ -401,8 +407,8 @@ class TestConfig(Base):
         bad["pool"].update(size=11, slots=[f"worker-{i}" for i in range(1, 12)])
         self.assertTrue(any("1..10" in e for e in S.validate_config(bad)))
 
-    def test_herdr_alerts_and_artifacts_must_be_bool(self):
-        for key in ("alerts", "artifacts"):
+    def test_herdr_alerts_artifacts_and_tasks_must_be_bool(self):
+        for key in ("alerts", "artifacts", "tasks"):
             bad = copy.deepcopy(KIT_CONFIG)
             bad["herdr"][key] = "yes"
             self.assertTrue(any(f"herdr.{key} must be a bool" in error for error in S.validate_config(bad)))
@@ -450,6 +456,65 @@ class TestConfig(Base):
         self.assertIn("--search", self.new_scheduler().codex_args("/wt", "r1"))
         self.cfg["worker"].update(network_access=False)
         self.assertNotIn("sandbox_workspace_write.network_access=true", self.new_scheduler().codex_args("/wt", "r1"))
+
+
+class TestHerdrTasks(Base):
+    def _saved_state(self):
+        self.dag()
+        return self.s.store.load("r1")
+
+    def test_save_syncs_herdr_tasks_when_enabled(self):
+        state = self._saved_state()
+        with mock.patch.object(S.herdr_tasks, "enabled", return_value=True), \
+                mock.patch.object(S.herdr_tasks, "sync") as sync, \
+                mock.patch.object(S.artifacts, "write_board"):
+            self.s.store.save(state)
+
+        sync.assert_called_once_with(self.s, state)
+
+    def test_save_skips_herdr_sync_when_disabled(self):
+        state = self._saved_state()
+        with mock.patch.object(S.herdr_tasks, "enabled", return_value=False), \
+                mock.patch.object(S.herdr_tasks, "sync") as sync, \
+                mock.patch.object(S.artifacts, "write_board"):
+            self.s.store.save(state)
+
+        sync.assert_not_called()
+
+    def test_save_swallows_herdr_sync_errors(self):
+        state = self._saved_state()
+        stderr = StringIO()
+        with mock.patch.object(S.herdr_tasks, "enabled", return_value=True), \
+                mock.patch.object(S.herdr_tasks, "sync", side_effect=RuntimeError("sync failed")), \
+                mock.patch.object(S.artifacts, "write_board"), redirect_stderr(stderr):
+            self.s.store.save(state)
+
+        self.assertEqual(len(stderr.getvalue().splitlines()), 1)
+
+    def test_run_create_shows_tasks_panel_without_publishing_board(self):
+        with mock.patch.object(S.herdr_tasks, "enabled", return_value=True), \
+                mock.patch.object(S.herdr_tasks, "sync"), \
+                mock.patch.object(S.herdr_tasks, "show_panel") as show_panel, \
+                mock.patch.object(S.artifacts, "enabled", return_value=True), \
+                mock.patch.object(S.artifacts, "publish_board") as publish_board, \
+                mock.patch.object(S.artifacts, "write_board"):
+            self.s.create_run("r2", [self.task("T1", trivial=True)])
+
+        show_panel.assert_called_once_with(self.cfg)
+        publish_board.assert_not_called()
+
+    def test_run_create_keeps_board_when_tasks_disabled(self):
+        with mock.patch.object(S.herdr_tasks, "enabled", return_value=False), \
+                mock.patch.object(S.herdr_tasks, "show_panel") as show_panel, \
+                mock.patch.object(S.artifacts, "enabled", return_value=True), \
+                mock.patch.object(S.artifacts, "publish_board", return_value="artifact-id") as publish_board, \
+                mock.patch.object(S.artifacts, "show_panel") as artifacts_panel, \
+                mock.patch.object(S.artifacts, "write_board"):
+            self.s.create_run("r2", [self.task("T1", trivial=True)])
+
+        show_panel.assert_not_called()
+        publish_board.assert_called_once()
+        artifacts_panel.assert_called_once_with(self.cfg)
 
 
 class TestDispatch(Base):

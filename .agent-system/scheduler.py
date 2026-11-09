@@ -33,6 +33,10 @@ try:  # Herdr app panels are optional: a workspace without the module still runs
     import artifacts  # noqa: E402
 except ImportError:  # pragma: no cover
     artifacts = None
+try:  # Herdr Tasks panel integration is optional
+    import herdr_tasks  # noqa: E402
+except ImportError:  # pragma: no cover
+    herdr_tasks = None
 import models as M  # noqa: E402  (model registry, same folder)
 
 SCHEMA_VERSION = 1
@@ -208,7 +212,7 @@ def validate_config(cfg: dict) -> list[str]:
         if backend not in ("auto", "hc", "legacy"):
             errors.append("herdr.backend must be one of auto, hc, legacy")
         if isinstance(herdr, dict):
-            for key in ("alerts", "artifacts"):
+            for key in ("alerts", "artifacts", "tasks"):
                 if key in herdr and not isinstance(herdr[key], bool):
                     errors.append(f"herdr.{key} must be a bool")
         if worker["sandbox"] == "danger-full-access":
@@ -610,9 +614,10 @@ def scope_check(files: list[str], owned: list[str]) -> tuple[list[str], list[str
 # --------------------------------------------------------------------------- persistence
 
 class Store:
-    def __init__(self, workspace_root: Path):
+    def __init__(self, workspace_root: Path, on_save=None):
         self.workspace_root = workspace_root
         self.root = workspace_root / ".orchestrator"
+        self.on_save = on_save
 
     def run_dir(self, run_id: str) -> Path:
         return self.root / "runs" / run_id
@@ -662,6 +667,11 @@ class Store:
             os.replace(tmp, p)
             if artifacts:
                 artifacts.write_board(self, state)
+            if self.on_save:
+                try:
+                    self.on_save(state)
+                except Exception:
+                    print(f"Herdr task sync failed for {state['run_id']}", file=sys.stderr)
         finally:
             if tmp.exists():
                 tmp.unlink()
@@ -1162,8 +1172,13 @@ class Scheduler:
                 raise SchedulerError(f"workspace {self.workspace_root} must not be inside the project repo "
                                      f"{self.project_root}")
         self.store = Store(self.workspace_root)
+        self.store.on_save = self._sync_herdr_tasks
         self.herdr_injected = herdr is not None
         self.herdr = herdr if herdr is not None else make_herdr(self.cfg)
+
+    def _sync_herdr_tasks(self, state: dict) -> None:
+        if herdr_tasks and herdr_tasks.enabled(self.cfg):
+            herdr_tasks.sync(self, state)
 
     def herdr_for(self, state: dict) -> Herdr | Hc:
         backend = state.get("herdr_backend", "legacy")
@@ -1405,7 +1420,9 @@ class Scheduler:
             log_event(state, "run_created", base_sha=base_sha)
             (run_dir / "tasks.json").write_text(json.dumps({"tasks": tasks}, indent=2) + "\n")
             self.store.save(state)
-            if artifacts and artifacts.enabled(self.cfg):
+            if herdr_tasks and herdr_tasks.enabled(self.cfg):
+                herdr_tasks.show_panel(self.cfg)
+            elif artifacts and artifacts.enabled(self.cfg):
                 artifact_id = artifacts.publish_board(self.project_root, run_dir, state, self.cfg)
                 if artifact_id:
                     artifacts.show_panel(self.cfg)
