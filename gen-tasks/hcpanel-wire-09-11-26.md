@@ -295,3 +295,7 @@ index cf60b45..40e7ba0 100644
 
 - `.agent-system/scripts/verify.sh` exit 0 on agent/integration-hcpanel at 29f37c5c4627 (log `.orchestrator/runs/hcpanel/logs/verify-1794215680.log`)
 - Task MERGED; run DONE
+
+## Finished (09/11/26 16:17)
+
+- merged into hub/plan (decision D2)
