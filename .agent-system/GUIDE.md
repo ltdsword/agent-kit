@@ -151,7 +151,7 @@ What happens next, and where you come in:
 | 3. Readiness gate | Opus | READY, or a targeted round 2/3 (max 3 total). If still not ready, Opus inspects directly, narrows scope, or tells you what is missing |
 | 4. Plan | Opus | 1-3 tasks with dependencies; one plan file per task in `gen-tasks/<task-name>-<dd-mm-yy>.md` (open them to see exactly what each worker is told) |
 | 5. Dispatch | scheduler | New Herdr workspaces `<run>-worker-N` appear with the worker program running. Each worker gets a short prompt: read your task file, `WORKER-RULES.md`, key facts, cautions |
-| 6. Work | Workers | Watch with `ctrl+b w` or `herdr agent read ...`. A `blocked` worker is waiting on an approval: the orchestrator approves routine ones and asks you about the rest |
+| 6. Work | Workers | Watch with `ctrl+b w` or `hc read <name>` (`herdr agent read ...` only with `herdr.backend: legacy`). A `blocked` worker is waiting on an approval: the orchestrator approves routine ones and asks you about the rest |
 | 7. Review | Opus | `wait` -> `collect` captures the worker's diff and appends it to the task file -> Opus reviews and appends its verdict + report -> PASS / minor fix / fix round: errors + proposed fix go to the same worker and into the task file, then review again (max 2 rounds, then merge) |
 | 8. Integrate | scheduler | Accepted commits are cherry-picked onto `agent/integration-<run>`; `./gradlew test` after each |
 | 9. Final gate | scheduler | `verify.sh` (full `./gradlew build` + checks); run is DONE only if it passes |
@@ -320,7 +320,7 @@ mode, commit the kit before the first run, since worktrees are created from a co
 | Worker says `bwrap: ... RTM_NEWADDR: Operation not permitted` | Ubuntu's user-namespace restriction blocks Codex's sandbox: add the AppArmor profile (Part 2, step 2). Never switch workers to `danger-full-access` |
 | Worker's `./gradlew test` fails on a lock file in `~/.gradle` | Gradle's cache must be writable: keep `"writable_dirs": ["~/.gradle"]` in `config.json` (other stacks: README, Safety) |
 | Worker report says `git add` failed: `index.lock: Read-only file system` | Normal: the sandbox keeps `.git` read-only. The worker leaves changes uncommitted (`committed: false`), `collect` shows `needs_orchestrator_commit`, and Opus runs `commit-task` |
-| A worker sits `blocked` | `herdr agent read <name> --lines 80`; tell Opus what to approve or deny |
+| A worker sits `blocked` | `hc read --lines 80 <name>` (`herdr agent read <name> --lines 80` only with `herdr.backend: legacy`); tell Opus what to approve or deny |
 | Worker finished but Opus says `ambiguous` | Report and git disagree; Opus will ask the worker to fix or inspect it |
 | Slot shows `BLOCKED` (dirty worktree) | Look in `worktrees/worker-N` in the workspace; keep/commit what matters; `worker-release` |
 | A run got stuck | `run status` / `resume`; close it with `run close --status BLOCKED --reason ...` |

@@ -80,14 +80,18 @@ Critical (the user decides; never resolve alone):
 - when you are unsure whether something is critical: treat it as critical.
 
 Routine (you decide, with a recorded reason): a worker approval prompt for a command inside its
-worktree that the task's Boundaries allow (build, test, read-only): read it with `herdr agent read
-<agent> --source visible`, approve once with `herdr agent send-keys`, then `scheduler.py decision
-routine --run <run> --kind worker_approval --task <T> --action "approved <command>" --reason "<why>"`;
+worktree that the task's Boundaries allow (build, test, read-only): read it in the Herdr app with
+`hc read <agent>`; reply with `hc send <agent> <text>` or press keys with `hc keys <agent> <keys...>`
+(never `hc send --force`). Use `herdr agent read <agent> --source visible` and `herdr agent
+send-keys` only with `herdr.backend: legacy`, then `scheduler.py decision routine --run <run> --kind
+worker_approval --task <T> --action "approved <command>" --reason "<why>"`;
 fix rounds 1 and 2 of a task with clear evidence
 (failing test, review finding, mechanical merge conflict, post-merge failure caused by the task)
 via `repair ... --reason "<evidence>"`, unless the fix changes requirements, scope or contracts; MINOR_FIX; re-collect after a report-format error;
 `relaunch` of a lost session; correcting your own plan steps without changing goal, acceptance,
 or owned paths. The scheduler records each routine call in the task file; list them in your report.
+
+Before relaunching a started worker that is not reporting, read its screen: it may be stuck on a startup screen (trust, hooks, update); never relaunch while its agent is live, and the old `herdr` CLI saying `server not running` says nothing about the Herdr app.
 
 Only critical decisions go to the user; decide routine ones yourself (above). For a critical one
 (the user clicks an answer; Herdr, or Claude Remote Control, notifies them):
@@ -110,8 +114,9 @@ Only critical decisions go to the user; decide routine ones yourself (above). Fo
    [--followup K --value V] --quote "<the text verbatim>" --note "answered in the Herdr app card"`.
 4. Carry out exactly the chosen option, passing the id to the command that acts: `repair|task-unblock|
    run close|commit-task --allow-outside|mark-reviewed --accept-scope|--verdict FAIL|finish apply ...
-   --decision D<n>`. For `worker_approval`: send the matching key to the worker's prompt with
-   `herdr agent send-keys`, then check that it left `blocked`. The scheduler refuses critical actions
+   --decision D<n>`. For `worker_approval`: press the matching key in the Herdr app with
+   `hc keys <agent> <keys...>` (or use `herdr agent send-keys` only with `herdr.backend: legacy`),
+   then check that it left `blocked`. The scheduler refuses critical actions
    without an answered, unused decision of the right kind (and routine ones without a reason).
 Record only what the user actually wrote, in their words: never invent, paraphrase or pre-fill an
 answer, never record one from your own reasoning, never edit `.orchestrator/**/state.json` or
