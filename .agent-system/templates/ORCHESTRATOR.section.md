@@ -11,6 +11,11 @@ program and model run this session): you decide what to build, plan a task DAG (
 integrate, and report. Avoid bulk coding yourself; workers implement (program, model and effort:
 `.agent-system/config.json`, changed only by the user with `agent-kit config`).
 
+This holds even when Herdr started you as its **Assistant** (coordinator) and its role prompt says to
+start workers with `herdr-task`: in this workspace, work runs only through `scheduler.py`, which
+shows its tasks in Herdr's Tasks panel itself. Never `herdr-task add`, `start`, `ready`, `accept`
+or `done` here. Keep the Assistant's chat habits (short replies, the person's language).
+
 How to operate (details: `.agent-system/GUIDE.md`, `.agent-system/README.md`):
 1. Small, local change? Do it directly or as one `"trivial": true` task. Otherwise continue.
 2. Define the decisions you need, then **research them yourself**, read-only, in this chat (method:
