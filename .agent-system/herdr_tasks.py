@@ -178,6 +178,9 @@ def sync(sched, state, runner=subprocess.run, adopt=None) -> None:
         task_map = _read_map(run_dir / "herdr-tasks.json")
         tasks = state.get("tasks") or {}
         workers = state.get("workers") or {}
+        # A closed run (run close, or verify DONE) has no live work left: finish every task it still shows.
+        run_status = state.get("status")
+        run_closed = run_status in ("DONE", "BLOCKED", "FAILED")
         do_adopt = adopt
 
         def adopt_task(task_id, address):
@@ -216,16 +219,23 @@ def sync(sched, state, runner=subprocess.run, adopt=None) -> None:
                 report_path = run_dir / "reports" / f"{task_id}.json"
                 if status == "RUNNING" and report_path.is_file():
                     status = "REVIEW"
+                if run_closed and status != "MERGED":
+                    status = f"CLOSED_{run_status}"
                 fingerprint = _fingerprint(status, agent_name, task.get("attempts", 0),
                                            task.get("major_repairs", 0))
                 if entry.get("seen") == fingerprint:
                     continue
 
                 task_id_num = str(entry["id"])
-                if status in ("PENDING", "READY"):
+                if status.startswith("CLOSED_"):
+                    # Best effort note (status only works on started tasks), then out of Needs you / To do.
+                    _run(runner, ["herdr-task", "status", "--folder", folder, task_id_num,
+                                  f"Run closed ({run_status.lower()})"])
+                    result = _run(runner, ["herdr-task", "done", "--folder", folder, task_id_num])
+                elif status in ("PENDING", "READY"):
                     entry["seen"] = fingerprint
                     continue
-                if status == "RUNNING":
+                elif status == "RUNNING":
                     address = None
                     if agent_name:
                         result = _run(runner, ["hc", "get", str(agent_name), "--json"])

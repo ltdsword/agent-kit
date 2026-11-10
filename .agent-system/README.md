@@ -63,7 +63,7 @@ roots the same). Worktrees live in `pool.worktree_root`, outside the repo: `work
 | `herdr.backend` | `auto` (default): `hc` inside the Herdr app, `legacy` inside old Herdr, otherwise `hc` when its core runs; set `hc` or `legacy` to force one |
 | `herdr.alerts` | `true` (default): show in-app alerts for decisions, blocked workers and finished runs; set `false` to disable |
 | `herdr.artifacts` | `true` (default): publish a board for each run and decision cards in the Herdr app; set `false` to disable |
-| `herdr.tasks` | `true` (default): show each run's tasks in Herdr's Tasks panel (state, live worker, status line) instead of the run board; set `false` for the board. |
+| `herdr.tasks` | `true` (default): show each run's tasks in Herdr's Tasks panel (state, live worker, status line) instead of the run board; closing a run (`run close`, or a passing `verify`) marks its unfinished tasks done; set `false` for the board. |
 
 ## Commands (all implemented; `python3 .agent-system/scheduler.py <cmd> --help`)
 

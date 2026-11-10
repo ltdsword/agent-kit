@@ -229,6 +229,30 @@ class HerdrTasksTests(unittest.TestCase):
                 self.assertEqual(calls[-1], ["herdr-task", "status", "--folder",
                                              str(scheduler.workspace_root), "1", message])
 
+    def test_closed_run_finishes_unmerged_tasks(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            scheduler = FakeScheduler(tmp)
+            run_dir = scheduler.store.run_dir("run-one")
+            run_dir.mkdir(parents=True)
+            (run_dir / "herdr-tasks.json").write_text(
+                '{"tasks":{"T1":{"id":1,"key":"run#1","seen":"old","address":null},'
+                '"T2":{"id":2,"key":"run#2","seen":"old","address":null}}}')
+            state = {"run_id": "run-one", "status": "BLOCKED", "workers": {},
+                     "tasks": {"T1": task("T1", "BLOCKED"), "T2": task("T2", "PENDING")}}
+            calls = []
+            runner = lambda argv, **kwargs: (calls.append(argv)
+                or subprocess.CompletedProcess(argv, 0, "", ""))
+            folder = str(scheduler.workspace_root)
+
+            H.sync(scheduler, state, runner=runner, adopt=lambda *args: True)
+
+            self.assertIn(["herdr-task", "status", "--folder", folder, "1", "Run closed (blocked)"], calls)
+            self.assertIn(["herdr-task", "done", "--folder", folder, "1"], calls)
+            self.assertIn(["herdr-task", "done", "--folder", folder, "2"], calls)
+            calls.clear()
+            H.sync(scheduler, state, runner=runner, adopt=lambda *args: True)
+            self.assertEqual(calls, [])
+
     def test_runner_exception_never_escapes(self):
         with tempfile.TemporaryDirectory() as tmp:
             scheduler = FakeScheduler(tmp)
