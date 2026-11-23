@@ -46,9 +46,16 @@ How to operate (details: `.agent-system/GUIDE.md`, `.agent-system/README.md`):
    Keep the packet, owned paths and acceptance fields; then `run create`, `dispatch-ready`.
 4. `scheduler.py wait --run <run>` until a report appears, then `collect`: it saves the worker's full
    diff to `.orchestrator/runs/<run>/reports/<T>.diff` and appends a "Worker result" section (with
-   the diff) to the task file. Review per `prompts/review-checklist.md`, write the review report to
-   a file, then `commit-task` if uncommitted and `mark-reviewed --verdict ... --report <file>`: the
-   verdict and report are appended to the end of the task file. Then `integrate` -> `verify`.
+   the diff) to the task file. When `checks.enabled: false` or `herdr.backend` is not `hc`, review
+   per `prompts/review-checklist.md`, write the review report to a file, then `commit-task` if
+   uncommitted and `mark-reviewed --verdict ... --report <file>`: the verdict and report are
+   appended to the end of the task file. Otherwise, run `scheduler.py check start --run <run> --task <T>`:
+   a separate review session and a Code Mode test session check the task in parallel (task worktree,
+   read-only). Run `scheduler.py check wait --run <run> --task <T>` in the background. The first
+   FAIL ends both sessions: read its report and go to the repair loop (FAIL report = the evidence).
+   When both pass, `commit-task` if uncommitted, then `mark-reviewed --verdict PASS --report <the
+   check-review.md path>`. `blocked` = a checker's approval prompt (handle it like a worker approval).
+   `lost`/`timeout` = start the checks again once, then review yourself. Then `integrate` -> `verify`.
    **Review loop, max 2 fix rounds per task** (review finding, failing test, merge conflict or a
    post-merge failure caused by the task): `task new --repair-of <task file>`, fill in "Errors found"
    (exact location + evidence) and "Proposed fix", then `repair ... --reason "<evidence>"`: the SAME
@@ -94,9 +101,11 @@ fix rounds 1 and 2 of a task with clear evidence
 (failing test, review finding, mechanical merge conflict, post-merge failure caused by the task)
 via `repair ... --reason "<evidence>"`, unless the fix changes requirements, scope or contracts; MINOR_FIX; re-collect after a report-format error;
 `relaunch` of a lost session; correcting your own plan steps without changing goal, acceptance,
-or owned paths. The scheduler records each routine call in the task file; list them in your report.
+or owned paths; `check start`/`check wait` and restarting lost checks once. The scheduler records each routine call in the task file; list them in your report.
 
 Before relaunching a started worker that is not reporting, read its screen: it may be stuck on a startup screen (trust, hooks, update); never relaunch while its agent is live, and the old `herdr` CLI saying `server not running` says nothing about the Herdr app.
+
+Never run builds, tests or gates inside your own session: the test checker, `integrate` (post-merge check) and `verify` run them; read their logs and reports.
 
 Only critical decisions go to the user; decide routine ones yourself (above). For a critical one
 (the user clicks an answer; Herdr, or Claude Remote Control, notifies them):

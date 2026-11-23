@@ -159,6 +159,14 @@ What happens next, and where you come in:
 | 11. Merge decision | You | Click: A merge and push / B merge locally / C don't merge, then which branch |
 | 12. Finish | scheduler | Fast-forward the chosen branch, push if A (never force), clean up worktrees and branches |
 
+**Review and test run in parallel.** After collecting the task diff, start both read-only checks and wait for their result:
+
+```text
+collect -> check start [review | test (Code Mode)]
+        -> pass: mark-reviewed
+        -> fail: repair
+```
+
 Under the hood Opus runs commands like these (you can run them too):
 
 ```bash
@@ -187,6 +195,8 @@ $S resume --run r1              # after a crash/restart: shows next actions
 ---
 ## Worker result - attempt 1         <- appended by collect: status, files, tests, risks,
    diffstat + inline diff                 full diff in .orchestrator/runs/<run>/reports/T1.diff
+## Checks started                     <- appended by check start: review and test sessions
+## Checks: PASS|FAIL                   <- appended by check wait: verdicts, summaries and report paths
 ## Review round 1: MAJOR_FIX        <- appended by mark-reviewed: verdict + Opus's report
 ## Fix round 1/2: errors and proposed fix, sent to worker-1   <- appended by repair
 ## Worker result - attempt 2         <- the same worker's fix
@@ -319,6 +329,8 @@ mode, commit the kit before the first run, since worktrees are created from a co
 | Model not supported with ChatGPT account | Old client: `codex update` (Part 2, step 1), or choose another model with `agent-kit config` |
 | Worker says `bwrap: ... RTM_NEWADDR: Operation not permitted` | Ubuntu's user-namespace restriction blocks Codex's sandbox: add the AppArmor profile (Part 2, step 2). Never switch workers to `danger-full-access` |
 | Worker's `./gradlew test` fails on a lock file in `~/.gradle` | Gradle's cache must be writable: keep `"writable_dirs": ["~/.gradle"]` in `config.json` (other stacks: README, Safety) |
+| `PreToolUse:Read hook error: scan-secrets.sh not found` | Company managed settings expect the script in the project directory; workspaces get a wrapper that runs the linked repo's script (`agent-kit update` installs it) |
+| `SessionStart hook error: node: not found` | Scheduler-started sessions inherit its `PATH`; start the orchestrator from a shell where `node` is on `PATH` |
 | Worker report says `git add` failed: `index.lock: Read-only file system` | Normal: the sandbox keeps `.git` read-only. The worker leaves changes uncommitted (`committed: false`), `collect` shows `needs_orchestrator_commit`, and Opus runs `commit-task` |
 | A worker sits `blocked` | `hc read --lines 80 <name>` (`herdr agent read <name> --lines 80` only with `herdr.backend: legacy`); tell Opus what to approve or deny |
 | Worker finished but Opus says `ambiguous` | Report and git disagree; Opus will ask the worker to fix or inspect it |

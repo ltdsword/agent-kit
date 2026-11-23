@@ -35,6 +35,8 @@ User request -> orchestrator: configured program + model (default Claude Code, O
 | `prompts/task-packet.md` | Template + authoring guidance for a worker task file (`task new` copies it) |
 | `prompts/repair-packet.md` | Template for a repair file to the same worker (`task new --repair-of`) |
 | `prompts/review-checklist.md` | Review policy, verdict table, review-report format |
+| `prompts/check-review.md` | Read-only review checker prompt used by `check start` |
+| `prompts/check-test.md` | Read-only test checker prompt used by `check start` (Code Mode) |
 | `prompts/research-packet.md` | Research dossier format (+ request format when delegating to the scout) |
 | `prompts/architecture-readiness.md` | Planning gate checklist (a)-(e) |
 | `scripts/doctor.sh` | Tooling/model/integration report (`--probe-codex` for a live model check) |
@@ -105,6 +107,9 @@ Prefix every command with `python3 .agent-system/scheduler.py`. Add `--json` bef
 | `decision routine --run ID --kind K [--task T] --action ".." --reason ".."` | Record a routine call Opus made itself, e.g. approving a worker's in-worktree command |
 | `wait --run ID [--task T] [--timeout 540]` | Block until a worker writes its report or shows an approval prompt; exit 3 on timeout |
 | `collect --run ID --task T` | Validate the report against git (`pending` / `ambiguous` / `REVIEW`); save `reports/T.diff` (commits + uncommitted + new files); append "Worker result" to the task file |
+| `check start --run ID --task T` | Start review and Code Mode test sessions in parallel on the task worktree |
+| `check wait --run ID --task T [--timeout S]` | Wait for checks; return `pass`, `fail`, `blocked`, `lost` or `timeout` |
+| `check status --run ID --task T` | Show the task's check state |
 | `commit-task --run ID --task T -m MSG` | Audited orchestrator commit of an uncommitted worker diff or Opus minor fix |
 | `mark-reviewed --run ID --task T --verdict PASS\|MINOR_FIX\|MAJOR_FIX\|BLOCKED\|FAIL --report FILE [--notes ..] [--known-issues ..]` | Record review; verdict + report appended to the task file. No MAJOR_FIX after the last fix round |
 | `repair --run ID --task T --packet FILE --reason ..` | Fix round to the same worker session (max 2); errors + proposed fix copied into the task file |
@@ -117,6 +122,21 @@ Prefix every command with `python3 .agent-system/scheduler.py`. Add `--json` bef
 | `worker-release --run ID --worker W` | Return an inspected, clean BLOCKED/BROKEN slot to IDLE |
 | `task-unblock --run ID --task T [--reset-repairs]` | BLOCKED -> PENDING after Opus re-scopes |
 | `cleanup --run ID [--remove-worktrees]` | Close Herdr spaces this run created; remove clean worktrees |
+
+### Checks and Code Mode
+
+Checks are enabled by default and require `herdr.backend: hc`. Both sessions use Claude Code; review runs normally and test uses Code Mode, which requires an interactive session and the direct Anthropic API. A null `model` or `effort` uses the orchestrator's setting. Set `enabled` to `false` to turn checks off.
+
+```json
+{
+  "checks": {
+    "enabled": true,
+    "timeout_seconds": 1800,
+    "review": {"kind": "claude", "model": null, "effort": null, "code_mode": false},
+    "test": {"kind": "claude", "model": null, "effort": null, "code_mode": true}
+  }
+}
+```
 
 ### tasks.json
 
