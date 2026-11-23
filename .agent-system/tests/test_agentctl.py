@@ -2,6 +2,7 @@
 import hashlib
 import json
 import os
+import shutil
 import subprocess
 import sys
 import threading
@@ -496,6 +497,24 @@ class AgentCtlTests(Base):
         self.assertEqual(goodbye[0]["reason"], "orchestrator_gone")
         self.assertTrue(any(args[:2] == ["hc", "get"] for args in calls))
         self.assertFalse(any(args[0] == "herdr" for args in calls))
+
+    def test_watch_stops_without_recreating_a_deleted_workspace(self):
+        runner, _calls = self.fake_connectors()
+        with FakeBackend() as backend:
+            self.set_backend(backend)
+
+            def delete_workspace(_seconds):
+                # Delete once the connector has said hello, so the goodbye shows the reason.
+                if self.ws.exists() and any(r["path"].endswith("/hello") for r in backend.requests):
+                    shutil.rmtree(self.ws)
+
+            with redirect_stdout(StringIO()), redirect_stderr(StringIO()):
+                code = AC.watch(self.ws, runner=runner, sleep=delete_workspace, max_loops=4)
+
+        self.assertEqual(code, 0)
+        self.assertFalse(self.ws.exists())
+        goodbye = [request["body"] for request in backend.requests if request["path"].endswith("/goodbye")]
+        self.assertEqual(goodbye[0]["reason"], "manual")
 
     def test_enable_rewrites_only_hub_object_and_keeps_key_order(self):
         source = ('{\n  "first" : [1,  2],\n "hub" : {"enabled": false, "workspace_id": null},\n'

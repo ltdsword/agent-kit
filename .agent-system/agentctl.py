@@ -1561,6 +1561,7 @@ def watch(ws: Path, interval=5, no_orchestrator=False, runner=subprocess.run, sl
     backoff, loops, gone_count = 1, 0, 0
     last_send, last_check, last_mtimes = clock(), 0.0, None
     reason = "signal"
+    workspace_gone = False
     orch_name = kitstart.agent_name(S.project_root_for(ws, cfg).name)
     orch_kind = cfg.get("orchestrator", {}).get("kind", "claude")
     orch_target = orch_name
@@ -1628,6 +1629,10 @@ def watch(ws: Path, interval=5, no_orchestrator=False, runner=subprocess.run, sl
         write_hint(ws, connected)
         while not stop["value"] and (max_loops is None or loops < max_loops):
             loops += 1
+            if not (ws / ".agent-system" / "config.json").is_file():
+                # The workspace was deleted or moved: stop, and never recreate its folder.
+                workspace_gone = True
+                break
             mtimes = _state_mtimes(ws)
             now_mono = clock()
             changed = last_mtimes is None or mtimes != last_mtimes
@@ -1705,18 +1710,22 @@ def watch(ws: Path, interval=5, no_orchestrator=False, runner=subprocess.run, sl
             reason = "manual"
         return 0
     finally:
+        gone = workspace_gone
         if connected and client:
             try:
                 client.goodbye(session_id, reason)
-                log_action(ws, f"goodbye: {reason}")
+                if not gone:
+                    log_action(ws, f"goodbye: {reason}")
             except Exception as e:
-                log_action(ws, f"goodbye failed: {e}")
+                if not gone:
+                    log_action(ws, f"goodbye failed: {e}")
         try:
             if pidfile.read_text().strip() == str(os.getpid()):
                 pidfile.unlink()
         except OSError:
             pass
-        write_hint(ws, False)
+        if not gone:
+            write_hint(ws, False)
         for sig, handler in original_handlers.items():
             try:
                 signal.signal(sig, handler)
