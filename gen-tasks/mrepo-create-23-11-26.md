@@ -122,3 +122,7 @@ The scheduler still works on one active repo (`project.path`); `agent-kit config
 
 - `.agent-system/scripts/verify.sh` exit 0 on agent/integration-mrepo at 0dab06c3e3a6 (log `.orchestrator/runs/mrepo/logs/verify-1795423285.log`)
 - Task MERGED; run DONE
+
+## Finished (23/11/26 15:46)
+
+- merged into hub/plan (decision D1)
