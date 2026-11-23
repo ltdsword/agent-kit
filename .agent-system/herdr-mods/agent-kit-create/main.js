@@ -224,36 +224,41 @@ export default class AgentKitCreate extends View {
       : "";
     const canSubmit = this.canSubmit();
 
+    const repoRow = (row) => v_flex().id(`repo-${row.id}`).gap(3).flex_none()
+      .child(h_flex().gap(6).items_center().flex_none()
+        .child(field(row.input))
+        .child(button(`browse-repo-${row.id}`, "Browse", false, (_e, cx) => this.browseRepo(row, cx)))
+        .child(button(`remove-repo-${row.id}`, "Remove", false, (_e, cx) => this.removeRepo(row, cx), this.rows.length <= 1)))
+      .child(div().text_size(10.5).text_color(row.status === "git repo" ? t.accent : t.dim)
+        .truncate().child(row.detail ?? row.status));
+    const header = h_flex().items_center().justify_between().flex_none()
+      .child(div().text_size(15).font_semibold().child("New agent-kit workspace"))
+      .child(div().text_size(11).text_color(t.dim).child("Esc"));
+    const loading = div().pt(28).text_size(12).text_color(t.dim).child(this.error || "Loading workspace details…");
+    const location = h_flex().gap(8).items_center().flex_none()
+      .child(field(this.locationInput))
+      .child(button("browse-location", "Browse", false, (_e, cx) => this.browseLocation(cx)));
+    const repoList = v_flex().id("repo-list").flex_1().min_h(0).gap(7).overflow_y_scrollbar()
+      .children(this.rows.map(repoRow));
+    const actions = h_flex().pt(14).gap(8).justify_end().flex_none()
+      .child(button("cancel", "Cancel", false, (_e, cx) => this.cancel(cx)))
+      .child(button("create", "Create", true, (_e, cx) => this.submit(cx), !canSubmit));
+    const form = (el) => el
+      .child(label("Name"))
+      .child(h_flex().flex_none().child(field(this.nameInput)))
+      .child(label("Location"))
+      .child(location)
+      .child(div().pt(5).text_size(11).text_color(t.dim).truncate().child(workspacePath))
+      .child(label("Repos"))
+      .child(repoList)
+      .child(h_flex().pt(7).flex_none().child(button("add-repo", "+ Add repo", false, (_e, cx) => this.addRepo(cx))))
+      .when(Boolean(this.error), (inner) => inner.child(div().pt(6).text_size(11).text_color(t.blocked).child(this.error)))
+      .child(actions);
+
     return v_flex().id("agent-kit-create").track_focus(this.handle).on_key_down((event, cx) => this.key(event, cx))
       .size_full().min_h(0).p(18).bg(t.popover).text_color(t.foreground)
-      .child(h_flex().items_center().justify_between().flex_none()
-        .child(div().text_size(15).font_semibold().child("New agent-kit workspace"))
-        .child(div().text_size(11).text_color(t.dim).child("Esc")))
-      .when(!this.ready, (el) => el.child(div().pt(28).text_size(12).text_color(t.dim)
-        .child(this.error || "Loading workspace details…")))
-      .when(this.ready, (el) => el
-        .child(label("Name"))
-        .child(field(this.nameInput))
-        .child(label("Location"))
-        .child(h_flex().gap(8).items_center().flex_none()
-          .child(field(this.locationInput))
-          .child(button("browse-location", "Browse", false, (_e, cx) => this.browseLocation(cx))))
-        .child(div().pt(5).text_size(11).text_color(t.dim).truncate().child(workspacePath))
-        .child(label("Repos"))
-        .child(v_flex().id("repo-list").flex_1().min_h(0).gap(7).overflow_y_scrollbar().children(
-          this.rows.map((row) => v_flex().id(`repo-${row.id}`).gap(3).flex_none()
-            .child(h_flex().gap(6).items_center().flex_none()
-              .child(field(row.input))
-              .child(button(`browse-repo-${row.id}`, "Browse", false, (_e, cx) => this.browseRepo(row, cx)))
-              .child(button(`remove-repo-${row.id}`, "Remove", false, (_e, cx) => this.removeRepo(row, cx), this.rows.length <= 1)))
-            .child(div().text_size(10.5).text_color(row.status === "git repo" ? t.accent : t.dim)
-              .truncate().child(row.detail ?? row.status)))
-        ))
-        .child(h_flex().pt(7).flex_none()
-          .child(button("add-repo", "+ Add repo", false, (_e, cx) => this.addRepo(cx))))
-        .when(Boolean(this.error), (inner) => inner.child(div().pt(6).text_size(11).text_color(t.blocked).child(this.error)))
-        .child(h_flex().pt(14).gap(8).justify_end().flex_none()
-          .child(button("cancel", "Cancel", false, (_e, cx) => this.cancel(cx)))
-          .child(button("create", "Create", true, (_e, cx) => this.submit(cx), !canSubmit)))));
+      .child(header)
+      .when(!this.ready, (el) => el.child(loading))
+      .when(this.ready, form);
   }
 }

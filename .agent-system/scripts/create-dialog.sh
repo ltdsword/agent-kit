@@ -108,7 +108,13 @@ print(request["id"])
 PY
 )"
 
-if ! herdr-app do mod.open --name agent-kit-create >/dev/null; then
+# A mod copied in just now takes Herdr a moment to load: try for about 5 seconds.
+opened=0
+for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16; do
+  if herdr-app do mod.open --name agent-kit-create >/dev/null 2>&1; then opened=1; break; fi
+  sleep 0.3
+done
+if (( ! opened )); then
   printf 'Could not open the agent-kit create dialog in Herdr.\n' >&2
   exit 2
 fi
