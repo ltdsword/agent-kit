@@ -312,3 +312,7 @@ minor: check_start skips the live-checks refusal when hc ls fails; gate command 
 
 - `.agent-system/scripts/verify.sh` exit 0 on agent/integration-pchecks at 807e4c823f72 (log `.orchestrator/runs/pchecks/logs/verify-1795465355.log`)
 - Task MERGED; run DONE
+
+## Finished (24/11/26 03:28)
+
+- merged into hub/plan (decision D2)
