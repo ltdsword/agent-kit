@@ -15,6 +15,7 @@ import contextlib
 import datetime as _dt
 import fcntl
 import fnmatch
+import hashlib
 import json
 import os
 import re
@@ -215,6 +216,18 @@ def validate_config(cfg: dict) -> list[str]:
             for key in ("alerts", "artifacts", "tasks"):
                 if key in herdr and not isinstance(herdr[key], bool):
                     errors.append(f"herdr.{key} must be a bool")
+        if "checks" in cfg:
+            checks = cfg["checks"]
+            if not isinstance(checks, dict):
+                errors.append("checks must be an object")
+            else:
+                for role in ("review", "test"):
+                    role_cfg = checks.get(role, {})
+                    if not isinstance(role_cfg, dict):
+                        errors.append(f"checks.{role} must be an object")
+                        continue
+                    if role_cfg.get("kind", "claude") != "claude":
+                        errors.append(f"checks.{role}.kind must be 'claude'")
         if worker["sandbox"] == "danger-full-access":
             errors.append("worker.sandbox must not be danger-full-access")
         bad = set(cfg.get("decisions", {}).get("require_user_for", GATED_KINDS)) - set(GATED_KINDS)
@@ -921,7 +934,8 @@ class Hc:
             pass
 
     def agent_start(self, name: str, pane: str, agent_args: list[str], timeout_ms: int,
-                    kind: str = "codex", labels: dict | None = None) -> dict:
+                    kind: str = "codex", labels: dict | None = None,
+                    argv_prefix: list[str] | None = None) -> dict:
         workspace = self.workspaces.get(pane)
         if not workspace:
             raise SchedulerError(f"unknown pane: {pane}")
@@ -930,7 +944,7 @@ class Hc:
                 f"agentkit.kind={kind}"]
         for key, value in (labels or {}).items():
             args += ["--label", f"{key}={value}"]
-        args += ["--", M.binary(kind), *agent_args]
+        args += ["--", *(argv_prefix or []), M.binary(kind), *agent_args]
         p = self._run(args, timeout_ms / 1000)
         if not p or p.returncode != 0:
             detail = (p.stderr or p.stdout).strip() if p else "hc unavailable"
@@ -1252,6 +1266,26 @@ class Scheduler:
 
     def worker_kind(self) -> str:
         return self.cfg["worker"].get("kind", "codex")
+
+    def checks_cfg(self) -> dict:
+        defaults = {
+            "enabled": True,
+            "timeout_seconds": 1800,
+            "review": {"kind": "claude", "model": None, "effort": None, "code_mode": False},
+            "test": {"kind": "claude", "model": None, "effort": None, "code_mode": True},
+        }
+        raw = self.cfg.get("checks", {})
+        raw = raw if isinstance(raw, dict) else {}
+        checks = {**defaults, **raw}
+        orchestrator = self.cfg.get("orchestrator", {})
+        for role in ("review", "test"):
+            role_cfg = raw.get(role, {})
+            role_cfg = role_cfg if isinstance(role_cfg, dict) else {}
+            checks[role] = {**defaults[role], **role_cfg}
+            for key in ("model", "effort"):
+                if checks[role][key] is None:
+                    checks[role][key] = orchestrator.get(key)
+        return checks
 
     def worker_args(self, worktree: str, run_id: str) -> list[str]:
         """Arguments for the configured worker program (after `herdr agent start ... --`)."""
@@ -1626,9 +1660,14 @@ class Scheduler:
         self.store.save(state)
         agent_args = self.worker_args(t["worktree"], state["run_id"])
         if herdr.backend == "hc":
+            labels = {"agentkit.run": state["run_id"], "agentkit.slot": wid}
+            argv_prefix = (M.claude_env_prefix(False, os.environ.get("PATH"))
+                           if self.worker_kind() == "claude" else None)
+            start_kwargs = {"kind": self.worker_kind(), "labels": labels}
+            if argv_prefix is not None:
+                start_kwargs["argv_prefix"] = argv_prefix
             herdr.agent_start(name, pane, agent_args, self.cfg["herdr"]["agent_start_timeout_ms"],
-                              kind=self.worker_kind(), labels={"agentkit.run": state["run_id"],
-                                                               "agentkit.slot": wid})
+                              **start_kwargs)
         else:
             herdr.agent_start(name, pane, agent_args, self.cfg["herdr"]["agent_start_timeout_ms"],
                               kind=self.worker_kind())
@@ -1816,6 +1855,199 @@ class Scheduler:
                 herdr.wait_change(addrs, interval_s)
             else:
                 sleep(interval_s)
+
+    def _checks_snapshot(self, worktree: str | Path) -> str:
+        status = git(worktree, "status", "--porcelain=v1", "-uall").stdout
+        diff = git(worktree, "diff", "HEAD").stdout
+        return hashlib.sha256((status + diff).encode()).hexdigest()
+
+    def check_start(self, run_id: str, tid: str) -> dict:
+        with self.txn(run_id) as state:
+            t = state["tasks"][tid]
+            if t["status"] != "REVIEW":
+                raise SchedulerError(f"{tid} is {t['status']}; checks apply to REVIEW tasks")
+            herdr = self.herdr_for(state)
+            if herdr.backend != "hc":
+                raise SchedulerError("checks need hc")
+            cfg = self.checks_cfg()
+            if not cfg["enabled"]:
+                raise SchedulerError("checks are disabled")
+            if not shutil.which("claude"):
+                raise SchedulerError("checks need claude on PATH")
+
+            old = t.get("checks") or {}
+            old_space = old.get("space")
+            if old.get("status") == "running" and old_space:
+                records = herdr.agent_list() or []
+                if any(rec and rec.get("workspace_id") == old_space for rec in records):
+                    raise SchedulerError(f"checks are already running for {tid}")
+            if old_space:
+                with contextlib.suppress(Exception):
+                    herdr.workspace_close(old_space)
+
+            run_dir = self.store.run_dir(run_id)
+            reports_dir = run_dir / "reports"
+            diff = reports_dir / f"{tid}.diff"
+            if not diff.is_file():
+                raise SchedulerError(f"{tid}: collect first; missing {self.rel(diff)}")
+            task_file = self._task_file(t)
+            check_id = secrets.token_hex(8)
+            log_dir = run_dir / "logs" / f"checks-{tid}-{check_id}"
+            log_dir.mkdir(parents=True, exist_ok=True)
+
+            session_paths = {}
+            for kind in ("review", "test"):
+                report_json = reports_dir / f"{tid}.check-{kind}.json"
+                report_md = reports_dir / f"{tid}.check-{kind}.md"
+                for path in (report_json, report_md):
+                    with contextlib.suppress(FileNotFoundError):
+                        path.unlink()
+                session_paths[kind] = (report_json, report_md)
+
+            commands = []
+            packet = task_file.read_text()
+            section = re.search(r"(?ms)^## Run these\s*\n(.*?)(?=^## |\Z)", packet)
+            if section:
+                for line in section.group(1).splitlines():
+                    match = re.match(r"\s*[-*]\s+`([^`]+)`", line)
+                    if match:
+                        commands.append(match.group(1))
+            commands.append(" ".join(self.cfg["gate"]["post_merge_check"]))
+            commands_text = "\n".join(f"{i}. {command}" for i, command in enumerate(commands, 1))
+            snapshot = self._checks_snapshot(t["worktree"])
+            ws, pane = herdr.workspace_create(t["worktree"], f"{run_id}-{tid}-checks")
+            sessions = {}
+            try:
+                for kind in ("review", "test"):
+                    role = cfg[kind]
+                    base = re.sub(r"[^a-z0-9_-]", "-", f"{run_id}-{tid}".lower())[:27].rstrip("-")
+                    name = f"{base}-{'rev' if kind == 'review' else 'test'}"
+                    report_json, report_md = session_paths[kind]
+                    args = M.launch_args(role) + ["--permission-mode", "auto", "--add-dir", str(run_dir)]
+                    herdr.agent_start(name, pane, args, self.cfg["herdr"]["agent_start_timeout_ms"],
+                                      kind="claude", labels={"agentkit.run": run_id,
+                                                              "agentkit.check": kind},
+                                      argv_prefix=M.claude_env_prefix(role["code_mode"], os.environ.get("PATH")))
+                    prompt = (SCRIPT_DIR / "prompts" / f"check-{kind}.md").read_text().format(
+                        run=run_id, task=tid, worktree=t["worktree"], task_file=task_file.resolve(),
+                        diff=diff.resolve(), checklist=(SCRIPT_DIR / "prompts" / "review-checklist.md").resolve(),
+                        report_json=report_json.resolve(), report_md=report_md.resolve(), log_dir=log_dir.resolve(),
+                        check_id=check_id, commands=commands_text)
+                    herdr.agent_prompt(name, prompt, self.cfg["herdr"]["prompt_ack_timeout_ms"])
+                    sessions[kind] = {"agent": name, "verdict": None,
+                                      "report_json": self.rel(report_json), "report_md": self.rel(report_md)}
+            except Exception:
+                with contextlib.suppress(Exception):
+                    herdr.workspace_close(ws)
+                raise
+
+            t["checks"] = {"status": "running", "check_id": check_id, "space": ws,
+                           "started_at": now(), "snapshot": snapshot, "sessions": sessions}
+            self.store.save(state)
+            log_event(state, "checks_started", task=tid)
+            self._append_task_file(t, "Checks started", [
+                f"- Review: `{sessions['review']['agent']}`; model `{cfg['review']['model']}`; "
+                f"effort `{cfg['review']['effort']}`; Code Mode `{cfg['review']['code_mode']}`",
+                f"- Test: `{sessions['test']['agent']}`; model `{cfg['test']['model']}`; "
+                f"effort `{cfg['test']['effort']}`; Code Mode `{cfg['test']['code_mode']}`",
+            ])
+            return {"task": tid, "check_id": check_id,
+                    "sessions": {kind: session["agent"] for kind, session in sessions.items()}}
+
+    def _finish_checks(self, run_id: str, tid: str, check_id: str, status: str,
+                       reports: dict, failed: list[str] | None = None, note: str = "") -> None:
+        with self.txn(run_id) as state:
+            t = state["tasks"][tid]
+            checks = t.get("checks") or {}
+            if checks.get("check_id") != check_id:
+                raise SchedulerError(f"{tid}: checks changed while waiting")
+            checks["status"] = status
+            checks["failed"] = list(failed or [])
+            lines = []
+            if note:
+                lines.append(f"- Result: {note}")
+            for kind, session in checks["sessions"].items():
+                report = reports.get(kind)
+                if report:
+                    session["verdict"] = report["verdict"]
+                    lines.append(f"- {kind}: **{report['verdict']}** — {report.get('summary', '')}")
+                else:
+                    lines.append(f"- {kind}: no valid report")
+                lines.append(f"  - Report: `{session['report_md']}`")
+            log_event(state, f"checks_{status}", task=tid)
+            self._append_task_file(t, f"Checks: {'PASS' if status == 'passed' else 'FAIL'}", lines)
+
+    def check_wait(self, run_id: str, tid: str, timeout_s: float | None = None, interval_s: float = 5,
+                   sleep=time.sleep, clock=time.monotonic) -> dict:
+        timeout_s = self.checks_cfg()["timeout_seconds"] if timeout_s is None else timeout_s
+        deadline = clock() + timeout_s
+        while True:
+            state = self.store.load(run_id)
+            t = state["tasks"][tid]
+            checks = t.get("checks") or {}
+            if checks.get("status") != "running":
+                raise SchedulerError(f"{tid}: checks are not running")
+            sessions = checks["sessions"]
+            reports = {}
+            for kind, session in sessions.items():
+                try:
+                    report = json.loads((self.workspace_root / session["report_json"]).read_text())
+                except (OSError, ValueError):
+                    continue
+                if (isinstance(report, dict) and report.get("check_id") == checks["check_id"]
+                        and report.get("task_id") == tid and report.get("check") == kind
+                        and report.get("verdict") in ("PASS", "FAIL")):
+                    reports[kind] = report
+
+            report_paths = {kind: sessions[kind]["report_md"] for kind in reports}
+            failed = [kind for kind, report in reports.items() if report["verdict"] == "FAIL"]
+            herdr = self.herdr_for(state)
+            if failed:
+                with contextlib.suppress(Exception):
+                    herdr.workspace_close(checks["space"])
+                self._finish_checks(run_id, tid, checks["check_id"], "failed", reports, failed=failed)
+                return {"result": "fail", "failed": failed, "reports": report_paths,
+                        "next": [f"task new --repair-of {t['packet']} ... then repair (same worker)"]}
+
+            if len(reports) == len(sessions) and all(r["verdict"] == "PASS" for r in reports.values()):
+                changed = self._checks_snapshot(t["worktree"]) != checks["snapshot"]
+                with contextlib.suppress(Exception):
+                    herdr.workspace_close(checks["space"])
+                if changed:
+                    self._finish_checks(run_id, tid, checks["check_id"], "failed", reports,
+                                        failed=["worktree"], note="a checker changed the worktree")
+                    return {"result": "fail", "failed": ["worktree"], "reports": report_paths,
+                            "reason": "a checker changed the worktree",
+                            "next": [f"task new --repair-of {t['packet']} ... then repair (same worker)"]}
+                self._finish_checks(run_id, tid, checks["check_id"], "passed", reports)
+                return {"result": "pass", "reports": report_paths,
+                        "next": [f"mark-reviewed --run {run_id} --task {tid} --verdict PASS --report "
+                                 f"{sessions['review']['report_md']}"]}
+
+            blocked, lost = [], []
+            for kind, session in sessions.items():
+                if kind in reports:
+                    continue
+                rec, agent_state = herdr.agent_record(session["agent"])
+                if agent_state == "blocked":
+                    blocked.append(session["agent"])
+                elif agent_state == "absent":
+                    lost.append(kind)
+            if blocked:
+                agent = blocked[0]
+                return {"result": "blocked", "agent": agent,
+                        "next": f"hc read --lines 80 {agent}, then decision ask --kind worker_approval --task {tid}"}
+            if lost:
+                with contextlib.suppress(Exception):
+                    herdr.workspace_close(checks["space"])
+                self._finish_checks(run_id, tid, checks["check_id"], "lost", reports, failed=lost)
+                return {"result": "lost", "kinds": lost}
+            if clock() >= deadline:
+                return {"result": "timeout"}
+            sleep(interval_s)
+
+    def check_status(self, run_id: str, tid: str) -> dict | None:
+        return self.store.load(run_id)["tasks"][tid].get("checks")
 
     def collect(self, run_id: str, tid: str) -> dict:
         with self.txn(run_id) as state:
@@ -2078,6 +2310,10 @@ class Scheduler:
                 if prev.exists():
                     prev.rename(rp.with_name(f"{tid}.attempt{t['attempts']}.{ext}"))
             wid = t["worker"]
+            checks = t.get("checks") or {}
+            if checks.get("status") == "running" and checks.get("space"):
+                self.herdr_for(state).workspace_close(checks["space"])
+                checks["status"] = "cancelled"
             transition_task(state, tid, "RUNNING", "repair dispatched", major_repairs=t["major_repairs"] + 1,
                             attempts=t["attempts"] + 1, active_packet=packet)
             t["dispatched_at"] = dispatch_time()
@@ -3294,6 +3530,18 @@ def build_parser() -> argparse.ArgumentParser:
     wa.add_argument("--task", action="append", default=[], help="limit to these tasks (repeat)")
     wa.add_argument("--timeout", type=float, default=540, help="seconds (default 540)")
     wa.add_argument("--interval", type=float, default=10, help="poll interval seconds")
+    ck = sub.add_parser("check", help="start, wait for, or inspect review/test checks")
+    cks = ck.add_subparsers(dest="action", required=True)
+    cs = cks.add_parser("start", help="start parallel review and test sessions")
+    cs.add_argument("--run", required=True)
+    cs.add_argument("--task", required=True)
+    cw = cks.add_parser("wait", help="wait for the checks to finish")
+    cw.add_argument("--run", required=True)
+    cw.add_argument("--task", required=True)
+    cw.add_argument("--timeout", type=float)
+    cst = cks.add_parser("status", help="show saved check state")
+    cst.add_argument("--run", required=True)
+    cst.add_argument("--task", required=True)
     co = sub.add_parser("collect", help="validate a worker report against git evidence")
     co.add_argument("--run", required=True)
     co.add_argument("--task", required=True)
@@ -3431,6 +3679,13 @@ def main(argv=None) -> int:
             out = _decision_cli(s, a)
         elif a.cmd == "wait":
             out = s.wait(a.run, a.task or None, a.timeout, a.interval)
+        elif a.cmd == "check":
+            if a.action == "start":
+                out = s.check_start(a.run, a.task)
+            elif a.action == "wait":
+                out = s.check_wait(a.run, a.task, a.timeout)
+            else:
+                out = s.check_status(a.run, a.task)
         elif a.cmd == "relaunch":
             out = s.relaunch(a.run, a.task, a.launch)
         elif a.cmd == "collect":
@@ -3469,7 +3724,7 @@ def main(argv=None) -> int:
                 return 2
             if a.cmd == "verify" and out.get("exit_code"):
                 return 1
-            if a.cmd in ("wait", "decision") and out.get("result") == "timeout":
+            if a.cmd in ("wait", "decision", "check") and out.get("result") == "timeout":
                 return 3
         return 0
     except SchedulerError as e:

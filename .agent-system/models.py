@@ -164,6 +164,16 @@ def binary(kind: str) -> str:
     return kind
 
 
+def claude_env_prefix(code_mode: bool, path: str | None) -> list[str]:
+    """Return env argv entries shared by Claude Code sessions started through Herdr."""
+    prefix = ["env", f"PATH={path}"] if path is not None else []
+    if code_mode:
+        if not prefix:
+            prefix.append("env")
+        prefix.append("CLAUDE_CODE_EXPERIMENTAL_CODE_MODE=1")
+    return prefix
+
+
 def launch_args(role: dict, cwd: str | None = None, add_dirs: tuple = (), worker: bool = False) -> list[str]:
     """Arguments to start `role` ({kind, model, effort[, launch_args]}) after `herdr agent start --`."""
     if role.get("launch_args"):
