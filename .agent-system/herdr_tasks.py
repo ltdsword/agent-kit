@@ -227,6 +227,7 @@ def sync(sched, state, runner=subprocess.run, adopt=None) -> None:
                     continue
 
                 task_id_num = str(entry["id"])
+                pending_agent = False
                 if status.startswith("CLOSED_"):
                     # Best effort note (status only works on started tasks), then out of Needs you / To do.
                     _run(runner, ["herdr-task", "status", "--folder", folder, task_id_num,
@@ -246,6 +247,9 @@ def sync(sched, state, runner=subprocess.run, adopt=None) -> None:
                             continue
                         if address:
                             entry["address"] = address
+                    # The worker's terminal may not exist yet (the state is saved before it starts):
+                    # leave the fingerprint unseen so the next save attaches it.
+                    pending_agent = bool(agent_name) and address is None
                     text = ("Working" if task.get("attempts", 0) <= 1
                             and not task.get("major_repairs", 0)
                             else f"Fix round {task.get('major_repairs') or task.get('attempts', 1) - 1}")
@@ -263,7 +267,7 @@ def sync(sched, state, runner=subprocess.run, adopt=None) -> None:
                     result = _run(runner, ["herdr-task", "done", "--folder", folder, task_id_num])
                 else:
                     continue
-                if result is not None:
+                if result is not None and not (status == "RUNNING" and pending_agent):
                     entry["seen"] = fingerprint
             except Exception:
                 continue
