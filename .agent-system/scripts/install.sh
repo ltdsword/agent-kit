@@ -172,6 +172,27 @@ install_agent() {  # install_agent <dest>: scout.md, its stamp, and the kit's sc
   do_ cp -r "$SRC/.claude/skills/agent-kit-research" "$1/.claude/skills/agent-kit-research"
 }
 
+install_hooks() {  # install_hooks <dest>: workspace hook wrappers (scan-secrets)
+  local hook="$1/.claude/hooks/scan-secrets.sh"
+  local template="$SRC/.agent-system/templates/hooks/scan-secrets.sh"
+  if [ ! -e "$hook" ]; then
+    do_ mkdir -p "$1/.claude/hooks"
+    do_ cp "$template" "$hook"
+    do_ chmod 755 "$hook"
+    if [ $DRY -eq 1 ]; then echo "[dry-run] hooks: scan-secrets wrapper installed"
+    else echo "hooks: scan-secrets wrapper installed"; fi
+  elif grep -Fqx '# agent-kit:scan-secrets-wrapper' "$hook"; then
+    if ! cmp -s "$hook" "$template"; then
+      do_ cp "$template" "$hook"
+      do_ chmod 755 "$hook"
+      if [ $DRY -eq 1 ]; then echo "[dry-run] hooks: scan-secrets wrapper updated"
+      else echo "hooks: scan-secrets wrapper updated"; fi
+    fi
+  else
+    echo "hooks: own scan-secrets.sh kept"
+  fi
+}
+
 merge_settings() {  # merge_settings <settings.json> [<real repo path>]: deny rules, chat-id hooks (+ additionalDirectories)
   if [ $DRY -eq 1 ]; then echo "[dry-run] merge deny rules${2:+ and additionalDirectories $2} into $1"; return; fi
   python3 - "$1" "$SRC/.agent-system/templates/claude-settings.json" "${2:-}" <<'PY'
@@ -499,6 +520,7 @@ PY
     [ -e "$dest/.gitignore" ] || printf '.orchestrator/\nworktrees/\n**/__pycache__/\n' > "$dest/.gitignore"
   fi
   install_agent "$dest"
+  install_hooks "$dest"
   merge_settings "$dest/.claude/settings.json" "${repo_paths[0]}"
   write_instructions "$dest"
   if [ $DRY -eq 1 ]; then
@@ -651,6 +673,7 @@ PY
   echo "updating kit in $dest from $SRC"
   copy_kit "$dest"
   install_agent "$dest"
+  install_hooks "$dest"
   merge_settings "$dest/.claude/settings.json" "$repo"
   write_instructions "$dest"
   python3 - "$SRC/.agent-system/config.json" "$dest/.agent-system/config.json" <<'PY'
@@ -690,6 +713,7 @@ with open(dst, "w") as f:
 PY
   fi
   install_agent "$TARGET"
+  install_hooks "$TARGET"
   merge_settings "$TARGET/.claude/settings.json"
   write_instructions "$TARGET"
   if ! grep -qE '^/?\.orchestrator/?$' "$TARGET/.gitignore" 2>/dev/null; then
