@@ -7,7 +7,7 @@ also written to .claude/settings.json and the scout's to .claude/agents/scout.md
 
     kitconfig.py --workspace DIR [--model-orchestrator M] [--effort-orchestrator E]
                  [--model-scout M] [--effort-scout E] [--model-worker M] [--effort-worker E]
-                 [--num-worker N] [--list] [--show] [--no-input]
+                 [--num-worker N] [--repo NAME] [--list] [--show] [--no-input]
 
 A model is an ID or alias (the program is worked out from it) or <program>/<model> for an
 unverified program. Unknown names print a table to choose from (picked by number on a terminal).
@@ -167,6 +167,12 @@ def describe(cfg: dict) -> str:
         lines.append(f"{role:13} {r['kind']:9} {r['model']:22} {str(r['effort'] or '-'):8} {status}")
     lines.append(f"workers: {num_workers(cfg)} (run in parallel; up to {cfg['limits']['max_tasks_per_request']} "
                  "tasks per request)")
+    project = cfg.get("project", {})
+    repos = project.get("repos")
+    if isinstance(repos, list):
+        lines.append("repos:")
+        for name in repos:
+            lines.append(f"{'*' if name == project.get('path') else ' '} {name}")
     return "\n".join(lines)
 
 
@@ -194,6 +200,7 @@ def main(argv=None, herdr=None) -> int:
         ap.add_argument(f"--model-{role}")
         ap.add_argument(f"--effort-{role}")
     ap.add_argument("--num-worker", type=int, help=f"number of parallel workers (1..{MAX_WORKERS})")
+    ap.add_argument("--repo", help="switch the active linked repository")
     ap.add_argument("--list", action="store_true", help="show every known model and exit")
     ap.add_argument("--show", action="store_true", help="show the current roles and exit")
     ap.add_argument("--no-input", action="store_true", help="never prompt (fail on unknown names)")
@@ -208,6 +215,28 @@ def main(argv=None, herdr=None) -> int:
     except (OSError, json.JSONDecodeError) as e:
         print(f"error: cannot read {path}: {e}", file=sys.stderr)
         return 1
+    if a.repo:
+        project = cfg.get("project", {})
+        repos = project.get("repos") if isinstance(project, dict) else None
+        if not isinstance(repos, list):
+            print("error: this workspace links one repo", file=sys.stderr)
+            return 2
+        if a.repo not in repos:
+            print(f"error: unknown repo {a.repo!r}; choose one of: {', '.join(repos)}", file=sys.stderr)
+            return 2
+        for state_path in sorted((a.workspace / ".orchestrator" / "runs").glob("*/state.json")):
+            try:
+                state = json.loads(state_path.read_text())
+            except (OSError, json.JSONDecodeError):
+                continue
+            if isinstance(state, dict) and state.get("status") == "RUNNING":
+                print(f"error: cannot switch repos while run {state_path.parent.name} is RUNNING",
+                      file=sys.stderr)
+                return 2
+        project["path"] = a.repo
+        cfg["project"] = project
+        path.write_text(json.dumps(cfg, indent=2) + "\n")
+        print(f"active repo: {a.repo}")
     if a.show:
         print(describe(cfg))
         return 0

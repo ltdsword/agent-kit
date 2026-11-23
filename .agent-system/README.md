@@ -22,9 +22,9 @@ User request -> orchestrator: configured program + model (default Claude Code, O
 
 | Path | Purpose |
 |---|---|
-| `config.json` | Program/model/effort per role (orchestrator, scout, worker; set with `agent-kit config`), pool size, task cap and parallelism (3 by default; `agent-kit config --num-worker=N`, 1..10), max 2 fix rounds per task, 3 research rounds, gate commands |
+| `config.json` | Program/model/effort per role (orchestrator, scout, worker; set with `agent-kit config`), active repo (`project.path`), linked repos for multi-repo workspaces (`project.repos`), pool size, task cap and parallelism (3 by default; `agent-kit config --num-worker=N`, 1..10), max 2 fix rounds per task, 3 research rounds, gate commands |
 | `models.py` | Model registry: Herdr agent programs (Claude Code and Codex verified, others unverified), Claude list, Codex catalog, effort checks, pick-from table |
-| `kitconfig.py` | `agent-kit config`: choose program/model/effort per role (flags, or interactive on a terminal) |
+| `kitconfig.py` | `agent-kit config`: choose program/model/effort per role, switch linked repos with `--repo NAME`, or show current settings |
 | `kitstart.py` | `agent-kit start` / `continue`: open Herdr and launch the orchestrator with its program/model/effort, or resume its last chat |
 | `agentctl.py` | Agent Hub connector: enable the workspace, preview a sync, deliver queued commands, sync status and documents, and manage the connector |
 | `hubctl.py` | Agent Hub account, computer registration, local backend and proxy-setup commands |
@@ -39,7 +39,7 @@ User request -> orchestrator: configured program + model (default Claude Code, O
 | `prompts/architecture-readiness.md` | Planning gate checklist (a)-(e) |
 | `scripts/doctor.sh` | Tooling/model/integration report (`--probe-codex` for a live model check) |
 | `scripts/verify.sh` | Stack-detecting quality gate (`--quick` for post-merge smoke) |
-| `scripts/install.sh` | `agent-kit create/update/config/start [--folder=<repo>]`: create `<repo>.workspace` next to the repo with the kit, or refresh it (`docs/WORKSPACE-SETUP.md` section 4). `agent-kit <repo>`: legacy in-repo install. `agent-kit --version`: kit version (and the workspace's, in `.agent-system/VERSION`) |
+| `scripts/install.sh` | `agent-kit create/update/config/start`: create a workspace with one or more linked repos, refresh it, configure models/repos, or start it (`docs/WORKSPACE-SETUP.md` section 4). `agent-kit <repo>`: legacy in-repo install. `agent-kit --version`: kit version (and the workspace's, in `.agent-system/VERSION`) |
 | `docs/WORKSPACE-SETUP.md` | Rule for work projects: tooling in `<repo>.workspace/`, repo via symlink (workspace mode) |
 | `docs/SKILLS.md` | Optional engineering skills per role (scout research, Opus architecture, Codex worker discipline): inventory, install, update, removal |
 | `docs/DECISION-HUB-PLAN.md` | Agent Hub plan (planned, not built): web dashboard, decisions, prompts and reports per workspace, local backend |
@@ -51,10 +51,10 @@ User request -> orchestrator: configured program + model (default Claude Code, O
 | `~/.codex/worker.config.toml` | Personal Codex profile used by `codex --profile worker` |
 
 **Two roots.** The workspace (the folder holding `.agent-system/`) keeps config, state, task files and
-worktrees. The git repo is `config.json` `project.path` (e.g. the symlink `thrift-demo -> ../thrift-demo`);
-every git command runs there, never in the workspace. Without `project.path` the kit runs in-repo (both
-roots the same). Worktrees live in `pool.worktree_root`, outside the repo: `worktrees/` in the workspace
-(`worker-1..N`, `integration-<run>`).
+worktrees. The active git repo is `config.json` `project.path` (e.g. the symlink `thrift-demo -> ../thrift-demo`);
+for a multi-repo workspace, `project.repos` lists all linked repo names. Scheduler git commands use
+only the active repo, never the workspace. Without `project.path` the kit runs in-repo (both roots the same). Worktrees live in
+`pool.worktree_root`, outside the repo: `worktrees/` in the workspace (`worker-1..N`, `integration-<run>`).
 
 ## Configuration
 
@@ -64,6 +64,17 @@ roots the same). Worktrees live in `pool.worktree_root`, outside the repo: `work
 | `herdr.alerts` | `true` (default): show in-app alerts for decisions, blocked workers and finished runs; set `false` to disable |
 | `herdr.artifacts` | `true` (default): publish a board for each run and decision cards in the Herdr app; set `false` to disable |
 | `herdr.tasks` | `true` (default): show each run's tasks in Herdr's Tasks panel (state, live worker, status line) instead of the run board; closing a run (`run close`, or a passing `verify`) marks its unfinished tasks done; set `false` for the board. |
+| `project.path` | Active repo symlink name; the scheduler runs one repo at a time. |
+| `project.repos` | Symlink names for a multi-repo workspace; switch the active one with `agent-kit config --repo NAME`. Single-repo workspaces may omit this key. |
+
+### Creating a workspace
+
+`agent-kit create [--name=N] [--location=DIR] [--repo=PATH ...]` creates a workspace at
+`location/name` and links each selected Git repo by its folder name. With no create options on a
+terminal, the create dialog or terminal asks for a workspace name, location, and one or more repos;
+defaults use the current folder and its Git repo when it is the repo's top folder. Use `--folder=<repo>`
+to keep the traditional sibling workspace layout. `agent-kit config --repo NAME` changes the active
+repo when no run is `RUNNING`; `agent-kit config --show` marks the active repo.
 
 ## Commands (all implemented; `python3 .agent-system/scheduler.py <cmd> --help`)
 

@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # agent-kit: copy the orchestration kit into a project workspace, or update one.
-#   agent-kit create [--folder=<repo>] [--dry-run] [--init-git] [--no-hub] [model options]
+#   agent-kit create [--folder=<repo> | --name N --location DIR --repo PATH ...] [--dry-run] [--init-git] [--no-hub] [model options]
 #   agent-kit update [--folder=<repo>] [--dry-run] [--force-agent] [--no-hub]
-#   agent-kit config [--folder=<repo>] [model options] [--show] [--list]
+#   agent-kit config [--folder=<repo>] [--repo NAME] [model options] [--show] [--list]
 #   agent-kit start  [--folder=<repo>] [--dry-run] [--no-attach]   open Herdr + launch the orchestrator
 #   agent-kit continue [--folder=<repo>] [--session=ID] [--force] [--dry-run] [--no-attach]
 #   agent-kit create-user|reset-password --name=<u> | hub-login --name=<u> [--url=<proxy>] [--computer-name=<n>]
@@ -31,7 +31,8 @@ SRC="$(cd "$(dirname "$SELF")/../.." && pwd -P)"   # kit home: holds .agent-syst
 usage() { awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' "$SELF"; }  # the header comment
 die() { echo "error: $*" >&2; exit 1; }
 
-CMD=""; DRY=0; FORCE_AGENT=0; FOLDER=""; TARGET=""; MODEL_ARGS=(); NEW_ARGS=(); NO_ATTACH=0; FORCE=0; SESSION=""; INIT_GIT=0; SHOW_VERSION=0; NO_HUB=0
+CMD=""; DRY=0; FORCE_AGENT=0; FOLDER=""; TARGET=""; MODEL_ARGS=(); NEW_ARGS=(); REPO_ARGS=(); NO_ATTACH=0; FORCE=0; SESSION=""; INIT_GIT=0; SHOW_VERSION=0; NO_HUB=0; NO_INPUT=0
+CREATE_NAME=""; CREATE_LOCATION=""
 is_hub_command() {
   case "$1" in
     create-user|reset-password|hub-login|hub|proxy-setup) return 0 ;;
@@ -44,13 +45,20 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --model-*=*|--effort-*=*|--num-worker=*) MODEL_ARGS+=("$1") ;;
     --model-*|--effort-*|--num-worker) [ $# -ge 2 ] || die "$1 needs a value"; MODEL_ARGS+=("$1=$2"); shift ;;
-    --show|--list|--no-input) MODEL_ARGS+=("$1") ;;
+    --show|--list) MODEL_ARGS+=("$1") ;;
+    --no-input) MODEL_ARGS+=("$1"); NO_INPUT=1 ;;
     --no-attach) NO_ATTACH=1 ;;
     --force) FORCE=1 ;;
     --session=*) SESSION="${1#--session=}"; [ -n "$SESSION" ] || die "--session needs a value" ;;
     --session) [ $# -ge 2 ] || die "--session needs a value"; SESSION="$2"; shift ;;
     --folder=*) FOLDER="${1#--folder=}"; [ -n "$FOLDER" ] || die "--folder needs a value" ;;
     --folder) [ $# -ge 2 ] || die "--folder needs a value"; FOLDER="$2"; shift ;;
+    --name=*) CREATE_NAME="${1#--name=}"; [ -n "$CREATE_NAME" ] || die "--name needs a value" ;;
+    --name) [ $# -ge 2 ] || die "--name needs a value"; CREATE_NAME="$2"; [ -n "$CREATE_NAME" ] || die "--name needs a value"; shift ;;
+    --location=*) CREATE_LOCATION="${1#--location=}"; [ -n "$CREATE_LOCATION" ] || die "--location needs a value" ;;
+    --location) [ $# -ge 2 ] || die "--location needs a value"; CREATE_LOCATION="$2"; [ -n "$CREATE_LOCATION" ] || die "--location needs a value"; shift ;;
+    --repo=*) value="${1#--repo=}"; [ -n "$value" ] || die "--repo needs a value"; REPO_ARGS+=("$value") ;;
+    --repo) [ $# -ge 2 ] || die "--repo needs a value"; REPO_ARGS+=("$2"); [ -n "$2" ] || die "--repo needs a value"; shift ;;
     --dry-run) DRY=1 ;;
     --force-agent) FORCE_AGENT=1 ;;
     --init-git) INIT_GIT=1 ;;
@@ -72,6 +80,18 @@ done
   || die "model options only apply to create and config"
 [ $INIT_GIT -eq 0 ] || [ "$CMD" = create ] || [ -n "$TARGET" ] || die "--init-git only applies to create"
 [ $NO_HUB -eq 0 ] || [ "$CMD" = create ] || [ "$CMD" = update ] || die "--no-hub only applies to create and update"
+[ -z "$CREATE_NAME$CREATE_LOCATION" ] || [ "$CMD" = create ] || die "--name and --location only apply to create"
+if [ ${#REPO_ARGS[@]} -gt 0 ]; then
+  case "$CMD" in
+    create) ;;
+    config) for value in "${REPO_ARGS[@]}"; do MODEL_ARGS+=("--repo=$value"); done ;;
+    *) die "--repo only applies to create and config" ;;
+  esac
+fi
+[ "$CMD" != create ] || [ -z "$FOLDER" ] || { [ -z "$CREATE_NAME$CREATE_LOCATION" ] && [ ${#REPO_ARGS[@]} -eq 0 ]; } \
+  || die "--folder cannot be combined with --repo, --name, or --location"
+[ ${#REPO_ARGS[@]} -eq 0 ] || [ "$CMD" = create ] || [ "$CMD" = config ] \
+  || die "--repo only applies to create and config"
 
 do_() { if [ $DRY -eq 1 ]; then echo "[dry-run] $*"; else "$@"; fi; }
 repo_status() { git -C "$1" status --porcelain --untracked-files=all; }
@@ -303,92 +323,183 @@ resolve_folder() {  # sets dest (the workspace) and repo_name from --folder or t
   [ "$dest" != "$SRC" ] || die "destination is the kit home itself"
 }
 
-cmd_create() {
-  local dest repo_name repo link before
-  resolve_folder
-  [ ! -e "$dest/.agent-system" ] || die "$dest already has .agent-system: use 'agent-kit update'"
-  repo="$(dirname "$dest")/$repo_name"
-  ensure_git_repo "$repo"
-  repo="$(cd "$repo" && pwd -P)"
-  [ "$(git -C "$repo" rev-parse --show-toplevel)" = "$repo" ] \
-    || die "$repo is inside a Git repository, not its top folder: pass the repo's top folder"
-  link="$dest/$repo_name"
-  if [ -L "$link" ]; then
-    [ "$(readlink -f "$link")" = "$repo" ] || die "$link is a symlink to somewhere else"
-  elif [ -e "$link" ]; then
-    die "$link exists and is not a symlink to the repo"
-  fi
-  before="$(repo_status "$repo")"
+resolve_path() {  # resolve_path <path> <base>: absolute, ~/ or relative-to-base; resolve symlinks
+  python3 - "$1" "$2" <<'PY'
+import os, sys
+value, base = sys.argv[1:]
+if value == "~":
+    value = os.path.expanduser("~")
+elif value.startswith("~/"):
+    value = os.path.join(os.path.expanduser("~"), value[2:])
+elif not os.path.isabs(value):
+    value = os.path.join(base, value)
+print(os.path.realpath(value))
+PY
+}
 
-  echo "creating workspace $dest for repo $repo (kit from $SRC)"
+cmd_create() {
+  local dest repo_name repo link cwd repo_top default_repo name location dialog dialog_output dialog_rc
+  local ask=0 value index rel
+  local -a repos=() repo_paths=() repo_links=() before_status=() parsed=()
+  cwd="$(pwd -P)"
+  if [ -z "$FOLDER" ] && [ -z "$CREATE_NAME$CREATE_LOCATION" ] && [ ${#REPO_ARGS[@]} -eq 0 ]; then
+    case "$(basename "$cwd")" in
+      ?*.workspace) FOLDER="$cwd" ;;
+    esac
+  fi
+  if [ -n "$FOLDER" ]; then
+    resolve_folder
+    repos+=("$(dirname "$dest")/$repo_name")
+    name="$repo_name"
+    location="$(dirname "$dest")"
+  else
+    repo_top="$(git -C "$cwd" rev-parse --show-toplevel 2>/dev/null || true)"
+    default_repo=""
+    if [ -n "$repo_top" ]; then
+      repo_top="$(resolve_path "$repo_top" "$cwd")"
+      location="$(dirname "$repo_top")"
+      [ "$repo_top" != "$cwd" ] || default_repo="$cwd"
+    else
+      location="$cwd"
+    fi
+    name="$(basename "$cwd").workspace"
+    [ -z "$CREATE_NAME" ] || name="$CREATE_NAME"
+    [ -z "$CREATE_LOCATION" ] || location="$CREATE_LOCATION"
+    if [ -z "$CREATE_NAME$CREATE_LOCATION" ] && [ ${#REPO_ARGS[@]} -eq 0 ] \
+       && [ "$NO_INPUT" -eq 0 ] && { { [ -t 0 ] && [ -t 1 ]; } || [ "${AGENT_KIT_ASSUME_TTY:-0}" = 1 ]; }; then
+      ask=1
+      dialog="${AGENT_KIT_CREATE_DIALOG:-$SRC/.agent-system/scripts/create-dialog.sh}"
+      if [ -x "$dialog" ]; then
+        local -a dialog_args=(--cwd "$PWD" --name "$name" --location "$location")
+        [ -z "$default_repo" ] || dialog_args+=(--repo "$default_repo")
+        if dialog_output="$("$dialog" "${dialog_args[@]}")"; then
+          printf '%s\n' "$dialog_output" | python3 -c '
+import json, sys
+lines = sys.stdin.read().splitlines()
+if len(lines) != 1:
+    raise SystemExit("create dialog must print one JSON line")
+data = json.loads(lines[0])
+if (not isinstance(data, dict) or not isinstance(data.get("name"), str)
+        or not isinstance(data.get("location"), str) or not isinstance(data.get("repos"), list)
+        or not data["repos"] or any(not isinstance(path, str) or not path for path in data["repos"])):
+    raise SystemExit("create dialog returned invalid name, location, or repos")
+' || die "create dialog returned invalid JSON"
+          while IFS= read -r -d '' value; do parsed+=("$value"); done < <(
+            printf '%s\n' "$dialog_output" | python3 -c '
+import json, sys
+data = json.loads(sys.stdin.readline())
+for value in [data["name"], data["location"], *data["repos"]]:
+    sys.stdout.buffer.write(value.encode() + bytes([0]))
+')
+          name="${parsed[0]}"
+          location="${parsed[1]}"
+          repos=("${parsed[@]:2}")
+          ask=0
+        else
+          dialog_rc=$?
+          case "$dialog_rc" in
+            1) die "cancelled" ;;
+            2) ;;
+            *) die "create dialog failed with exit $dialog_rc" ;;
+          esac
+        fi
+      fi
+    fi
+    if [ "$ask" -eq 1 ]; then
+      read -e -i "$name" -p "Workspace name: " value || value="$name"
+      name="${value:-$name}"
+      read -e -i "$location" -p "Location: " value || value="$location"
+      location="${value:-$location}"
+      value=""
+      read -e -i "$default_repo" -p "Repo 1: " value || value="$default_repo"
+      [ -n "$value" ] || die "at least one repo is required"
+      repos+=("$value")
+      index=2
+      while :; do
+        value=""
+        read -e -i "" -p "Repo $index (empty: done): " value || value=""
+        [ -n "$value" ] || break
+        repos+=("$value")
+        index=$((index + 1))
+      done
+    elif [ ${#REPO_ARGS[@]} -gt 0 ]; then
+      repos=("${REPO_ARGS[@]}")
+    elif [ ${#repos[@]} -eq 0 ] && [ -n "$default_repo" ]; then
+      repos+=("$default_repo")
+    fi
+    [ -n "$name" ] || die "workspace name is required"
+    case "$name" in */*) die "workspace name cannot contain /" ;; esac
+    case "$name" in *.workspace) ;; *) name="$name.workspace" ;; esac
+    location="$(resolve_path "$location" "$cwd")"
+    dest="$(resolve_path "$name" "$location")"
+    repo_name="${name%.workspace}"
+  fi
+  if [ ${#repos[@]} -eq 0 ]; then
+    if [ -n "${repo_top:-}" ]; then
+      die "$cwd is inside a Git repository, not its top folder; pass --repo $repo_top"
+    else
+      die "$cwd is not a Git repository; pass --repo"
+    fi
+  fi
+  [ ! -e "$dest/.agent-system" ] || die "$dest already has .agent-system: use 'agent-kit update'"
+  [ "$dest" != "$SRC" ] || die "destination is the kit home itself"
+  for value in "${repos[@]}"; do
+    repo="$(resolve_path "$value" "$cwd")"
+    [ -d "$repo" ] || die "$repo does not exist"
+    repo_name="$(basename "$repo")"
+    for index in "${!repo_links[@]}"; do
+      [ "${repo_links[$index]}" != "$repo_name" ] \
+        || die "${repo_paths[$index]} and $repo have the same basename '$repo_name'"
+    done
+    if python3 - "$dest" "$repo" <<'PY'
+import os, sys
+dest, repo = sys.argv[1:]
+try:
+    inside = os.path.commonpath((dest, repo)) == repo
+except ValueError:
+    inside = False
+raise SystemExit(0 if inside else 1)
+PY
+    then
+      die "$dest is inside a chosen repo or equals it: $repo"
+    fi
+    ensure_git_repo "$repo"
+    repo="$(cd "$repo" && pwd -P)"
+    [ "$(git -C "$repo" rev-parse --show-toplevel)" = "$repo" ] \
+      || die "$repo is inside a Git repository, not its top folder: pass the repo's top folder"
+    repo_paths+=("$repo")
+    repo_links+=("$repo_name")
+  done
+  for index in "${!repo_paths[@]}"; do
+    repo="${repo_paths[$index]}"
+    link="$dest/${repo_links[$index]}"
+    if [ -L "$link" ]; then
+      [ "$(readlink -f "$link")" = "$repo" ] || die "$link is a symlink to somewhere else"
+    elif [ -e "$link" ]; then
+      die "$link exists and is not a symlink to the repo"
+    fi
+    before_status+=("$(repo_status "$repo")")
+  done
+  echo "creating workspace $dest for repos ${repo_links[*]} (kit from $SRC)"
   do_ mkdir -p "$dest/gen-tasks" "$dest/worktrees" "$dest/notes"
-  [ -L "$link" ] || do_ ln -s "../$repo_name" "$link"
+  for index in "${!repo_paths[@]}"; do
+    link="$dest/${repo_links[$index]}"
+    if [ ! -L "$link" ]; then
+      rel="$(python3 -c 'import os, sys; print(os.path.relpath(sys.argv[1], sys.argv[2]))' \
+        "${repo_paths[$index]}" "$dest")"
+      do_ ln -s "$rel" "$link"
+    fi
+  done
   copy_kit "$dest"
   if [ $DRY -eq 1 ]; then
-    echo "[dry-run] write .agent-system/config.json (project.path=$repo_name, worktree_root=worktrees)"
-    echo "[dry-run] write CLAUDE.md project notes, AGENTS.md, .gitignore"
+    echo "[dry-run] write .agent-system/config.json (project.path=${repo_links[0]}, project.repos=${repo_links[*]}, worktree_root=worktrees)"
+    echo "[dry-run] write CLAUDE.md notes for ${#repo_paths[@]} repos, AGENTS.md, .gitignore"
   else
-    python3 - "$SRC/.agent-system/config.json" "$dest" "$repo_name" "$repo" <<'PY'
-import json, os, sys
-tpl, dest, name, repo = sys.argv[1:]
-cfg = json.load(open(tpl))
-# A new workspace is never on the hub yet: the kit home may be a live, enabled workspace itself, and a
-# copied workspace_id would make two workspaces fight over one hub identity (409 duplicate_workspace).
-if isinstance(cfg.get("hub"), dict):
-    cfg["hub"].update(enabled=False, workspace_id=None)
-import glob, subprocess
-has = lambda *pats: any(glob.glob(os.path.join(repo, p)) for p in pats)
-c_sources = subprocess.run(["git", "-C", repo, "ls-files", "*.c", "*.cc", "*.cpp", "*.cxx", "*.h", "*.hh", "*.hpp"],
-                           capture_output=True, text=True).stdout.strip() != ""
-# (stack, worker-writable cache dir or None, marker files, build/test command or None)
-stacks = [("Java/Gradle", "~/.gradle", ("build.gradle", "build.gradle.kts", "settings.gradle", "settings.gradle.kts",
-                                        "gradlew"), "./gradlew build"),
-          ("Java/Maven", "~/.m2", ("pom.xml",), "mvn verify"),
-          ("Node", "~/.npm", ("package.json",), "npm test"),
-          ("Go", "~/go/pkg/mod", ("go.mod",), "go test ./..."),
-          ("Rust", "~/.cargo", ("Cargo.toml",), "cargo test"),
-          ("Python", None, ("pyproject.toml", "setup.py", "setup.cfg", "requirements*.txt", "pytest.ini", "tox.ini"),
-           "python3 -m pytest"),
-          ("C/C++ (CMake)", None, ("CMakeLists.txt",),
-           "cmake -S . -B build && cmake --build build && ctest --test-dir build"),
-          ("C/C++ (Conan)", "~/.conan2", ("conanfile.txt", "conanfile.py"), None),
-          ("C/C++ (vcpkg)", "~/.cache/vcpkg", ("vcpkg.json",), None)]
-found = [(name, d, cmd) for name, d, files, cmd in stacks if has(*files)]
-if c_sources and has("Makefile", "makefile", "GNUmakefile") and not has("CMakeLists.txt"):
-    found.append(("C/C++ (make)", None, "make && make test"))
-elif c_sources and not any(n.startswith("C/C++") for n, _, _ in found):
-    found.append(("C/C++", None, None))
-out = {}
-for k, v in cfg.items():  # keep the template's key order; project goes right after the header
-    if k == "project":
-        continue
-    out[k] = v
-    if k == "_comment":
-        out["project"] = {"path": name}
-out.setdefault("project", {"path": name})
-out["pool"]["worktree_root"] = "worktrees"
-dirs = [d for _, d, _ in found if d]
-out["worker"]["writable_dirs"] = dirs
-with open(os.path.join(dest, ".agent-system", "config.json"), "w") as f:
-    json.dump(out, f, indent=2)
-    f.write("\n")
-build = " / ".join(f"`{c}`" for _, _, c in found if c) or "TODO"
-stack = ", ".join(n for n, _, _ in found) or "TODO"
-claude = os.path.join(dest, "CLAUDE.md")
-if not os.path.exists(claude):
-    with open(claude, "w") as f:
-        f.write(f"# {name}\n\n"
-                f"- This folder is the AI workspace (`.agent-system/docs/WORKSPACE-SETUP.md`); the repo is the\n"
-                f"  symlink `{name}/` -> `../{name}`. Never write AI tooling files into the repo.\n"
-                f"- Stack: {stack}\n"
-                f"- Build and test (run inside `{name}/`): {build}\n"
-                f"- Generated code not to edit: TODO\n\n")
-print(f"config.json: project.path={name}, stack={stack}, writable_dirs={dirs}")
-PY
+    write_create_details "$dest" "${repo_links[@]}"
     [ -e "$dest/.gitignore" ] || printf '.orchestrator/\nworktrees/\n**/__pycache__/\n' > "$dest/.gitignore"
   fi
   install_agent "$dest"
-  merge_settings "$dest/.claude/settings.json" "$repo"
+  merge_settings "$dest/.claude/settings.json" "${repo_paths[0]}"
   write_instructions "$dest"
   if [ $DRY -eq 1 ]; then
     echo "[dry-run] choose models (asked on a terminal, or from --model-* options)"
@@ -396,33 +507,145 @@ PY
     echo; echo "== models (change later with: agent-kit config)"
     kitconfig "$dest" ${MODEL_ARGS[@]+"${MODEL_ARGS[@]}"} || die "model choice failed; fix it with: agent-kit config --folder=$dest"
   fi
-  check_repo_unchanged "$repo" "$before"
+  for index in "${!repo_paths[@]}"; do
+    check_repo_unchanged "${repo_paths[$index]}" "${before_status[$index]}"
+  done
   auto_hub "$dest"
   [ $DRY -eq 1 ] || PYTHONDONTWRITEBYTECODE=1 python3 "$dest/.agent-system/scheduler.py" --workspace-root "$dest" pool show >/dev/null \
     || die "the new workspace does not load: check $dest/.agent-system/config.json"
-
   echo
-  echo "done. Next, in $dest:"
-  echo "  1. fill in the TODOs at the top of CLAUDE.md; check gate commands and writable_dirs in .agent-system/config.json"
-  echo "  2. .agent-system/scripts/doctor.sh"
-  echo "  3. agent-kit start   (opens Herdr and launches the orchestrator)"
+  echo "done. Workspace: $dest. Next:"
+  echo "  1. fill in the TODOs at the top of $dest/CLAUDE.md; check gate commands and writable_dirs in .agent-system/config.json"
+  echo "  2. $dest/.agent-system/scripts/doctor.sh"
+  echo "  3. agent-kit start --folder=$dest   (opens Herdr and launches the orchestrator)"
+}
+
+write_create_details() {  # write_create_details <workspace> <repo-link>...
+  python3 - "$SRC/.agent-system/config.json" "$1" "${@:2}" <<'PY'
+import glob, json, os, subprocess, sys
+tpl, dest, *names = sys.argv[1:]
+cfg = json.load(open(tpl))
+if isinstance(cfg.get("hub"), dict):
+    cfg["hub"].update(enabled=False, workspace_id=None)
+stacks = [("Java/Gradle", "~/.gradle", ("build.gradle", "build.gradle.kts", "settings.gradle", "settings.gradle.kts", "gradlew"), "./gradlew build"),
+          ("Java/Maven", "~/.m2", ("pom.xml",), "mvn verify"),
+          ("Node", "~/.npm", ("package.json",), "npm test"),
+          ("Go", "~/go/pkg/mod", ("go.mod",), "go test ./..."),
+          ("Rust", "~/.cargo", ("Cargo.toml",), "cargo test"),
+          ("Python", None, ("pyproject.toml", "setup.py", "setup.cfg", "requirements*.txt", "pytest.ini", "tox.ini"), "python3 -m pytest"),
+          ("C/C++ (CMake)", None, ("CMakeLists.txt",), "cmake -S . -B build && cmake --build build && ctest --test-dir build"),
+          ("C/C++ (Conan)", "~/.conan2", ("conanfile.txt", "conanfile.py"), None),
+          ("C/C++ (vcpkg)", "~/.cache/vcpkg", ("vcpkg.json",), None)]
+repos = [(name, os.path.realpath(os.path.join(dest, name))) for name in names]
+found_by_repo = []
+for name, repo in repos:
+    has = lambda *pats: any(glob.glob(os.path.join(repo, p)) for p in pats)
+    c_sources = subprocess.run(["git", "-C", repo, "ls-files", "*.c", "*.cc", "*.cpp", "*.cxx", "*.h", "*.hh", "*.hpp"],
+                               capture_output=True, text=True).stdout.strip() != ""
+    found = [(stack, cache, command) for stack, cache, files, command in stacks if has(*files)]
+    if c_sources and has("Makefile", "makefile", "GNUmakefile") and not has("CMakeLists.txt"):
+        found.append(("C/C++ (make)", None, "make && make test"))
+    elif c_sources and not any(stack.startswith("C/C++") for stack, _, _ in found):
+        found.append(("C/C++", None, None))
+    found_by_repo.append(found)
+project = {"path": names[0]}
+if len(names) > 1:
+    project["repos"] = names
+out = {}
+for key, value in cfg.items():
+    if key == "project":
+        continue
+    out[key] = value
+    if key == "_comment":
+        out["project"] = project
+out.setdefault("project", project)
+out["pool"]["worktree_root"] = "worktrees"
+dirs = []
+for found in found_by_repo:
+    for _, cache, _ in found:
+        if cache and cache not in dirs:
+            dirs.append(cache)
+out["worker"]["writable_dirs"] = dirs
+with open(os.path.join(dest, ".agent-system", "config.json"), "w") as f:
+    json.dump(out, f, indent=2)
+    f.write("\n")
+descriptions = []
+for (name, repo), found in zip(repos, found_by_repo):
+    build = " / ".join(f"`{command}`" for _, _, command in found if command) or "TODO"
+    stack = ", ".join(stack for stack, _, _ in found) or "TODO"
+    descriptions.append((name, repo, stack, build))
+claude = os.path.join(dest, "CLAUDE.md")
+if not os.path.exists(claude):
+    workspace_name = os.path.basename(dest)
+    if workspace_name.endswith(".workspace"):
+        workspace_name = workspace_name[:-len(".workspace")]
+    with open(claude, "w") as f:
+        f.write(f"# {workspace_name}\n\n")
+        if len(descriptions) == 1:
+            name, repo, stack, build = descriptions[0]
+            target = os.path.relpath(repo, dest)
+            f.write(f"- This folder is the AI workspace (`.agent-system/docs/WORKSPACE-SETUP.md`); the repo is the\n"
+                    f"  symlink `{name}/` -> `{target}`. Never write AI tooling files into the repo.\n"
+                    f"- Stack: {stack}\n"
+                    f"- Build and test (run inside `{name}/`): {build}\n"
+                    "- Generated code not to edit: TODO\n\n")
+        else:
+            f.write("- This folder is the AI workspace (`.agent-system/docs/WORKSPACE-SETUP.md`). Never write AI tooling files into a repo.\n")
+            for index, (name, repo, stack, build) in enumerate(descriptions):
+                f.write(f"- Repo `{name}/` -> {repo}" + (" (active)" if index == 0 else "") + "\n"
+                        f"  Stack: {stack}\n"
+                        f"  Build and test (run inside `{name}/`): {build}\n")
+            f.write("- Switch active repo with `agent-kit config --repo NAME`.\n"
+                    "- Generated code not to edit: TODO\n\n")
+print(f"config.json: project.path={names[0]}, repos={names}, writable_dirs={dirs}")
+PY
 }
 
 cmd_update() {
-  local dest repo_name repo="" before=""
+  local dest repo_name repo="" before="" project_data has_repos active_name link top index
+  local -a listed_repos=() update_paths=() update_before=()
   resolve_folder
   [ -f "$dest/.agent-system/config.json" ] || die "$dest has no kit (.agent-system/config.json): use 'agent-kit create'"
-  repo="$(python3 - "$dest" <<'PY'
+  project_data="$(python3 - "$dest/.agent-system/config.json" <<'PY'
+import json, sys
+print(json.dumps(json.load(open(sys.argv[1])).get("project") or {}))
+PY
+)" || die "cannot read $dest/.agent-system/config.json"
+  has_repos="$(python3 -c 'import json, sys; print("yes" if "repos" in json.loads(sys.argv[1]) else "no")' "$project_data")"
+  if [ "$has_repos" = yes ]; then
+    python3 -c 'import json, sys; p=json.loads(sys.argv[1]); r=p.get("repos"); sys.exit(0 if isinstance(r, list) and r and all(isinstance(n, str) and n for n in r) and p.get("path") in r else 1)' "$project_data" \
+      || die "$dest/.agent-system/config.json has invalid project.path or project.repos"
+    while IFS= read -r -d '' link; do listed_repos+=("$link"); done < <(
+      python3 -c 'import json, os, sys; p=json.loads(sys.argv[1]); sys.stdout.buffer.write(b"".join(os.fsencode(n) + bytes([0]) for n in p["repos"]))' "$project_data")
+    active_name="$(python3 -c 'import json, sys; print(json.loads(sys.argv[1])["path"])' "$project_data")"
+    for link in "${listed_repos[@]}"; do
+      [ -e "$dest/$link" ] && [ -d "$dest/$link" ] \
+        || die "project.repos link '$link' is broken or not a Git repository"
+      repo="$(resolve_path "$link" "$dest")"
+      git -C "$repo" rev-parse --verify HEAD >/dev/null 2>&1 \
+        || die "project.repos link '$link' is broken or not a Git repository"
+      top="$(git -C "$repo" rev-parse --show-toplevel 2>/dev/null || true)"
+      [ "$top" = "$repo" ] || die "project.repos link '$link' is broken or not a Git repository"
+      update_paths+=("$repo")
+      update_before+=("$(repo_status "$repo")")
+    done
+    repo="$(resolve_path "$active_name" "$dest")"
+    do_ mkdir -p "$dest/gen-tasks" "$dest/worktrees" "$dest/notes"
+  else
+    repo="$(python3 - "$dest" "$project_data" <<'PY'
 import json, os, sys
-dest = sys.argv[1]
-p = json.load(open(os.path.join(dest, ".agent-system", "config.json"))).get("project", {}).get("path")
+dest, project = sys.argv[1:]
+p = json.loads(project).get("path")
 print(os.path.realpath(os.path.join(dest, os.path.expanduser(p))) if p else "")
 PY
 )"
-  if [ -n "$repo" ]; then  # workspace mode: the repo must stay untouched
-    git -C "$repo" rev-parse --verify HEAD >/dev/null 2>&1 || die "project.path $repo is not a Git repository"
-    before="$(repo_status "$repo")"
-    do_ mkdir -p "$dest/gen-tasks" "$dest/worktrees" "$dest/notes"
+    if [ -n "$repo" ]; then
+      git -C "$repo" rev-parse --verify HEAD >/dev/null 2>&1 || die "project.path $repo is not a Git repository"
+      before="$(repo_status "$repo")"
+      update_paths+=("$repo")
+      update_before+=("$before")
+      do_ mkdir -p "$dest/gen-tasks" "$dest/worktrees" "$dest/notes"
+    fi
   fi
 
   echo "updating kit in $dest from $SRC"
@@ -437,7 +660,9 @@ missing = [k for k in new if k not in cur and k != "project"]
 print("kept .agent-system/config.json" + (f"; the kit template has new keys: {missing}" if missing else ""))
 PY
   [ $DRY -eq 1 ] || kitconfig "$dest" --no-input >/dev/null  # re-apply chosen models to Claude files
-  [ -z "$repo" ] || check_repo_unchanged "$repo" "$before"
+  for index in "${!update_paths[@]}"; do
+    check_repo_unchanged "${update_paths[$index]}" "${update_before[$index]}"
+  done
   auto_hub "$dest"
   echo "done. Run .agent-system/scripts/doctor.sh in $dest"
 }

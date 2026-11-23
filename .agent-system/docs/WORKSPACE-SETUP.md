@@ -181,6 +181,15 @@ the last active chat (id in `.orchestrator/orchestrator.json`, kept current by t
 hook in `.claude/settings.json`). Workers can be any program Herdr supports; only Claude
 Code and Codex are verified (`models.py`, README "Choosing models").
 
+## Several repos
+
+Create one workspace for several Git repos with `agent-kit create --name=NAME --location=DIR
+--repo=PATH --repo=PATH`. Each repo is linked by its folder name; `project.repos` stores those link
+names and `project.path` selects the active repo. The scheduler uses that one active repo. Switch it
+with `agent-kit config --repo NAME` when no run is `RUNNING`; `agent-kit config --show` marks the active
+link. On a terminal, `agent-kit create` without create options asks for a name, location, and one or
+more repos.
+
 ### 6.5 Tests (built)
 `TestWorkspaceMode` in `tests/test_scheduler.py`: temp layout `repo/` + `repo.workspace/repo -> ../repo`;
 full dispatch -> collect -> integrate -> verify -> cleanup with `git -C repo status --porcelain` empty
