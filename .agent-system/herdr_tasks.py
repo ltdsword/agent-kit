@@ -15,6 +15,8 @@ from pathlib import Path
 def enabled(cfg: dict, env=None) -> bool:
     try:
         env = os.environ if env is None else env
+        if env.get("AGENT_KIT_HERDR_TASKS") == "0":  # tests and scripts: never touch the real task store
+            return False
         herdr = cfg.get("herdr", {}) if isinstance(cfg, dict) else {}
         if not isinstance(herdr, dict) or herdr.get("tasks", True) is not True:
             return False
