@@ -128,6 +128,32 @@ class HerdrTasksTests(unittest.TestCase):
                                         "1", "Working"])
             self.assertEqual(adopted, [(str(scheduler.workspace_root), 1, "pane-1", "codex")])
 
+    def test_running_agent_not_started_yet_is_attached_on_next_sync(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            scheduler = FakeScheduler(tmp)
+            state = {"run_id": "run-one", "workers": {"W1": {"agent_name": "w1-run"}},
+                     "tasks": {"T1": task("T1", "RUNNING", worker="W1")}}
+            live = {"on": False}
+            adopted = []
+
+            def runner(argv, **kwargs):
+                if argv[:2] == ["hc", "get"]:
+                    if not live["on"]:
+                        return subprocess.CompletedProcess(argv, 1, "", "no such terminal")
+                    return subprocess.CompletedProcess(argv, 0, '{"address":"pane-1","state":"live"}', "")
+                if argv[1] == "add":
+                    return subprocess.CompletedProcess(argv, 0, '{"id":1,"key":"run#1"}', "")
+                return subprocess.CompletedProcess(argv, 0, "", "")
+
+            adopt = lambda *args: adopted.append(args) or True
+            H.sync(scheduler, state, runner=runner, adopt=adopt)
+            live["on"] = True
+            H.sync(scheduler, state, runner=runner, adopt=adopt)
+            self.assertEqual(adopted[-1], (str(scheduler.workspace_root), 1, "pane-1", "codex"))
+            adopted.clear()
+            H.sync(scheduler, state, runner=runner, adopt=adopt)
+            self.assertEqual(adopted, [])
+
     def test_repair_status_uses_round_number(self):
         with tempfile.TemporaryDirectory() as tmp:
             scheduler = FakeScheduler(tmp)

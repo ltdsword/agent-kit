@@ -59,3 +59,58 @@ repos to link (>= 1), with Browse buttons and live checks; the answers go back t
 ## Run these
 - `bash -n .agent-system/scripts/create-dialog.sh`
 - `python3 -m pytest -q .agent-system/tests`: expect all passed.
+
+## Worker result - attempt 1 (23/11/26 15:18)
+
+- Status: **done** (worker worker-2, branch `agent/mrepo-t2`)
+- Commits: none, changes left uncommitted (orchestrator commits after review)
+- Files: `.agent-system/herdr-mods/agent-kit-create/main.js`, `.agent-system/herdr-mods/agent-kit-create/mod.json`, `.agent-system/scripts/create-dialog.sh`, `.agent-system/tests/test_create_dialog.py`
+- Scope: OK
+- Tests reported:
+  - `bash -n .agent-system/scripts/create-dialog.sh` -> exit 0
+  - `python3 -m pytest -q .agent-system/tests` -> exit 0
+- Risks:
+  - Herdr runtime UI was not exercised because the task forbids running the real herdr-app.
+  - The optional JavaScript syntax check was skipped because node is unavailable.
+- Not done:
+  - Commit unavailable because .git is read-only in the worker sandbox.
+- Full diff: `.orchestrator/runs/mrepo/reports/T2.diff`
+
+````text
+ .agent-system/herdr-mods/agent-kit-create/main.js  | 240 +++++++++++++++++++++
+ .agent-system/herdr-mods/agent-kit-create/mod.json |   1 +
+ .agent-system/scripts/create-dialog.sh             | 152 +++++++++++++
+ .agent-system/tests/test_create_dialog.py          | 155 +++++++++++++
+ 4 files changed, 548 insertions(+)
+````
+
+(diff is 572 lines; read the full diff file)
+
+## Review round 1: PASS (23/11/26 15:18)
+
+- Verdict: **PASS** -> task is now PASSED (fix rounds used: 0/2)
+- Reviewed HEAD: 7a000976b632, commits 7a000976b632
+- Notes: contract met; Opus minor fix for path import and symlinked repos
+
+# Review mrepo T2 (Herdr dialog) - PASS with Opus minor fix
+
+- create-dialog.sh follows the contract: exit 2 without herdr-app/HC_TERMINAL_ID/status, mod installed via cmp+tmp+mv,
+  request/response JSON via python3, id match, 15 min timeout (env override), cleanup trap. 5 tests pass with a fake herdr-app.
+- main.js: fields, Browse via pickFolder, debounced git check, Create gated on all rows ok, Esc/Cancel writes ok:false.
+- Minor fix (Opus): `import { resolve } from "path"` is not a Herdr mod built-in (AGENTS.md lists fetch, localStorage,
+  fs/promises only) -> hand-written POSIX resolve; git top compared with `realpath` of the folder so symlinked repos pass.
+- Live check in Herdr after integration (mod.open overlay sizing, Input focus) - not testable here.
+
+## Integration: merged (23/11/26 15:38)
+
+- On `agent/integration-mrepo` at 0dab06c3e3a6; `.agent-system/scripts/verify.sh --quick` passed (log `.orchestrator/runs/mrepo/logs/post-merge-T2-a1.log`)
+
+## Final gate: PASS (23/11/26 15:39)
+
+- `.agent-system/scripts/verify.sh` exit 0 on agent/integration-mrepo at 0dab06c3e3a6 (log `.orchestrator/runs/mrepo/logs/verify-1795423125.log`)
+- Task MERGED; run DONE
+
+## Final gate: PASS (23/11/26 15:42)
+
+- `.agent-system/scripts/verify.sh` exit 0 on agent/integration-mrepo at 0dab06c3e3a6 (log `.orchestrator/runs/mrepo/logs/verify-1795423285.log`)
+- Task MERGED; run DONE
