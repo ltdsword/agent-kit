@@ -65,3 +65,60 @@ The scheduler still works on one active repo (`project.path`); `agent-kit config
 ## Run these
 - `bash -n .agent-system/scripts/install.sh`
 - `python3 -m pytest -q .agent-system/tests`: expect all passed.
+
+## Worker result - attempt 1 (23/11/26 15:37)
+
+- Status: **done** (worker worker-1, branch `agent/mrepo-t1`)
+- Commits: none, changes left uncommitted (orchestrator commits after review)
+- Files: `.agent-system/README.md`, `.agent-system/docs/WORKSPACE-SETUP.md`, `.agent-system/kitconfig.py`, `.agent-system/scripts/install.sh`, `.agent-system/tests/test_create_repos.py`
+- Scope: OK
+- Tests reported:
+  - `bash -n .agent-system/scripts/install.sh` -> exit 0
+  - `python3 -m pytest -q .agent-system/tests` -> exit 0
+- Risks:
+  - Single-repo workspaces retain the legacy project.path-only config; project.repos is present for multi-repo workspaces.
+- Not done: none
+- Full diff: `.orchestrator/runs/mrepo/reports/T1.diff`
+
+````text
+ .agent-system/README.md                  |  25 +-
+ .agent-system/docs/WORKSPACE-SETUP.md    |   9 +
+ .agent-system/kitconfig.py               |  31 ++-
+ .agent-system/scripts/install.sh         | 403 ++++++++++++++++++++++++-------
+ .agent-system/tests/test_create_repos.py | 194 +++++++++++++++
+ 5 files changed, 564 insertions(+), 98 deletions(-)
+````
+
+(diff is 831 lines; read the full diff file)
+
+## Review round 1: PASS (23/11/26 15:38)
+
+- Verdict: **PASS** -> task is now PASSED (fix rounds used: 0/2)
+- Reviewed HEAD: e4cd4ebe1298, commits e4cd4ebe1298
+- Notes: flags, defaults, links, config --repo ok; Opus restored next-steps lines
+
+# Review mrepo T1 (create with name/location/repos, config --repo) - PASS with Opus minor fix
+
+- Flags --name/--location/--repo (repeatable) validated per command; --folder legacy path unchanged (also auto when cwd is *.workspace).
+- Defaults: name <cwd>.workspace; location cwd or the repo's parent; repo = cwd only when it is a repo top. Paths abs, ~/,
+  relative; realpath. Dialog via AGENT_KIT_CREATE_DIALOG (default create-dialog.sh): 0 JSON validated, 1 cancel, 2 -> read -e -i prompts.
+- Per repo: ensure_git_repo, top-folder check, same-basename and dest-inside-repo refusals, relative symlinks, unchanged check.
+  project.repos written only for >1 repo (single repo stays as before); writable_dirs union; CLAUDE.md per repo.
+- update checks every project.repos link; kitconfig --repo with RUNNING refusal; --show lists repos.
+- Minor fix (Opus): restored the "Next" steps after create (TODOs, doctor, start --folder).
+- Note: read -i needs bash 4+ (macOS bash 3.2 falls back to the defaults); acceptable since the Herdr dialog/flags cover it.
+- Suite: 301 passed.
+
+## Integration: merged (23/11/26 15:38)
+
+- On `agent/integration-mrepo` at ee57562ad985; `.agent-system/scripts/verify.sh --quick` passed (log `.orchestrator/runs/mrepo/logs/post-merge-T1-a1.log`)
+
+## Final gate: PASS (23/11/26 15:39)
+
+- `.agent-system/scripts/verify.sh` exit 0 on agent/integration-mrepo at 0dab06c3e3a6 (log `.orchestrator/runs/mrepo/logs/verify-1795423125.log`)
+- Task MERGED; run DONE
+
+## Final gate: PASS (23/11/26 15:42)
+
+- `.agent-system/scripts/verify.sh` exit 0 on agent/integration-mrepo at 0dab06c3e3a6 (log `.orchestrator/runs/mrepo/logs/verify-1795423285.log`)
+- Task MERGED; run DONE
