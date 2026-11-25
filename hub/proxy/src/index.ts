@@ -1,4 +1,5 @@
 import { LIMITS } from "../../protocol/src/api.ts";
+import { staleBefore } from "./write-throttle.ts";
 import { bearerToken } from "./auth.ts";
 import { ComputerRelay } from "./computer-relay.ts";
 import {
@@ -38,7 +39,7 @@ type UserRow = {
   pw_salt: string;
   pw_iter: number;
 };
-type Session = UserRow & { token_hash: string };
+type Session = UserRow & { token_hash: string; last_used_at: string | null };
 type ComputerRow = { id: string; name: string; last_seen_at: string | null };
 
 function json(body: unknown, status = 200): Response {
@@ -110,12 +111,14 @@ async function authenticateSession(request: Request, env: Env): Promise<Session 
   const tokenHash = await sha256Hex(token);
   const now = new Date().toISOString();
   const session = await env.DB.prepare(
-    `SELECT u.id, u.username, u.pw_hash, u.pw_salt, u.pw_iter, s.token_hash
+    `SELECT u.id, u.username, u.pw_hash, u.pw_salt, u.pw_iter, s.token_hash, s.last_used_at
      FROM sessions s JOIN users u ON u.id = s.user_id
      WHERE s.token_hash = ? AND s.expires_at > ?`,
   ).bind(tokenHash, now).first<Session>();
   if (!session) return error("unauthorized", "A valid session token is required.", 401);
-  await env.DB.prepare("UPDATE sessions SET last_used_at = ? WHERE token_hash = ?").bind(now, tokenHash).run();
+  if (!session.last_used_at || session.last_used_at < staleBefore(now)) {
+    await env.DB.prepare("UPDATE sessions SET last_used_at = ? WHERE token_hash = ?").bind(now, tokenHash).run();
+  }
   return session;
 }
 

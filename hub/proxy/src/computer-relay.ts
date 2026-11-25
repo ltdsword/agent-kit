@@ -1,6 +1,7 @@
 import { LIMITS } from "../../protocol/src/api.ts";
 import type { Env } from "./env.ts";
 import { notifyComputerOffline } from "./notify.ts";
+import { staleBefore } from "./write-throttle.ts";
 
 type Frame = Record<string, unknown> & { type: string };
 type Pending = {
@@ -405,14 +406,18 @@ export class ComputerRelay {
       await this.db.prepare(
         `INSERT INTO workspace_index (workspace_id, computer_id, name, status, last_seen_at) VALUES (?, ?, ?, ?, ?)
          ON CONFLICT(workspace_id) DO UPDATE SET computer_id = excluded.computer_id, name = excluded.name,
-         status = excluded.status, last_seen_at = excluded.last_seen_at`,
-      ).bind(item.workspace_id, computerId, item.name, item.status, timestamp).run();
+         status = excluded.status, last_seen_at = excluded.last_seen_at
+         WHERE workspace_index.computer_id IS NOT excluded.computer_id OR workspace_index.name IS NOT excluded.name
+           OR workspace_index.status IS NOT excluded.status OR workspace_index.last_seen_at IS NULL
+           OR workspace_index.last_seen_at < ?`,
+      ).bind(item.workspace_id, computerId, item.name, item.status, timestamp, staleBefore(timestamp)).run();
     }
   }
 
   private async touchComputer(computerId: string): Promise<void> {
-    await this.db.prepare("UPDATE computers SET last_seen_at = ? WHERE id = ?")
-      .bind(new Date().toISOString(), computerId).run();
+    const now = new Date().toISOString();
+    await this.db.prepare("UPDATE computers SET last_seen_at = ? WHERE id = ? AND (last_seen_at IS NULL OR last_seen_at < ?)")
+      .bind(now, computerId, staleBefore(now)).run();
   }
 
   private async clearOfflineAlarm(): Promise<void> {

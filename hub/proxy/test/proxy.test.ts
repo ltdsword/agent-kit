@@ -105,6 +105,21 @@ function runCommand(command: string, args: string[]): Promise<{ code: number | n
   });
 }
 
+async function queryLocalD1<T>(sql: string): Promise<T[]> {
+  const stdout = await new Promise<string>((resolve, reject) => {
+    const child = spawn("npx", ["wrangler", "d1", "execute", "agent-hub", "--local", "--config", "wrangler.jsonc", "--json", "--command", sql], {
+      cwd: proxyRoot, env: localWranglerEnv(), stdio: ["ignore", "pipe", "pipe"],
+    });
+    let output = "";
+    let errors = "";
+    child.stdout.on("data", (chunk: Buffer) => { output += chunk.toString(); });
+    child.stderr.on("data", (chunk: Buffer) => { errors += chunk.toString(); });
+    child.once("error", reject);
+    child.once("exit", (code) => (code === 0 ? resolve(output) : reject(new Error(`d1 execute failed (${code}): ${errors.slice(-500)}`))));
+  });
+  return (JSON.parse(stdout) as Array<{ results: T[] }>)[0]?.results ?? [];
+}
+
 async function waitForHealth(): Promise<void> {
   const deadline = Date.now() + 60_000;
   while (Date.now() < deadline) {
@@ -843,4 +858,45 @@ describe("protocol-v2 proxy", () => {
     expect(webhook.status).toBe(401);
     expect(webhook.headers.get("Access-Control-Allow-Origin")).toBeNull();
   });
+  it("skips D1 writes that would only refresh a timestamp within five minutes", async () => {
+    const target = await register(account.username, account.password, "write throttle computer");
+    const workspaceId = `ws_${"t".repeat(16)}`;
+    const base = Date.now();
+    const at = (offsetMs: number) => new Date(base + offsetMs).toISOString();
+    const hello = (name: string, lastSeenAt: string) => ({
+      type: "hello", protocol: 2, computer_id: target.id, backend_version: "test",
+      workspaces: [{ workspace_id: workspaceId, name, status: "ONLINE", last_seen_at: lastSeenAt }],
+    });
+    const indexRow = async () => (await queryLocalD1<{ name: string; last_seen_at: string }>(
+      `SELECT name, last_seen_at FROM workspace_index WHERE workspace_id = '${workspaceId}'`))[0];
+    const computerSeen = async () => (await queryLocalD1<{ last_seen_at: string | null }>(
+      `SELECT last_seen_at FROM computers WHERE id = '${target.id}'`))[0]?.last_seen_at;
+
+    expect((await sendBackendFrames(target, [hello("throttle", at(0))])).status).toBe(204);
+    expect(await indexRow()).toEqual({ name: "throttle", last_seen_at: at(0) });
+    const firstSeen = await computerSeen();
+    expect(firstSeen).toBeTruthy();
+
+    // Same values, newer timestamp inside the interval: neither row is rewritten.
+    expect((await sendBackendFrames(target, [hello("throttle", at(60_000))])).status).toBe(204);
+    expect(await indexRow()).toEqual({ name: "throttle", last_seen_at: at(0) });
+    expect(await computerSeen()).toBe(firstSeen);
+
+    // A timestamp more than five minutes newer is written.
+    expect((await sendBackendFrames(target, [hello("throttle", at(6 * 60_000))])).status).toBe(204);
+    expect(await indexRow()).toEqual({ name: "throttle", last_seen_at: at(6 * 60_000) });
+
+    // A changed value is written at once.
+    expect((await sendBackendFrames(target, [hello("renamed", at(6 * 60_000 + 1_000))])).status).toBe(204);
+    expect(await indexRow()).toEqual({ name: "renamed", last_seen_at: at(6 * 60_000 + 1_000) });
+
+    // An authenticated request inside the interval does not rewrite the session row.
+    const tokenHash = createHash("sha256").update(account.token).digest("hex");
+    const sessionUsed = async () => (await queryLocalD1<{ last_used_at: string }>(
+      `SELECT last_used_at FROM sessions WHERE token_hash = '${tokenHash}'`))[0]?.last_used_at;
+    const before = await sessionUsed();
+    expect(before).toBeTruthy();
+    expect((await fetch(`${baseUrl}/api/v1/me`, { headers: headers(account.token) })).status).toBe(200);
+    expect(await sessionUsed()).toBe(before);
+  }, 60_000);
 });
