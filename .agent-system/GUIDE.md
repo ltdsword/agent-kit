@@ -329,7 +329,6 @@ mode, commit the kit before the first run, since worktrees are created from a co
 | Model not supported with ChatGPT account | Old client: `codex update` (Part 2, step 1), or choose another model with `agent-kit config` |
 | Worker says `bwrap: ... RTM_NEWADDR: Operation not permitted` | Ubuntu's user-namespace restriction blocks Codex's sandbox: add the AppArmor profile (Part 2, step 2). Never switch workers to `danger-full-access` |
 | Worker's `./gradlew test` fails on a lock file in `~/.gradle` | Gradle's cache must be writable: keep `"writable_dirs": ["~/.gradle"]` in `config.json` (other stacks: README, Safety) |
-| `PreToolUse:Read hook error: scan-secrets.sh not found` | Company managed settings expect the script in the project directory; workspaces get a wrapper that runs the linked repo's script (`agent-kit update` installs it) |
 | `SessionStart hook error: node: not found` | Scheduler-started sessions inherit its `PATH`; start the orchestrator from a shell where `node` is on `PATH` |
 | Worker report says `git add` failed: `index.lock: Read-only file system` | Normal: the sandbox keeps `.git` read-only. The worker leaves changes uncommitted (`committed: false`), `collect` shows `needs_orchestrator_commit`, and Opus runs `commit-task` |
 | A worker sits `blocked` | `hc read --lines 80 <name>` (`herdr agent read <name> --lines 80` only with `herdr.backend: legacy`); tell Opus what to approve or deny |
