@@ -1,0 +1,7 @@
+{"title": "Workspace-mode runs and pchecks minors",
+ "goal": "run create accepts task files that live only in a multi-repo workspace (not committed in the project repo); check start refuses when hc ls fails during running checks; the gate command in check prompts is shell-quoted.",
+ "tasks": [{"id": "T1", "title": "Workspace task files and check start fixes",
+   "summary": "Workspace-mode task-source check verifies files exist in the workspace without git; check_start refuses when agent_list fails for running checks; shlex.join for the gate command; tests.",
+   "depends_on": [], "packet": "gen-tasks/wsrun-scheduler-28-11-26.md",
+   "owned_paths": [".agent-system/scheduler.py", ".agent-system/tests/test_scheduler.py", ".agent-system/tests/test_checks.py"],
+   "acceptance": ["workspace-mode run create accepts workspace-only task files", "in-repo guard tests unchanged", "check_start refuses on hc ls failure; shlex.join used"]}]}
