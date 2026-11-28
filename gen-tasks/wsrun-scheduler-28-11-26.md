@@ -479,3 +479,7 @@ minor: quoting test computes the expected text with shlex.join instead of a lite
 
 - `.agent-system/scripts/verify.sh` exit 0 on agent/integration-wsrun at 0883c5ce30a2 (log `.orchestrator/runs/wsrun/logs/verify-1795859250.log`)
 - Task MERGED; run DONE
+
+## Finished (28/11/26 16:52)
+
+- merged into hub/plan, pushed to origin/hub/plan (decision D2)
