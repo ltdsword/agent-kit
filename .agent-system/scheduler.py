@@ -21,6 +21,7 @@ import os
 import re
 import secrets
 import select
+import shlex
 import shutil
 import subprocess
 import sys
@@ -1346,8 +1347,16 @@ class Scheduler:
                 continue
             rel = packet.as_posix()
             sources.setdefault(rel, packet_path)
-            sources.update({path: self.project_root / path for path in read_first_paths(
-                packet_path.read_text())})
+            read_first = read_first_paths(packet_path.read_text())
+            if self.workspace_mode:
+                for path in read_first:
+                    if not (self.workspace_root / path).is_file():
+                        issues.add(path)
+            else:
+                sources.update({path: self.project_root / path for path in read_first})
+
+        if self.workspace_mode:
+            return sorted(issues)
 
         for rel, source in sorted(sources.items()):
             tracked = git(self.project_root, "ls-tree", "-r", "--name-only", base_sha, "--", rel).stdout.splitlines()
@@ -1399,8 +1408,9 @@ class Scheduler:
             base_sha = git_out(self.project_root, "rev-parse", "--verify", f"{base}^{{commit}}")
             task_source_issues = self._task_source_issues(tasks, base_sha)
             if task_source_issues:
-                raise SchedulerError("task files must be tracked and unmodified at integration base: "
-                                     + ", ".join(task_source_issues))
+                message = ("task files not found in the workspace: " if self.workspace_mode else
+                           "task files must be tracked and unmodified at integration base: ")
+                raise SchedulerError(message + ", ".join(task_source_issues))
             if base == "HEAD":  # the branch checked out in the repo folder; None when detached
                 base_branch = git(self.project_root, "symbolic-ref", "-q", "--short", "HEAD",
                                   check=False).stdout.strip() or None
@@ -1878,7 +1888,10 @@ class Scheduler:
             old = t.get("checks") or {}
             old_space = old.get("space")
             if old.get("status") == "running" and old_space:
-                records = herdr.agent_list() or []
+                records = herdr.agent_list()
+                if records is None:
+                    raise SchedulerError(f"cannot list hc agents; checks for {tid} may still be running "
+                                         "(check status first)")
                 if any(rec and rec.get("workspace_id") == old_space for rec in records):
                     raise SchedulerError(f"checks are already running for {tid}")
             if old_space:
@@ -1912,7 +1925,7 @@ class Scheduler:
                     match = re.match(r"\s*[-*]\s+`([^`]+)`", line)
                     if match:
                         commands.append(match.group(1))
-            commands.append(" ".join(self.cfg["gate"]["post_merge_check"]))
+            commands.append(shlex.join(self.cfg["gate"]["post_merge_check"]))
             commands_text = "\n".join(f"{i}. {command}" for i, command in enumerate(commands, 1))
             snapshot = self._checks_snapshot(t["worktree"])
             ws, pane = herdr.workspace_create(t["worktree"], f"{run_id}-{tid}-checks")

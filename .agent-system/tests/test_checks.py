@@ -239,7 +239,7 @@ class CheckTests(unittest.TestCase):
         self.assertEqual(len(self.hc.prompts), 2)
         self.assertIn(str(self.root / "packets" / "T1.md"), self.hc.prompts[0][1])
         self.assertIn("1. python3 -m pytest -q .agent-system/tests/test_checks.py", self.hc.prompts[1][1])
-        self.assertIn("2. python3 -c print('gate')", self.hc.prompts[1][1])
+        self.assertIn("2. " + S.shlex.join(["python3", "-c", "print('gate')"]), self.hc.prompts[1][1])
 
     def test_long_run_id_produces_distinct_session_names_under_hc_limit(self):
         run_id = "a" * 40
@@ -261,6 +261,28 @@ class CheckTests(unittest.TestCase):
                 self.assertRaisesRegex(S.SchedulerError, "checks.*running"):
             self.s.check_start("r1", "T1")
         self.assertFalse(any(call[0] == "workspace_create" for call in self.hc.calls))
+
+    def test_check_start_refuses_when_agent_list_fails(self):
+        self.make_review()
+        state = self.s.store.load("r1")
+        state["tasks"]["T1"]["checks"] = {"status": "running", "space": "previous-space"}
+        self.s.store.save(state)
+        self.hc.agent_list = lambda: None
+
+        with mock.patch.object(S.shutil, "which", return_value="/usr/bin/claude"), \
+                self.assertRaisesRegex(S.SchedulerError, "cannot list hc agents"):
+            self.s.check_start("r1", "T1")
+
+        self.assertNotIn(("workspace_close", "previous-space"), self.hc.calls)
+
+    def test_check_prompt_shell_quotes_gate_command(self):
+        self.make_review()
+        self.cfg["gate"]["post_merge_check"] = ["bash", "-c", "echo a b"]
+
+        self.start_checks()
+
+        self.assertTrue(self.hc.prompts[1][0].endswith("-test"))
+        self.assertIn("bash -c 'echo a b'", self.hc.prompts[1][1])
 
     def test_check_start_refuses_disabled_or_missing_claude(self):
         self.make_review()

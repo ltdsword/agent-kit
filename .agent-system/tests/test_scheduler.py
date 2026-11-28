@@ -1581,6 +1581,32 @@ class TestWorkspaceMode(WorkspaceBase):
         self.assertEqual(self.s.workspace_root, self.ws.resolve())
         self.assertEqual(self.s.worktree_root, (self.ws / "worktrees").resolve())
 
+    def test_run_create_accepts_task_files_only_in_workspace(self):
+        packet = self.ws / "gen-tasks" / "ws-only.md"
+        packet.parent.mkdir(parents=True)
+        packet.write_text("# Workspace-only task\n\n## Read first\n- `plans/ws-plan.md`\n")
+        plan = self.ws / "plans" / "ws-plan.md"
+        plan.parent.mkdir()
+        plan.write_text("# Workspace-only plan\n")
+        task = self.task("T1", trivial=True)
+        task["packet"] = "gen-tasks/ws-only.md"
+
+        self.s.create_run("r1", [task])
+
+        self.assertEqual(self.repo_status(), "")
+
+    def test_run_create_reports_missing_workspace_read_first(self):
+        packet = self.ws / "gen-tasks" / "ws-only.md"
+        packet.parent.mkdir(parents=True)
+        packet.write_text("# Workspace-only task\n\n## Read first\n- `plans/ws-plan.md`\n")
+        task = self.task("T1", trivial=True)
+        task["packet"] = "gen-tasks/ws-only.md"
+
+        with self.assertRaisesRegex(S.SchedulerError, "not found in the workspace: plans/ws-plan.md"):
+            self.s.create_run("r1", [task])
+
+        self.assertFalse(self.s.store.state_path("r1").exists())
+
     def test_full_run_keeps_repo_clean_and_state_in_workspace(self):
         self.s.create_run("r1", [self.task("T1", trivial=True)])
         self.s.dispatch_ready("r1", launch="herdr")
